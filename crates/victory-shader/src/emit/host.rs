@@ -121,9 +121,14 @@ fn default_adapter_is_warp() -> bool {
             let Ok(adapter) = factory.EnumAdapters1(0) else {
                 return false;
             };
-            adapter
-                .GetDesc1()
-                .is_ok_and(|d| (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0)
+            adapter.GetDesc1().is_ok_and(|d| {
+                (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0
+                    // A machine without a graphics card gives Microsoft's
+                    // basic render driver as its default adapter (a hosted
+                    // test runner), which does not always carry the software
+                    // flag: no hardware device either way.
+                    || (d.VendorId == 0x1414 && d.DeviceId == 0x8c)
+            })
         }
     })
 }
