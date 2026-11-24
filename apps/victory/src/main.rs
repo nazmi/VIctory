@@ -78,7 +78,7 @@ enum Command {
         /// Also create a host D3D12 pipeline for each emitted shader.
         #[arg(long)]
         pipelines: bool,
-        /// Print one line per program and outcome.
+        /// Include runtime hashes and duplicate DXIL containers in the per-program listing.
         #[arg(long)]
         list: bool,
         /// Report only aggregate computed descriptor failure categories.
