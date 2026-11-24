@@ -1201,6 +1201,8 @@ fn make_texture(d: &ResourceDesc, state: u32, clear: *const c_void) -> Option<Ho
         value[0] = pc_format(value[0]);
         value
     });
+    // The format the clear value names, for the failure note below.
+    let clear_format = clear_value.as_ref().map(|v| v[0]);
     let clear_value = clear_value
         .as_ref()
         .map(|v| std::ptr::from_ref(v).cast::<D3D12_CLEAR_VALUE>());
@@ -1282,7 +1284,17 @@ fn make_texture(d: &ResourceDesc, state: u32, clear: *const c_void) -> Option<Ho
             )
         };
         if let Err(e) = made {
-            tracing::warn!(error = %e, desc = ?d, "no host texture");
+            // What the host was asked for: the state the title's maps to
+            // (the failure is often a state the resource's flags forbid) and
+            // the clear value's format.
+            tracing::warn!(
+                error = %e,
+                desc = ?d,
+                initial = format_args!("{initial:#x}"),
+                title_state = format_args!("{state:#x}"),
+                clear_format,
+                "no host texture"
+            );
         }
     }
     let texture = texture?;
