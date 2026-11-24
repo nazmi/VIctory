@@ -65,27 +65,27 @@ small random reads, and nothing shows until they finish. Wait for it rather
 than closing the window. A later launch is faster while Windows still holds
 the files in its cache.
 
-From the repository root, build and check the paths in PowerShell. Replace the
+From the repository root, build and check the paths in Git Bash. Replace the
 example path with the folder containing your title files. Keep that folder
-outside the repository. The environment variable applies to this PowerShell
-session. For persistent local paths, copy `victory.example.toml` to
-`victory.toml` and edit it.
+outside the repository. The environment variable applies to this Bash shell.
+For persistent local paths, copy `victory.example.toml` to `victory.toml` and
+edit it.
 
-```powershell
-$env:VICTORY_GAME_DIR = 'D:\Xbox Titles\My Game'
+```bash
+export VICTORY_GAME_DIR='/d/Xbox Titles/My Game'
 cargo xtask install-hooks                # asset-policy check on every commit
-copy victory.example.toml victory.toml   # then set your paths (outside the repo)
+cp victory.example.toml victory.toml     # then set your paths (outside the repo)
 cargo build --release -p victory
 cargo test --workspace                   # needs no game data
-.\target\release\victory.exe config      # check your paths
-.\target\release\victory.exe run (Join-Path $env:VICTORY_GAME_DIR 'game_scarlett_master.exe') --execute
+./target/release/victory.exe config      # check your paths
+./target/release/victory.exe run "$VICTORY_GAME_DIR/game_scarlett_master.exe" --execute
 ```
 
 Replace the executable name if your title uses a different one. Without
 `VICTORY_GAME_DIR`, pass the full path to the title's executable instead:
 
-```powershell
-.\target\release\victory.exe run 'D:\Xbox Games\GTA VI\title.exe' --execute
+```bash
+./target/release/victory.exe run '/d/Xbox Games/GTA VI/title.exe' --execute
 ```
 
 ### Selecting the Series S profile
@@ -94,8 +94,8 @@ GTA VI chooses its render configuration from the console model, not from the
 display modes VIctory advertises through DXGI. To use the lower-resolution
 profile, pass `--console series-s` when starting the title:
 
-```powershell
-target\release\victory.exe run <game dir>\<the title's exe> --execute --console series-s
+```bash
+./target/release/victory.exe run '<game dir>/<the title's exe>' --execute --console series-s
 ```
 
 In a reported diagnostic run, the Series X profile used a 3840×2160 scene
@@ -155,10 +155,10 @@ If the title presents one or two black frames and exits with `0x80000003`,
 check the archive files before investigating rendering. The loader's import
 report only counts bindings, so it can report zero missing imports with a
 damaged archive. Check the SHA-256 of the files your run actually uses against
-a known-good copy of the **same build**. For example, in PowerShell:
+a known-good copy of the **same build**. For example, in Git Bash:
 
-```powershell
-Get-FileHash -Algorithm SHA256 -LiteralPath 'C:\path\to\title\anim.rpf'
+```bash
+sha256sum '/c/path/to/title/anim.rpf'
 ```
 
 If a hash differs, restore that file from your verified backup and rerun with
@@ -167,8 +167,8 @@ causes. Include the archive verification outcome in your test report.
 
 A release build has no debugging aids. Build them in with
 
-```powershell
-cargo build --profile diag -p victory --features diagnostics   # target\diag\victory.exe
+```bash
+cargo build --profile diag -p victory --features diagnostics   # target/diag/victory.exe
 ```
 
 | Variable | Effect |
