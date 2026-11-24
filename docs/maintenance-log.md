@@ -228,6 +228,65 @@ SHA do not validate later code changes.
   Workflow now requires one Cargo target per worktree. A final fresh-target
   integration gate will replace any ambiguous shared-target evidence.
 
+### Wave 2 integrations: 2026-11-24 (21 PRs)
+
+Same procedure as wave 1. Two integration lessons this wave, both caught by the
+gate rather than by review:
+
+- A PR's branch may be **stacked** on another unmerged PR. #695's "net diff"
+  was 36 files because it sits on the workspace-wide `cargo fmt` change; only
+  its own commit was integrated. Check `git log --oneline <ref> -3` before
+  trusting a net diff.
+- Hand-merging test modules produces **duplicate `mod tests`** and stray
+  braces. #616 added a second `mod tests` to `draw.rs`; the merged tests were
+  folded into the existing module. #651 left an extra brace.
+
+Also fixed in this wave, not from a PR:
+- `dstorage`'s lane-counting test was flaky: twelve other tests create queues
+  through the same process-wide scheduler. They now hold a module lock (as
+  `audio` does). Five consecutive crate runs are clean.
+- The emit-dump policy test now passes the argument `translate::run` gained
+  from #672.
+
+Gate at `3ad7f8ef`: both Clippy commands exit 0; workspace 546 passed,
+11 ignored, 0 failed; policy 175 files; `git diff --check` clean.
+Formatting: 35 files carry pre-existing drift from the baseline. All 70 Rust
+files touched by this branch are rustfmt-clean.
+
+| PR | Subject | Local integration |
+| --- | --- | --- |
+| [#615](https://github.com/Marvisak/VIctory/pull/615) | `GPU: VICTORY_* switches set to 0 are off` | `bf57211f` |
+| [#616](https://github.com/Marvisak/VIctory/pull/616) | `GPU: rectangle draws check their bounds without 32-bit overf` | `1af23c07` |
+| [#617](https://github.com/Marvisak/VIctory/pull/617) | `Shaders: reuse lane guards for unchanged EXEC within a block` | `8042c6b7` |
+| [#618](https://github.com/Marvisak/VIctory/pull/618) | `GPU: align appended input-element offsets like D3D12` | `9c9e46f6` |
+| [#631](https://github.com/Marvisak/VIctory/pull/631) | `Add tests for Console struct functionality` | `a157f3fe` |
+| [#640](https://github.com/Marvisak/VIctory/pull/640) | `Retry failed pipeline cache saves` | `842ed08b` |
+| [#641](https://github.com/Marvisak/VIctory/pull/641) | `GPU: upload partially-resident streamed textures` | `15907832` |
+| [#642](https://github.com/Marvisak/VIctory/pull/642) | `Test: use exact UNORM clear values in enhanced barrier test` | `f5f97470` |
+| [#643](https://github.com/Marvisak/VIctory/pull/643) | `Test: use exact UNORM clear values in aliased texture test` | `d1ba3944` |
+| [#649](https://github.com/Marvisak/VIctory/pull/649) | `Show on-disk file size in victory inspect` | `d0952126` |
+| [#651](https://github.com/Marvisak/VIctory/pull/651) | `GPU: select the readable format and plane for depth/stencil ` | `ce478cfb` |
+| [#652](https://github.com/Marvisak/VIctory/pull/652) | `GPU: use selected mip extents for MSAA resolves` | `6a836d63` |
+| [#659](https://github.com/Marvisak/VIctory/pull/659) | `Shaders: refuse per-lane reads of mesh v5 in v5 writes and a` | `2ece2f86` |
+| [#664](https://github.com/Marvisak/VIctory/pull/664) | `translate: refuse a VICTORY_EMIT_DUMP directory inside the r` | `d350b132` |
+| [#665](https://github.com/Marvisak/VIctory/pull/665) | `xtask: count \x escapes and 0x hex arrays as encoded runs in` | `7fc9f665` |
+| [#668](https://github.com/Marvisak/VIctory/pull/668) | `shader: support f16 omod and saturate/apply modifiers in v_c` | `3ad7f8ef` |
+| [#669](https://github.com/Marvisak/VIctory/pull/669) | `GPU: match a breadcrumb node's name followed by the debug la` | `f6aa6695` |
+| [#672](https://github.com/Marvisak/VIctory/pull/672) | `Merge main after the descriptor-tracking prerequisite landed` | `b746d051` |
+| [#673](https://github.com/Marvisak/VIctory/pull/673) | `Make translate failure examples stable across workers` | `9a6bc8e0` |
+| [#677](https://github.com/Marvisak/VIctory/pull/677) | `Build: thin LTO for release and diag builds` | `de6e76fc` |
+| [#695](https://github.com/Marvisak/VIctory/pull/695) | `gpu: VICTORY_D3D12_WARP=0 opts out of the software adapter` | `958693cf` |
+
+Deferred to the hard pile (contested regions, not attempted):
+- #644 changes `stage.user_data` from a tuple to a `UserDataBind` enum, in
+  `draw.rs`/`pipeline/host.rs`, the same files several pending PRs rewrite.
+- #645 traces multi-term/scaled/phi-joined addresses and collides with the SSA
+  sum cache from #139 across three files (18 conflict hunks).
+- #667 spans nine files and depends on the descriptor-tracking shape #672
+  changed.
+- #703 is a 1,000-line BCPack restructure competing with the merged bucket
+  lookup; its decode equivalence cannot be checked without real BC7 data.
+
 ### Wave 1 integrations: 2026-11-24 (35 PRs)
 
 Complete open-PR inventory re-run before this wave: 444 open PRs (13 drafts)
