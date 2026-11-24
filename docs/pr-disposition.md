@@ -12,14 +12,14 @@ happened to each open PR". Per-worker accounting is in
 
 | Disposition | Count |
 | --- | --- |
-| integrated | 218 |
+| integrated | 223 |
 | rejected | 20 |
 | deferred | 8 |
-| held | 6 |
-| duplicate | 10 |
+| held | 5 |
+| duplicate | 15 |
 | obsolete | 1 |
 | already-present | 1 |
-| not yet reviewed | 793 |
+| not yet reviewed | 784 |
 | total open | 1057 |
 
 A further 18 PRs are in the branch and no longer open upstream;
@@ -27,7 +27,7 @@ they are in [pr-integration-ledger.md](pr-integration-ledger.md).
 
 ## Read this before trusting a row
 
-**793 of 1057 have no reviewed disposition.** They are
+**784 of 1057 have no reviewed disposition.** They are
 listed rather than omitted so that silence is never read as approval.
 
 `integrated` means the change is in **this branch**, reviewed and tested when
@@ -146,8 +146,8 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1640 | `b916a9c0d419` | not yet reviewed | — |  | GPU: constant buffer views of at most 64 KiB |
 | #1639 | `0b7a13c68dfb` | not yet reviewed | — |  | PE: map header RVAs and read TLS data from the headers |
 | #1638 | `ab4a6e645b1e` | not yet reviewed | — |  | [BUNDLE] NVIDIA stack: Impre-visible's tree (wave64 #189 + the world-run list… |
-| #1636 | `40f30be0b52f` | not yet reviewed | — |  | Shaders: GFX10 FLAT offsets ignore bit 11 |
-| #1635 | `6dcf40a4c8b4` | held | — | needs a state check on the indirect argument buffer before an early return is safe | victory-gpu: drop an indirect call before its clamp, not after (1 400-1 750 a… |
+| #1636 | `40f30be0b52f` | duplicate | — | code already correct; its test was added here | Shaders: GFX10 FLAT offsets ignore bit 11 |
+| #1635 | `6dcf40a4c8b4` | integrated | — |  | victory-gpu: drop an indirect call before its clamp, not after (1 400-1 750 a… |
 | #1632 | `8de76a242c98` | not yet reviewed | — |  | [BUNDLE] World-run stack from Impre-visible's report: 12 PRs (#1077 #1175 #52… |
 | #1631 | `e98c81a870db` | not yet reviewed | — |  | Tests: support VICTORY_HLE_PROBE_DLL and GNU delayload in hle-probe |
 | #1630 | `d91d8084750f` | not yet reviewed | — |  | GPU: adapter choice and logging, presenter backoff, a texture-description lad… |
@@ -178,7 +178,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1594 | `3f6910ac3201` | integrated | — |  | CLI: preserve the title entry point exit status |
 | #1593 | `5996b8740156` | not yet reviewed | — |  | [BUNDLE] Shader translation speed: 6 PRs, #139 #288 #369 #947 #1033 #1180, st… |
 | #1592 | `6d174aeeeb93` | integrated | — |  | CLI: list shaders that complete emission |
-| #1590 | `44e0c31d149b` | not yet reviewed | — |  | XMA tests: count frames only in the selected stream |
+| #1590 | `44e0c31d149b` | integrated | — |  | XMA tests: count frames only in the selected stream |
 | #1589 | `60fa5d7ee343` | not yet reviewed | — |  | [BUNDLE] Wave64 compute on 32-lane hosts: #189 merged onto the shader stack, … |
 | #1588 | `c36a25b8b780` | not yet reviewed | — |  | Shaders: single-round v_fma_mix*_f16 and unfused v_mad_f16/v_mac_f16 |
 | #1587 | `4c8eb158d226` | not yet reviewed | — |  | Shaders: ballot divergent-loop masks at reconverged reads (#1498) |
@@ -243,7 +243,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1501 | `5b390eff2c04` | not yet reviewed | — |  | Shaders: DS ops in a program without LDS read 0 and drop writes |
 | #1500 | `23400033753a` | not yet reviewed | — |  | GPU: copy title textures to the host once per change, and check them on sever… |
 | #1497 | `39aa84849ab4` | not yet reviewed | — |  | HLE: fix DirectStorage file sharing and error capture |
-| #1494 | `929e35b394ac` | not yet reviewed | — |  | formats: bound thick 3D mip tail by depth |
+| #1494 | `929e35b394ac` | duplicate | — | already fixed as 42f5b731, with a stricter predicate | formats: bound thick 3D mip tail by depth |
 | #1493 | `cc0f47a4f4e5` | not yet reviewed | — |  | Shaders: key immediate samplers by comparison mode |
 | #1492 | `ea33d12b3f70` | not yet reviewed | — |  | [BUNDLE] Shader instruction lowering: 21 PRs, #98 #156 #162 #168 #169 #368 #3… |
 | #1491 | `28c91b91b015` | not yet reviewed | — |  | Shaders: the lane-condition search keeps the condition sets no lane meets |
@@ -258,7 +258,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1480 | `b32a5d593d46` | not yet reviewed | — |  | Shaders: unpack a16 image coordinates and gradients after whole 32-bi… |
 | #1478 | `19052138d065` | not yet reviewed | — |  | Shaders: lower VOP3 integer clamp saturation for add/sub ops |
 | #1477 | `2286e038cc60` | not yet reviewed | — |  | Shaders: key immediate sampler slots by descriptor and comparison mode |
-| #1476 | `711d651ccab7` | not yet reviewed | — |  | Shaders: precompute MD5 round constants and avoid per-block Vec in md… |
+| #1476 | `711d651ccab7` | integrated | — |  | Shaders: precompute MD5 round constants and avoid per-block Vec in md… |
 | #1475 | `d8897b763962` | not yet reviewed | — |  | HLE: clear blocked DNS lookup results |
 | #1474 | `1e923ad46234` | integrated | — |  | Shaders: set WAVE_OPS feature flag when lane_bit emits waveGetLaneIndex |
 | #1473 | `826a97fe403d` | not yet reviewed | — |  | Shaders: track per-lane export state across mixed pixel-shader joins |
@@ -437,7 +437,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1271 | `25d9e2add72c` | not yet reviewed | — |  | Shaders: infer heap UAVs and mark glc UAV handles globally coherent |
 | #1270 | `77eafaa11014` | not yet reviewed | — |  | Shaders: lower v_cndmask_b32 selects on uniform scalar masks |
 | #1269 | `8c3092f43ca3` | not yet reviewed | — |  | Shaders: handle dead mask dwords at data joins and wave-uniform s_bcnt1 SCC |
-| #1268 | `00c6c961f321` | not yet reviewed | — |  | GPU: skip empty command list submissions |
+| #1268 | `00c6c961f321` | duplicate | — | host half already at host.rs:602 from f924a1fa | GPU: skip empty command list submissions |
 | #1267 | `4cefaac2be47` | not yet reviewed | — |  | GPU: keep only the bytes shaders may write, each once per submission |
 | #1266 | `f14fdfba020b` | not yet reviewed | — |  | Tests: keep the D3D12 pipeline smoke check portable under Wine |
 | #1265 | `25e58682283a` | not yet reviewed | — |  | GPU: VICTORY_WIDE_SCISSOR widens a scissor to its viewport (a diagnostic) |
@@ -639,7 +639,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #993 | `64b80c310941` | integrated | `c87e75a3` | in the branch | Formats: share immutable texture swizzle tables |
 | #991 | `ab3f3fcd5ee1` | not yet reviewed | — |  | merge overlapping gpu write-back ranges and coalesce watch opens |
 | #990 | `8d67fa5b00eb` | not yet reviewed | — |  | Shaders: hardware test for v_cvt_f16_u16 and v_cvt_f16_i16 |
-| #988 | `089bd768d5f1` | not yet reviewed | — |  | GPU: say when a fault lies past the end of its title memory copy |
+| #988 | `089bd768d5f1` | integrated | — |  | GPU: say when a fault lies past the end of its title memory copy |
 | #986 | `d8d7c2c0e19b` | rejected | — | reads title memory at submit, missing an earlier same-list UAV write | GPU: copy unaligned buffer SRVs into element-aligned scratch memory |
 | #985 | `60cf1d69616c` | not yet reviewed | — |  | GPU frame test: tolerate a late wake-up instead of requiring consecutive flips |
 | #984 | `501164509d22` | not yet reviewed | — |  | Shaders: split flat byte-offset accesses to structured buffers |
@@ -676,7 +676,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #934 | `95cefdaca5f4` | integrated | `e28ee842` | in the branch | GPU tests: isolate write-watch fixture from reused addresses |
 | #933 | `9914ea4be88a` | not yet reviewed | — |  | GPU: report allocated mips from GetDesc |
 | #929 | `2b8756d301c4` | not yet reviewed | — |  | Audio: a silent playback endpoint when the host has no render device |
-| #928 | `13185f50ac09` | not yet reviewed | — |  | GPU: GetDeviceRemovedReason reports the host device's state instead of E_NOTI… |
+| #928 | `13185f50ac09` | integrated | — |  | GPU: GetDeviceRemovedReason reports the host device's state instead of E_NOTI… |
 | #927 | `4ce99c162413` | not yet reviewed | — |  | GameInput: held keys are reported in the order they were pressed, as document… |
 | #926 | `3cdbc0cabbe9` | not yet reviewed | — |  | Shaders: 16-bit compares read the low halves whatever op_sel says, as RDNA2 d… |
 | #925 | `0d2bcd66fcbf` | not yet reviewed | — |  | contribute: depth bounds + waterfall queries + XNetworking (#849 #853 #851) |
@@ -812,11 +812,11 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #531 | `26912a953541` | duplicate | — | already local as 2902ad00 | HLE: check null and invalid handle in display deferral |
 | #530 | `951ceb1eb8da` | integrated | `2f0a1740` | in the branch | GPU diagnostics: show one of the title's render targets in the window |
 | #529 | `609c74fbd59a` | duplicate | — | already local as 3a957618 | PE: preallocate symbol_key in CodeViewInfo |
-| #528 | `33495ff068e0` | not yet reviewed | — |  | HLE: validate null pointer in ApuIsVirtualAddressValid and overflow in ApuAll… |
+| #528 | `33495ff068e0` | duplicate | — | already integrated as 68ae6861 | HLE: validate null pointer in ApuIsVirtualAddressValid and overflow in ApuAll… |
 | #526 | `d46727fe79d9` | not yet reviewed | — |  | Linux: a native runtime, no Wine |
 | #524 | `53282a65ad88` | not yet reviewed | — |  | Runtime: declare title-facing functions extern "win64" |
 | #523 | `001226617527` | not yet reviewed | — |  | Build: compile and test the workspace on Linux again |
-| #522 | `882d4f0f5fbe` | not yet reviewed | — |  | HLE: validate null package identifier in XPackage methods |
+| #522 | `882d4f0f5fbe` | duplicate | — | already integrated as b26e3c22 | HLE: validate null package identifier in XPackage methods |
 | #521 | `75b1b8ff6550` | not yet reviewed | — |  | Shaders: model the compute thread-group info SGPR's wave count |
 | #519 | `53f77dd92a50` | not yet reviewed | — |  | HLE: validate pointers in XGameUi text entry result and size getters |
 | #517 | `bab15db5c7a1` | not yet reviewed | — |  | CLI: report incomplete shader directory scans |
