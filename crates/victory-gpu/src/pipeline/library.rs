@@ -12,13 +12,18 @@
 //!    graphics state); the next run hands those to the workers at
 //!    creation, during loading.
 //!
-//! All library calls are serialised: the interface does not promise that
-//! stores, loads and serialising may overlap.
+//! The host's library is thread-safe and synchronises itself, except that
+//! loads of one pipeline must not overlap (CreatePipelineLibrary, "Thread
+//! Safety"): loads and stores take a lock for their name only, so workers
+//! load in parallel and a save does not stop them. One lock over every
+//! call made loads (which take up to seconds each) run one at a time, and
+//! workers waited seconds for it.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::core::{HSTRING, Interface, PCWSTR};
@@ -41,20 +46,22 @@ struct Library {
     /// The blob the library was made from: it must outlive the library.
     _blob: Vec<u8>,
     /// Pipelines stored since the last save.
-    added: u64,
+    added: AtomicU64,
 }
 
-// SAFETY: D3D12 objects are free-threaded; every call is made under the
-// mutex that holds the library.
+// SAFETY: the library is free-threaded (calls that must not overlap take a
+// lock for their name); the blob is only read.
 unsafe impl Send for Library {}
+// SAFETY: as above.
+unsafe impl Sync for Library {}
 
 const LIBRARY_FILE: &str = "host-pipelines.bin";
 const EARLY_FILE: &str = "early-pipelines.txt";
 /// Title pipelines listed for an early start, at most.
 const EARLY_MAX: usize = 8192;
 
-fn library() -> Option<&'static Mutex<Library>> {
-    static LIBRARY: OnceLock<Option<Mutex<Library>>> = OnceLock::new();
+fn library() -> Option<&'static Library> {
+    static LIBRARY: OnceLock<Option<Library>> = OnceLock::new();
     LIBRARY
         .get_or_init(|| {
             let device = crate::host::host()?.device.cast::<ID3D12Device1>().ok()?;
@@ -66,7 +73,7 @@ fn library() -> Option<&'static Mutex<Library>> {
             if library.is_none() {
                 tracing::warn!("no host pipeline library: pipelines are not kept");
             }
-            library.map(Mutex::new)
+            library
         })
         .as_ref()
 }
@@ -89,7 +96,7 @@ fn open(device: &ID3D12Device1, blob: Vec<u8>) -> Option<Library> {
                 return Some(Library {
                     library,
                     _blob: blob,
-                    added: 0,
+                    added: AtomicU64::new(0),
                 });
             }
             Err(e) => {
@@ -103,7 +110,7 @@ fn open(device: &ID3D12Device1, blob: Vec<u8>) -> Option<Library> {
     Some(Library {
         library,
         _blob: Vec::new(),
-        added: 0,
+        added: AtomicU64::new(0),
     })
 }
 
@@ -134,58 +141,126 @@ pub(crate) fn pipeline(
         MADE.fetch_add(1, Ordering::Relaxed);
         return create();
     };
-    if let Ok(pso) = load(
-        &library.lock().unwrap_or_else(|e| e.into_inner()).library,
-        PCWSTR(wide.as_ptr()),
-    ) {
+    let loaded = {
+        let _name = lock_name(name);
+        load(&library.library, PCWSTR(wide.as_ptr()))
+    };
+    if let Ok(pso) = loaded {
         LOADED.fetch_add(1, Ordering::Relaxed);
         return Ok(pso);
     }
-    // Compiled outside the lock: compiles take up to seconds.
+    // Compiled outside the locks: compiles take up to seconds.
     let pso = create()?;
     MADE.fetch_add(1, Ordering::Relaxed);
-    let mut l = library.lock().unwrap_or_else(|e| e.into_inner());
+    let _name = lock_name(name);
+    let _store = STORES.read().unwrap_or_else(|e| e.into_inner());
     // SAFETY: a live pipeline; a name already stored (a description that
     // differs) is refused, which leaves the library as it was.
-    if unsafe { l.library.StorePipeline(PCWSTR(wide.as_ptr()), &pso) }.is_ok() {
-        l.added += 1;
+    if unsafe { library.library.StorePipeline(PCWSTR(wide.as_ptr()), &pso) }.is_ok() {
+        library.added.fetch_add(1, Ordering::Relaxed);
     }
     Ok(pso)
 }
 
+/// Held shared by stores and alone by a save: the serialised size must not
+/// change between asking for it and serialising. Loads do not change it.
+static STORES: RwLock<()> = RwLock::new(());
+
+/// The lock for loads and stores of pipelines named `name` (a hex hash):
+/// one of a few, so that pipelines of one name never load at once.
+fn lock_name(name: &str) -> MutexGuard<'static, ()> {
+    static NAMES: [Mutex<()>; 64] = [const { Mutex::new(()) }; 64];
+    let stripe = name
+        .bytes()
+        .fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b.into()))
+        % NAMES.len();
+    NAMES[stripe].lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The first wait between periodic saves; it doubles up to `SAVE_MAX`.
+const SAVE_EVERY: Duration = Duration::from_secs(20);
+const SAVE_MAX: Duration = Duration::from_secs(160);
+/// A periodic save waits at least this many times as long as the last took
+/// (the library grows past a gigabyte; serialising it holds back stores,
+/// and writing it takes seconds of disk).
+const COST_FACTOR: u32 = 30;
+
+/// The wait before the next periodic save, after `saves` of them, the last
+/// of which took `cost`.
+fn save_interval(saves: u32, cost: Duration) -> Duration {
+    let backoff = SAVE_EVERY.saturating_mul(1 << saves.min(16)).min(SAVE_MAX);
+    backoff.max(
+        cost.saturating_mul(COST_FACTOR)
+            .min(Duration::from_secs(600)),
+    )
+}
+
+struct Schedule {
+    /// When a periodic save may run next (`None`: at once).
+    next: Option<Instant>,
+    saves: u32,
+}
+
 /// Writes the library and the early list if pipelines were added since the
-/// last save and `SAVE_EVERY` has passed (or `now`).
+/// last save and the periodic wait has passed (or `now`, at the end of a
+/// run). A periodic save while another is running is skipped: workers call
+/// this after every pipeline and must not wait for a save.
 pub(crate) fn save(now: bool) {
-    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-    const SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
+    // Held over serialisation and both writes, so overlapping saves cannot
+    // replace files under each other.
+    static SCHEDULE: Mutex<Schedule> = Mutex::new(Schedule {
+        next: None,
+        saves: 0,
+    });
     let (Some(dir), Some(library)) = (DIR.get(), library()) else {
         return;
     };
-    // Hold this lock through both writes so saves cannot share temporary paths.
-    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-    if !now && last.is_some_and(|t| t.elapsed() < SAVE_EVERY) {
+    let mut schedule = match SCHEDULE.try_lock() {
+        Ok(s) => s,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) if now => {
+            SCHEDULE.lock().unwrap_or_else(|e| e.into_inner())
+        }
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    if !now && schedule.next.is_some_and(|t| Instant::now() < t) {
         return;
     }
-    *last = Some(std::time::Instant::now());
-    let used_changed = USED_CHANGED.swap(false, Ordering::Relaxed);
-    let (blob, added) = {
-        let l = library.lock().unwrap_or_else(|e| e.into_inner());
-        if l.added == 0 && !used_changed {
-            return;
+    let started = Instant::now();
+    let wait = match save_files(dir, library) {
+        Some(()) => {
+            schedule.saves += 1;
+            save_interval(schedule.saves - 1, started.elapsed())
         }
-        // SAFETY: a buffer of the size the library asks for.
+        None => SAVE_EVERY,
+    };
+    schedule.next = Some(Instant::now() + wait);
+}
+
+/// Writes the library and the early list if anything was added; `Some`
+/// if they were written.
+fn save_files(dir: &std::path::Path, library: &Library) -> Option<()> {
+    let (blob, saved_additions, used_changed) = {
+        let _stores = STORES.write().unwrap_or_else(|e| e.into_inner());
+        let added = library.added.load(Ordering::Relaxed);
+        let used_changed = USED_CHANGED.swap(false, Ordering::Relaxed);
+        if added == 0 && !used_changed {
+            return None;
+        }
+        // SAFETY: a buffer of the size the library asks for, which no
+        // store changes meanwhile.
         let bytes = unsafe {
-            let mut bytes = vec![0u8; l.library.GetSerializedSize()];
-            l.library.Serialize(&mut bytes).map(|()| bytes)
+            let mut bytes = vec![0u8; library.library.GetSerializedSize()];
+            library.library.Serialize(&mut bytes).map(|()| bytes)
         };
         match bytes {
-            Ok(bytes) => (bytes, l.added),
+            Ok(bytes) => (bytes, added, used_changed),
             Err(e) => {
                 if used_changed {
                     USED_CHANGED.store(true, Ordering::Relaxed);
                 }
                 tracing::warn!(error = %e, "host pipeline library not serialised");
-                return;
+                return None;
             }
         }
     };
@@ -201,8 +276,9 @@ pub(crate) fn save(now: bool) {
         .and_then(|()| write_atomically(&dir.join(EARLY_FILE), used.join("\n").as_bytes()));
     match written {
         Ok(()) => {
-            // Keep any pipelines added while we were writing this snapshot.
-            library.lock().unwrap_or_else(|e| e.into_inner()).added -= added;
+            // Pipelines stored while we were writing this snapshot count for
+            // the next save.
+            library.added.fetch_sub(saved_additions, Ordering::Relaxed);
             tracing::info!(
                 bytes = blob.len(),
                 early = used.len(),
@@ -211,12 +287,14 @@ pub(crate) fn save(now: bool) {
                 started_early = EARLY.load(Ordering::Relaxed),
                 "host pipeline library saved"
             );
+            Some(())
         }
         Err(e) => {
             if used_changed {
                 USED_CHANGED.store(true, Ordering::Relaxed);
             }
             tracing::warn!(error = %e, "host pipeline library not saved");
+            None
         }
     }
 }
@@ -326,5 +404,18 @@ mod tests {
         let final_bytes = std::fs::read(&target).unwrap();
         assert_eq!(final_bytes.len(), 4096);
         assert!(final_bytes.iter().all(|&b| b == final_bytes[0]));
+    }
+
+    #[test]
+    fn periodic_saves_back_off_and_follow_their_cost() {
+        let cheap = Duration::from_millis(100);
+        let waits: Vec<u64> = (0..6).map(|n| save_interval(n, cheap).as_secs()).collect();
+        assert_eq!(waits, [20, 40, 80, 160, 160, 160]);
+        assert_eq!(save_interval(u32::MAX, cheap), SAVE_MAX);
+        // A save of 4 s waits 2 minutes even at first.
+        assert_eq!(
+            save_interval(0, Duration::from_secs(4)),
+            Duration::from_secs(120)
+        );
     }
 }
