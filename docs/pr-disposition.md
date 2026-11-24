@@ -12,13 +12,13 @@ happened to each open PR". Per-worker accounting is in
 
 | Disposition | Count |
 | --- | --- |
-| integrated | 186 |
-| rejected | 18 |
+| integrated | 190 |
+| rejected | 19 |
 | deferred | 9 |
 | held | 5 |
 | duplicate | 1 |
 | already-present | 1 |
-| not yet reviewed | 823 |
+| not yet reviewed | 818 |
 | total open | 1043 |
 
 A further 16 PRs are in the branch and no longer open upstream;
@@ -26,7 +26,7 @@ they are in [pr-integration-ledger.md](pr-integration-ledger.md).
 
 ## Read this before trusting a row
 
-**823 of 1043 have no reviewed disposition.** They are
+**818 of 1043 have no reviewed disposition.** They are
 listed rather than omitted so that silence is never read as approval.
 
 `integrated` means the change is in **this branch**, reviewed and tested when
@@ -44,19 +44,19 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1732 | `3dc6c12410c9` | not yet reviewed | — |  | GPU: f32_to_half keeps NaN and rounds normals to nearest even (#843) |
 | #1731 | `64317c5135a4` | not yet reviewed | — |  | GPU: occlusion queries measure on the host instead of reporting every draw vi… |
 | #1730 | `87a93820d96d` | not yet reviewed | — |  | translate: --cache DIR fills the runtime's shader cache |
-| #1729 | `23a5a6a6feca` | not yet reviewed | — |  | XGameSave: a stray or unreadable version folder never costs the save (#870) |
+| #1729 | `23a5a6a6feca` | rejected | — | rejects v0 and returns an older readable version where HEAD refuses an unreadable newest one: a silent rollback, and it breaks two integrated tests | XGameSave: a stray or unreadable version folder never costs the save (#870) |
 | #1728 | `ba0494701a6f` | not yet reviewed | — |  | Pipelines: VICTORY_PIPELINE_WORKERS sets the worker count |
 | #1727 | `6cd8375a23d5` | not yet reviewed | — |  | GPU: 1D textures are 2D on the host, one texel high (GBV id=940) |
-| #1726 | `d09f3aa86c4e` | not yet reviewed | — |  | DirectStorage: read a page list naming page 0 again before failing its request |
+| #1726 | `d09f3aa86c4e` | integrated | `64fa2831` | in the branch | DirectStorage: read a page list naming page 0 again before failing its request |
 | #1725 | `a6365c376b37` | not yet reviewed | — |  | GPU: placed copies take the bytes a GPU write leaves in their memory |
 | #1724 | `674f3b9118d1` | not yet reviewed | — |  | Make the VIctory game window borderless by default |
 | #1723 | `4bfa21253ce6` | not yet reviewed | — |  | GPU diagnostics: pipeline statistics per noted command with VICTORY_GPU_TIMING |
 | #1722 | `ad06ac715e28` | not yet reviewed | — |  | GPU: the host pipeline library works under Wine (null blob for an empty libra… |
 | #1721 | `619a8e8b158c` | not yet reviewed | — |  | Launcher: a GUI that checks the game directory and runs victory.exe |
-| #1720 | `2f61f7c0fc27` | not yet reviewed | — |  | report apu heap allocations that fail |
-| #1719 | `771467458b5d` | not yet reviewed | — |  | DirectStorage: clear the factory out pointer on failure |
+| #1720 | `2f61f7c0fc27` | integrated | `d101c0b0` | in the branch | report apu heap allocations that fail |
+| #1719 | `771467458b5d` | integrated | `b7e3689c` | in the branch | DirectStorage: clear the factory out pointer on failure |
 | #1718 | `c0228d939ec1` | not yet reviewed | — |  | victory-shader: mask mesh primitive vertex indices to 9 bits (drop edge flags) |
-| #1717 | `35fb57d417bd` | not yet reviewed | — |  | HLE: the retail console ID has the documented dotted form |
+| #1717 | `35fb57d417bd` | integrated | `105fbc6d` | in the branch | HLE: the retail console ID has the documented dotted form |
 | #1716 | `758bf7fbc6a3` | not yet reviewed | — |  | victory-shader: fold constants and eliminate dead pure ops in bitcode |
 | #1715 | `645bd5c0e200` | not yet reviewed | — |  | FidelityFX: DLSS frame generation on frames the title upscales (stacked on #1… |
 | #1712 | `57c25604fa37` | not yet reviewed | — |  | victory-shader: support line-topology mesh shaders |
