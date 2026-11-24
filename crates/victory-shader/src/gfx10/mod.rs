@@ -415,6 +415,32 @@ mod tests {
     }
 
     #[test]
+    fn the_cached_name_is_the_table_entry() {
+        let code = [
+            0xBE80_03FF,
+            0x3F80_0000, // s_mov_b32 s0, literal
+            0x0600_0000, // v_add_f32 v0, s0, v0
+            0xD54B_0000,
+            0x03FE_0000,
+            0x4000_0000, // v_fma_f32 with a literal src2
+            0xF080_0F0A,
+            0,
+            0, // image_sample (2D) with one extra address dword
+            0xF800_080F,
+            0, // exp
+            S_ENDPGM,
+        ];
+        // The name is resolved once, from the fields it derives from: after
+        // that it is a field, and must still be the table's answer for the
+        // instruction's own encoding and opcode.
+        let program = decode(&bytes(&code)).unwrap();
+        assert_eq!(program.len(), 6);
+        for i in program {
+            assert_eq!(i.name(), name(i.encoding, i.opcode), "{:#x}", i.offset);
+        }
+    }
+
+    #[test]
     fn follows_branches_and_skips_data() {
         let code = [
             sopp(0x04, 1), // s_cbranch_scc0 -> 8
