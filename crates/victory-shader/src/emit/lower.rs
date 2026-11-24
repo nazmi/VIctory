@@ -1933,7 +1933,9 @@ impl<'a> Lower<'a> {
 
     /// The median of three. With a NaN among them the hardware gives the
     /// minimum of the three instead (the host's minimum skips NaNs, so that
-    /// is the smallest number among them).
+    /// is the smallest number among them). The NaN test reads the bits: as
+    /// float compares (`fcmp uno`), NVIDIA's compiler folded it away and gave
+    /// the median, 2 for `med3(1, 2, NaN)` where the hardware gives 1.
     fn med3(&mut self, a: V, b: V, third: V) -> V {
         let c = self.cur;
         let lo = self.binary(36, a, b);
@@ -1941,10 +1943,22 @@ impl<'a> Lower<'a> {
         let t = self.binary(36, hi, third);
         let median = self.binary(35, lo, t);
         let least = self.binary(36, lo, third);
-        let ab = self.s.m.cmp(c, pred::UNO, a, b);
-        let nan3 = self.s.m.cmp(c, pred::UNO, third, third);
-        let nan = self.s.m.bin(c, Bin::Or, ab, nan3);
+        let (na, nb, nc) = (self.nan_bits(a), self.nan_bits(b), self.nan_bits(third));
+        let nan = self.s.m.bin(c, Bin::Or, na, nb);
+        let nan = self.s.m.bin(c, Bin::Or, nan, nc);
         self.s.m.select(c, nan, least, median)
+    }
+
+    /// Whether the f32 `x` is a NaN, from its bits (exponent all ones,
+    /// mantissa not zero): an integer compare the host's compiler cannot
+    /// fold the way it can a float self-compare.
+    fn nan_bits(&mut self, x: V) -> V {
+        let c = self.cur;
+        let bits = self.as_int(x);
+        let abs = self.s.m.i32(0x7FFF_FFFF);
+        let inf = self.s.m.i32(0x7F80_0000);
+        let magnitude = self.s.m.bin(c, Bin::And, bits, abs);
+        self.s.m.cmp(c, pred::IUGT, magnitude, inf)
     }
 
     /// `a - floor(a)`, which on the hardware never reaches 1.0: where it
