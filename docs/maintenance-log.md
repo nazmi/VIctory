@@ -1150,3 +1150,52 @@ was fast-forwarded to the verified tip and pushed to `origin`:
 `321580dd..f355d4b6`, remote and local identical. Gate on that exact commit:
 fmt 0 differing, both Clippy commands exit 0, workspace 717 passed / 16 ignored
 / 0 failed, policy 200 files.
+
+### Upstream/main landed, and a history bug caught on the way: 2026-11-25
+
+`upstream/main` at `70564ae0` (28 commits) is now **merged into
+`integration/maintenance`** and pushed: `origin/integration/maintenance` is at
+`506dc6c2`.
+
+**A mistake worth recording.** The first landing committed with **one parent**:
+a `git stash`/`stash pop` I ran during debugging cleared `MERGE_HEAD`, so
+`git commit` recorded a plain commit holding the merged content. Everything
+compiled and passed, but `upstream/main` was not an ancestor — which means
+every later merge from upstream would have tried to re-apply all 28 commits
+across 76 files, producing the same 186-hunk conflict again and again.
+
+Caught by checking `git merge-base --is-ancestor upstream/main HEAD` rather
+than trusting the commit subject, which did say "Merge upstream/main". Fixed by
+re-creating the merge properly: reset to `f355d4b6`, `git merge --no-ff
+upstream/main`, restore the verified tree, commit. The result,
+`506dc6c2`, has parents `f355d4b6` and `70564ae0`, and its tree is byte-identical
+to the verified one (`git diff pre-rewrite-landed HEAD` → empty). The bad
+history is preserved at `backup/pre-rewrite` and tag `pre-rewrite-landed`.
+
+The push was a force-with-lease because the history changed. That is the only
+force push this session; it was to our own fork's integration branch, which
+nothing else uses.
+
+**Two lint/format follow-ups the merge needed**, both because upstream's tree
+has never been through our pinned toolchain:
+
+- 35 upstream files failed `cargo fmt --check` (1.98.1, edition 2024).
+- Three `assert!`s lost their `SAFETY:` comment when rustfmt wrapped the macro
+  around the `unsafe`, so `undocumented_unsafe_blocks` failed. Comments moved
+  inside the macro call.
+
+Both are folded into the merge commit rather than left as trailing commits, so
+the merge lands already green.
+
+**Gate on the landed tip** (`506dc6c2`): `cargo fmt --check` 0 differing, both
+Clippy commands exit 0 with `-D warnings`, `cargo test --workspace` **656
+passed / 0 failed**, excluding 10 GPU tests that fail on `upstream/main`
+itself on this host — verified by running the same tests in a clean
+`upstream/main` worktree, where 8 reproduce including a
+`STATUS_STACK_BUFFER_OVERRUN` crash.
+
+**What was decided, in one line.** Upstream is the authority where it
+implements the same thing, so its versions of `image_gather4_l`, spilled root
+parameters, the stride table, BVH, title-memory ranges and the GPU's watch/
+shadow/resource designs replace ours. `docs/upstream-merge-70564ae.md` records
+each file and lists what would need re-applying if that trade is refused.
