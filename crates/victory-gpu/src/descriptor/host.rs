@@ -536,6 +536,26 @@ fn buffer_srv(
         return None;
     }
     buffer.FirstElement += offset / element;
+    // A view past its host copy's end is an invalid call (the debug layer
+    // removes the device; drivers may fault): none past the end, the rest
+    // cut to fit.
+    // SAFETY: a live buffer.
+    let capacity = unsafe { shadow.buffer.GetDesc() }.Width / element;
+    if buffer.FirstElement >= capacity {
+        let first = buffer.FirstElement;
+        once!(first, capacity, "buffer view past the end of its host copy");
+        return None;
+    }
+    if buffer.FirstElement + u64::from(buffer.NumElements) > capacity {
+        buffer.NumElements = (capacity - buffer.FirstElement) as u32;
+    }
+    // A view of no elements is an invalid call too (the title's own record
+    // count can be 0): null, which reads 0 and drops writes.
+    if buffer.NumElements == 0 {
+        let first = buffer.FirstElement;
+        once!(first, "buffer view of no elements");
+        return None;
+    }
     let host = host()?;
     // SAFETY: a live buffer and a slot of our heap.
     unsafe {
@@ -582,6 +602,26 @@ fn buffer_uav(
         return None;
     }
     buffer.FirstElement += offset / element;
+    // A view past its host copy's end is an invalid call (the debug layer
+    // removes the device; drivers may fault): none past the end, the rest
+    // cut to fit.
+    // SAFETY: a live buffer.
+    let capacity = unsafe { shadow.buffer.GetDesc() }.Width / element;
+    if buffer.FirstElement >= capacity {
+        let first = buffer.FirstElement;
+        once!(first, capacity, "buffer view past the end of its host copy");
+        return None;
+    }
+    if buffer.FirstElement + u64::from(buffer.NumElements) > capacity {
+        buffer.NumElements = (capacity - buffer.FirstElement) as u32;
+    }
+    // A view of no elements is an invalid call too (the title's own record
+    // count can be 0): null, which reads 0 and drops writes.
+    if buffer.NumElements == 0 {
+        let first = buffer.FirstElement;
+        once!(first, "buffer view of no elements");
+        return None;
+    }
     buffer.CounterOffsetInBytes = 0;
     let host = host()?;
     // SAFETY: a live buffer and a slot of our heap.
@@ -999,6 +1039,49 @@ fn null_view(at: D3D12_CPU_DESCRIPTOR_HANDLE) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A buffer view of no elements, which the host refuses (removing the
+    /// device), makes a null slot; one of an element is made as usual.
+    #[test]
+    fn buffer_views_of_no_elements_are_null() {
+        let Some(host) = host() else {
+            return; // no host GPU
+        };
+        let Some(heap) = HostHeap::new(false, 4) else {
+            return;
+        };
+        // A title buffer the view's memory lies in (its copy is made on the
+        // host; title memory is not read).
+        let (address, len) = (0x7e00_0000_0000_u64, 0x1000_u64);
+        crate::shadow::register(usize::MAX - 1, address, len);
+        let mut resource = [0u32; 14];
+        resource[0] = 1; // a buffer
+        resource[4] = len as u32;
+        let placed = |unordered: bool, elements: u32| {
+            let mut desc = [0u32; 16];
+            desc[1] = 1; // buffer dimension
+            if unordered {
+                // NumElements, StructureByteStride
+                (desc[4], desc[5]) = (elements, 16);
+            } else {
+                desc[2] = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                (desc[6], desc[7]) = (elements, 16);
+            }
+            (desc[10], desc[11]) = (address as u32, (address >> 32) as u32);
+            View::Placed(unordered, resource, desc)
+        };
+        let kept = |index: u32| heap.kept.lock().unwrap()[index as usize].is_some();
+        for unordered in [false, true] {
+            heap.make_at(0, &placed(unordered, 1));
+            assert!(kept(0), "a view of an element (unordered: {unordered})");
+            heap.make_at(1, &placed(unordered, 0));
+            assert!(!kept(1), "a view of no elements (unordered: {unordered})");
+            // SAFETY: a plain device query.
+            let removed = unsafe { host.device.GetDeviceRemovedReason() };
+            assert!(removed.is_ok(), "device removed: {removed:?} (unordered: {unordered})");
+        }
+        crate::shadow::unregister(usize::MAX - 1, address);
+    }
 
     /// A null texture UAV keeps the title's dimension (3D for the world's
     /// wind field), and is 2D when the title names none.
