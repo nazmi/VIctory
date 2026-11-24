@@ -1401,17 +1401,10 @@ impl HostList {
 
     /// Moves a shadow buffer to `wanted` in this list. Read-only states are
     /// combined when a buffer is used for more than one purpose in a draw.
-    pub(crate) fn buffer_state(
-        &self,
-        shadow: &std::sync::Arc<crate::shadow::Shadow>,
-        wanted: u32,
-    ) {
+    pub(crate) fn buffer_state(&self, shadow: &std::sync::Arc<crate::shadow::Shadow>, wanted: u32) {
         let key = std::sync::Arc::as_ptr(shadow) as usize;
         let next = {
-            let mut states = self
-                .buffer_states
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut states = self.buffer_states.lock().unwrap_or_else(|e| e.into_inner());
             match states.entry(key) {
                 std::collections::hash_map::Entry::Vacant(v) => {
                     v.insert((wanted, wanted, shadow.clone()));
@@ -1463,10 +1456,7 @@ impl HostList {
                 })
             })
             .collect();
-        let states = self
-            .buffer_states
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let states = self.buffer_states.lock().unwrap_or_else(|e| e.into_inner());
         barriers.extend(states.values().filter_map(|(first, last, shadow)| {
             let real = shadow.state.swap(*last, Ordering::Relaxed);
             (real != *first).then(|| {
