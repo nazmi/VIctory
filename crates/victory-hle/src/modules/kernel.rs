@@ -715,12 +715,12 @@ mod tests {
         let module = LoadLibraryA(c"gameinput.dll".as_ptr().cast());
         assert!(!module.is_null(), "gameinput is one of our pseudo modules");
         assert_eq!(
-            GetProcAddress(module, 1 as *const u8) as usize,
+            GetProcAddress(module, std::ptr::without_provenance(1)) as usize,
             crate::registry::lookup("gameinput.dll", "#1").unwrap(),
             "GameInputCreate is imported by ordinal"
         );
         assert!(
-            GetProcAddress(module, 2 as *const u8).is_null(),
+            GetProcAddress(module, std::ptr::without_provenance(2)).is_null(),
             "an ordinal we do not export stays null"
         );
     }
