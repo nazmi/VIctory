@@ -48,6 +48,59 @@ sides keep their behaviour, never "ours dropped to make it apply".
 | wave7-shader | — | `1732` f32_to_half NaN / nearest-even | **duplicate**: landed locally as `67b24154`; verified in `primitive.rs:126-152` and re-ran the PR's test bodies against the tree's function (`bad = 0`) |
 | wave7-shader | — | `1733` helper lane reads its own value | **duplicate**: landed locally as `694c4944`; verified the select at `lower.rs:5387-5396` |
 | wave7-shader | — | `1716` bitcode optimiser | **held**: unconditional from `Shader::finish`, and on a probe branch it fails 2 of 233 tests — dxil.dll rejects one module ("Flags must match usage") and another shader's emitted IR changes. Probe branch `scratch/1716-probe` is evidence only and must not be integrated. |
+| wave7-gpu | `42ba51eb`, `ed7413fa` | GPU: placed copies take the bytes a GPU write leaves (#1725) | in branch |
+| wave7-gpu | `508b6a7a` | style: format the placed-copy code | in branch |
+| wave7-gpu | `6f2255bd` | GPU: 1D textures are 2D on the host, one texel high (#1727) | in branch |
+| wave7-gpu | `3a26c01b` | GPU: occlusion queries measure on the host (#1731) | in branch |
+| wave7-gpu | `e88c5752` | Pipelines: VICTORY_PIPELINE_WORKERS (#1728) | in branch |
+| wave7-gpu | `ea8b7f31` | Shaders: wait on an event instead of spinning (#1734) | in branch |
+
+## The audit method, and a real miss it caught
+
+A worker branch never merges into the main branch by itself: workers commit on
+their own branch, and the coordinator cherry-picks those commits onto
+`candidate/wave6`. That is deliberate — a worker that merged would bypass the
+coordinator's diff review.
+
+Because a cherry-pick creates a **new SHA**, searching the main branch's log
+for a worker's SHA always fails, and that is the trap: it looks like the work
+was never taken. The correct tests are:
+
+```bash
+git cherry HEAD <worker-branch>   # '-' already applied by patch id, '+' not
+git show <worker-commit> | git apply -R --check   # content present?
+```
+
+### The miss
+
+Applying that audit on 2026-11-25 found that the **wave7-gpu worker's seven
+commits were not in the branch** at the moment the question was asked — five
+PRs (#1725, #1727, #1731, #1728, #1734) had been reviewed and verified but not
+yet integrated. They are integrated now, and the gate was re-run after them.
+The suspicion was correct, and the previous per-worker table would not have
+shown it, because that table was written from worker summaries rather than
+from the audit.
+
+### Two branches the patch-id test flags but which are present anyway
+
+`codex/agent-verify-hle-457cb189` and `codex/agent-verify-shadow-0971b878`
+report `+` for some commits because those were carried across as **tree state**
+after conflict resolution, or were reformatted, so the patch no longer applies
+byte-identically. Both were checked by content instead:
+
+```bash
+grep -c 'piece.resize(PIECE, 0)' crates/victory-gpu/src/shadow.rs   # 1
+grep -c 'copy_threads\|resume_unwind' crates/victory-gpu/src/host.rs  # 3
+grep -n 'fn tbuffer_load_format_offen' crates/victory-shader/src/emit/valu_tests.rs  # present
+grep -c 'buffer_states\|BufferState' crates/victory-gpu/src/host.rs  # 6
+```
+
+and by diffing HEAD against the branch: every remaining difference is newer
+work in HEAD, not missing work.
+
+Rule for the next session: after every worker, run `git cherry HEAD <branch>`
+and require `+` to be empty, or explain each `+`. Do not infer integration from
+a summary.
 
 ## Verification of this table
 
