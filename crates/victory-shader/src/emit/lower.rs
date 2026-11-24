@@ -40,6 +40,9 @@ pub(crate) struct Lowered {
     /// Heap handles made with a non-uniform index.
     #[cfg(test)]
     pub nonuniform_handles: u32,
+    /// Heap handles annotated as constant buffers.
+    #[cfg(test)]
+    pub cbuffer_handles: u32,
     /// Whether the program uses wave operations.
     #[cfg(test)]
     pub wave_ops: bool,
@@ -1089,6 +1092,8 @@ impl<'a> Lower<'a> {
             root_srvs,
             #[cfg(test)]
             nonuniform_handles: self.s.nonuniform_handles,
+            #[cfg(test)]
+            cbuffer_handles: self.s.cbuffer_handles,
             #[cfg(test)]
             wave_ops: self.s.flags & flags::WAVE_OPS != 0,
             dxil: self.s.finish(),
@@ -3726,7 +3731,12 @@ impl<'a> Lower<'a> {
             }
             return Ok(());
         }
-        if matches!(kind, Some(u) if u.kind == ResourceType::Srv) {
+        // A descriptor of no listed kind (one fetched from the heap by
+        // index) that vector buffer loads read, and none write, is an SRV in
+        // the title's heap, not a constant buffer: reading its slot through
+        // a constant buffer handle is a descriptor of the wrong type.
+        let buffer_view = kind.is_none() && self.buffer_loads_only(src);
+        if buffer_view || matches!(kind, Some(u) if u.kind == ResourceType::Srv) {
             let h = self.handle(site, src, false, (11, 0))?;
             for k in 0..count {
                 let off = self.s.m.i32(4 * k);
@@ -4183,6 +4193,30 @@ impl<'a> Lower<'a> {
             }
             _ => Ok((0, None)),
         }
+    }
+
+    /// Whether vector buffer loads (`buffer_load_*`) read descriptor `src`
+    /// and no vector buffer access writes through it (which makes it a UAV).
+    fn buffer_loads_only(&self, src: &Source) -> bool {
+        let mut loads = false;
+        for (&((b, i), sampler), &other) in &self.descriptors {
+            if sampler || other != src {
+                continue;
+            }
+            let Some(inst) = self.x.p.blocks[b].insts.get(i) else {
+                continue;
+            };
+            if !matches!(inst.fields, Fields::Buffer { .. }) {
+                continue;
+            }
+            let name = inst.name();
+            if name.starts_with("buffer_load") || name.starts_with("tbuffer_load") {
+                loads = true;
+            } else {
+                return false;
+            }
+        }
+        loads
     }
 
     /// The used-resource entry a descriptor loaded from a table falls in.
@@ -8776,6 +8810,70 @@ mod tests {
             0,
             "dynamic v_perm_b32 must not require INT64"
         );
+    }
+
+    #[test]
+    fn scalar_loads_through_a_heap_buffer_that_vector_loads_read_use_a_buffer_view() {
+        // A descriptor from the resource heap (s0) at an index from a root
+        // constant (s1), read by a scalar buffer load, then used by nothing
+        // else, by a vector buffer load, or by a vector buffer store. A slot
+        // that vector loads read is a buffer view (an SRV), so the scalar
+        // load must not read it through a constant buffer handle (a
+        // descriptor of the wrong type). A store makes it a UAV, which a
+        // read-only view would not match either: that case is unchanged.
+        #[derive(Clone, Copy)]
+        enum Also {
+            Nothing,
+            Load,
+            Store,
+        }
+        let program = |also: Also| {
+            let mut words = vec![
+                0xBE84_0300, // s_mov_b32 s4, s0
+                0xBE85_0380, // s_mov_b32 s5, 0
+                0x8F06_8501, // s_lshl_b32 s6, s1, 5
+                0xF408_0202,
+                0x0C00_0000, // s_load_dwordx4 s[8:11], s[4:5], s6
+                0xBF8C_C07F, // s_waitcnt lgkmcnt(0)
+                0xF420_0304,
+                0xFA00_0000, // s_buffer_load_dword s12, s[8:11], 0x0
+                0xBF8C_0070, // s_waitcnt vmcnt(0) lgkmcnt(0)
+                0x7E02_020C, // v_mov_b32 v1, s12
+            ];
+            match also {
+                Also::Nothing => {}
+                Also::Load => words.extend([
+                    0xE030_1000,
+                    0x8002_0200, // buffer_load_dword v2, v0, s[8:11], 0 offen
+                    0xBF8C_0070, // s_waitcnt vmcnt(0) lgkmcnt(0)
+                    0x4A02_0302, // v_add_nc_u32 v1, v2, v1
+                ]),
+                Also::Store => words.extend([
+                    0xE070_1000,
+                    0x8002_0100, // buffer_store_dword v1, v0, s[8:11], 0 offen
+                ]),
+            }
+            words.extend([
+                0xD834_0000,
+                0x0000_0100, // ds_write_b32 v0, v1
+                S_ENDPGM,
+            ]);
+            words
+        };
+        let layout = || {
+            vec![
+                root(RootType::ResourceHeap, 0, 0),
+                root(RootType::Constants, 1, 1),
+            ]
+        };
+        let cbuffers = |also| {
+            lower_with(&program(also), layout(), vec![])
+                .unwrap()
+                .cbuffer_handles
+        };
+        assert_eq!(cbuffers(Also::Nothing), 1, "no other use: a CBV");
+        assert_eq!(cbuffers(Also::Load), 0, "buffer_load: an SRV");
+        assert_eq!(cbuffers(Also::Store), 1, "buffer_store: unchanged");
     }
 
     #[test]
