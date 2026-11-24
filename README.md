@@ -76,6 +76,35 @@ cargo build --release -p victory
 target\release\victory.exe run <game dir>\<the title's exe> --execute
 ```
 
+### Selecting the Series S profile
+
+GTA VI chooses its render configuration from the console model, not from the
+display modes VIctory advertises through DXGI. To use the lower-resolution
+profile, pass `--console series-s` when starting the title:
+
+```powershell
+target\release\victory.exe run <game dir>\<the title's exe> --execute --console series-s
+```
+
+In a reported diagnostic run, the Series X profile used a 3840×2160 scene
+with 2560×1440 internal targets; the Series S profile used a 1920×1080 scene
+with 1280×720 internal targets. The UI can still use a separate 3840×2160
+presentation plane, so selecting Series S does not necessarily make the
+window or every render target 1080p. Changing the DXGI mode list alone does
+not change the scene resolution ([issue #203](https://github.com/Marvisak/VIctory/issues/203));
+Series S multi-plane presentation is covered separately by
+[PR #211](https://github.com/Marvisak/VIctory/pull/211).
+
+The same report measured about 3.9 GB less committed process memory in the
+menus/intro and about 3.6 GB less at the world peak with Series S enabled.
+However, peak committed memory was still about 17.7 GB, and whole-system
+GPU memory use still reached about 7.3 of 8 GB. Both profiles also lost the
+GPU device 30–45 seconds after entering the world. These are measurements
+from one Windows 10 / RTX 2070 SUPER 8 GB / 32 GB RAM diagnostic setup
+(base commit `d2a4bae`, with PRs #175 and #211 applied), not general
+requirements or a guarantee of stability. Series S can reduce memory
+pressure, but it does not make a 16 GB RAM / 8 GB VRAM system reliably fit
+the world or resolve the current GPU hang.
 The window caption shows the framerate. Saves, settings and `crashes.log`
 are kept under the data folder (default `%LOCALAPPDATA%\victory\data`), derived
 data under the cache folder.
