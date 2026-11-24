@@ -69,11 +69,11 @@ cargo test --workspace                   # needs no game data
 cargo run -p victory -- config           # check your paths
 ```
 
-Run the title:
+Run the title, replacing the example path with the full path to your game's executable:
 
 ```powershell
 cargo build --release -p victory
-target\release\victory.exe run <game dir>\<the title's exe> --execute
+.\target\release\victory.exe run 'D:\Xbox Games\GTA VI\title.exe' --execute
 ```
 
 ### Selecting the Series S profile
