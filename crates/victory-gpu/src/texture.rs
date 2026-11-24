@@ -184,6 +184,9 @@ impl Staging {
     /// Returns the bytes of title memory read.
     fn refresh_now(&self) -> usize {
         let size = self.layout.size as usize;
+        if size == 0 {
+            return 0;
+        }
         let start = self.memory as usize;
         let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
         let last = &mut *last;
@@ -201,29 +204,47 @@ impl Staging {
             crate::copystat::add(crate::copystat::C::TexWatched, size as u64);
             return size;
         }
-        if !committed(self.memory, size) {
-            #[cfg(feature = "diagnostics")]
-            tracing::debug!(
-                memory = ?self.memory,
-                size,
-                desc = ?self.layout.desc,
-                "a sampled texture's memory is not committed"
-            );
-            return 0;
+        last.read.resize(size, 0);
+        match read_resident(self.memory, &mut last.read) {
+            Residency::Unmapped => {
+                last.hash = None;
+                #[cfg(feature = "diagnostics")]
+                tracing::debug!(
+                    memory = ?self.memory,
+                    size,
+                    desc = ?self.layout.desc,
+                    "a sampled texture's memory is not committed"
+                );
+                0
+            }
+            Residency::Full => {
+                let hash = blake3::hash(&last.read);
+                #[cfg(feature = "diagnostics")]
+                crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
+                if last.hash == Some(hash) {
+                    return size;
+                }
+                last.hash = Some(hash);
+                self.detile(&last.read);
+                #[cfg(feature = "diagnostics")]
+                crate::copystat::add(crate::copystat::C::TexChanged, size as u64);
+                size
+            }
+            Residency::Partial(intervals) => {
+                let (hash, resident_bytes) = hash_intervals(&last.read, &intervals);
+                #[cfg(feature = "diagnostics")]
+                crate::copystat::add(crate::copystat::C::TexHashed, resident_bytes as u64);
+                if last.hash == Some(hash) {
+                    return resident_bytes;
+                }
+                zero_gaps(&mut last.read, &intervals);
+                last.hash = Some(hash);
+                self.detile(&last.read);
+                #[cfg(feature = "diagnostics")]
+                crate::copystat::add(crate::copystat::C::TexChanged, resident_bytes as u64);
+                resident_bytes
+            }
         }
-        // SAFETY: committed memory of the texture's layout size.
-        let tiled = unsafe { std::slice::from_raw_parts(self.memory, size) };
-        let hash = blake3::hash(tiled);
-        #[cfg(feature = "diagnostics")]
-        crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
-        if last.hash == Some(hash) {
-            return size;
-        }
-        last.hash = Some(hash);
-        self.detile(tiled);
-        #[cfg(feature = "diagnostics")]
-        crate::copystat::add(crate::copystat::C::TexChanged, size as u64);
-        size
     }
 
     /// Detiles `tiled` (the texture's memory) into the staging buffer.
@@ -253,6 +274,125 @@ impl Staging {
                 return;
             }
         }
+    }
+}
+
+/// Which byte intervals of a title texture are currently mapped and readable.
+#[derive(Debug, PartialEq, Eq)]
+enum Residency {
+    Unmapped,
+    Full,
+    Partial(Vec<(usize, usize)>),
+}
+
+/// Copies committed, readable regions of `[src, src + dst.len())` into `dst`
+/// without `VirtualQuery` overhead on the fully mapped fast path.
+fn read_resident(src: *const u8, dst: &mut [u8]) -> Residency {
+    if dst.is_empty() || crate::host::read_into(src, dst) {
+        return Residency::Full;
+    }
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
+    };
+    const PAGE_SIZE: usize = 4096;
+
+    let base = src as usize;
+    let end = base.saturating_add(dst.len());
+    let mut p = base;
+    let mut intervals: Vec<(usize, usize)> = Vec::new();
+    let push_interval = |intervals: &mut Vec<(usize, usize)>, start: usize, stop: usize| {
+        if start >= stop {
+            return;
+        }
+        if let Some(last) = intervals.last_mut()
+            && last.1 == start
+        {
+            last.1 = stop;
+        } else {
+            intervals.push((start, stop));
+        }
+    };
+
+    while p < end {
+        // SAFETY: plain data filled in by the query.
+        let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: a valid out pointer of the right size.
+        let n = unsafe { VirtualQuery(p as *const _, &mut info, size_of_val(&info)) };
+        if n == 0 {
+            break;
+        }
+        let region_end = (info.BaseAddress as usize)
+            .saturating_add(info.RegionSize)
+            .min(end);
+        let step = region_end.saturating_sub(p);
+        if step == 0 {
+            break;
+        }
+        let next_p = p.saturating_add(step);
+        if info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0 {
+            p = next_p;
+            continue;
+        }
+        let offset = p - base;
+        let region_len = region_end - p;
+        if crate::host::read_into(p as *const u8, &mut dst[offset..offset + region_len]) {
+            push_interval(&mut intervals, offset, offset + region_len);
+        } else {
+            // Concurrent unmap inside a committed region: fall back to 4 KiB pages.
+            let mut q = p;
+            while q < region_end {
+                let next_page = (q & !(PAGE_SIZE - 1)).saturating_add(PAGE_SIZE);
+                let page_end = next_page.min(region_end);
+                let page_len = page_end.saturating_sub(q);
+                if page_len == 0 {
+                    break;
+                }
+                let page_offset = q - base;
+                if crate::host::read_into(
+                    q as *const u8,
+                    &mut dst[page_offset..page_offset + page_len],
+                ) {
+                    push_interval(&mut intervals, page_offset, page_offset + page_len);
+                }
+                q = q.saturating_add(page_len);
+            }
+        }
+        p = next_p;
+    }
+
+    if intervals.is_empty() {
+        Residency::Unmapped
+    } else if intervals.as_slice() == [(0, dst.len())] {
+        Residency::Full
+    } else {
+        Residency::Partial(intervals)
+    }
+}
+
+/// Hashes only the resident byte intervals (and their bounds) and returns `(hash, resident_bytes)`.
+fn hash_intervals(data: &[u8], intervals: &[(usize, usize)]) -> (blake3::Hash, usize) {
+    let mut hasher = blake3::Hasher::new();
+    let mut resident_bytes = 0usize;
+    for &(start, end) in intervals {
+        hasher.update(&(start as u64).to_le_bytes());
+        hasher.update(&(end as u64).to_le_bytes());
+        hasher.update(&data[start..end]);
+        resident_bytes += end - start;
+    }
+    (hasher.finalize(), resident_bytes)
+}
+
+/// Zeroes unmapped gaps between sorted `intervals` in `data` so evicted tiles leave no stale bytes.
+fn zero_gaps(data: &mut [u8], intervals: &[(usize, usize)]) {
+    let mut cursor = 0usize;
+    for &(start, end) in intervals {
+        if cursor < start {
+            data[cursor..start].fill(0);
+        }
+        cursor = end;
+    }
+    if cursor < data.len() {
+        data[cursor..].fill(0);
     }
 }
 
@@ -341,4 +481,371 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
     });
     map.insert(resource as usize, s.clone());
     Some(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC};
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_DECOMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE,
+        VirtualAlloc, VirtualFree,
+    };
+
+    /// RAII guard for a `VirtualAlloc(..., MEM_RESERVE, ...)` address range.
+    struct VirtualRegion {
+        ptr: *mut u8,
+        len: usize,
+    }
+
+    impl VirtualRegion {
+        fn reserve(len: usize) -> Self {
+            // SAFETY: reserves uncommitted virtual address space of `len` bytes, released on drop.
+            let ptr = unsafe { VirtualAlloc(std::ptr::null(), len, MEM_RESERVE, PAGE_NOACCESS) }
+                .cast::<u8>();
+            assert!(!ptr.is_null(), "VirtualAlloc MEM_RESERVE failed");
+            Self { ptr, len }
+        }
+
+        fn commit(&self, offset: usize, len: usize) {
+            assert!(offset.checked_add(len).is_some_and(|end| end <= self.len));
+            // SAFETY: commits pages within our reserved virtual address range.
+            let committed = unsafe {
+                VirtualAlloc(self.ptr.add(offset).cast(), len, MEM_COMMIT, PAGE_READWRITE)
+            };
+            assert!(!committed.is_null(), "VirtualAlloc MEM_COMMIT failed");
+        }
+
+        fn decommit(&self, offset: usize, len: usize) {
+            assert!(offset.checked_add(len).is_some_and(|end| end <= self.len));
+            // SAFETY: decommits pages within our reserved virtual address range.
+            let ok = unsafe { VirtualFree(self.ptr.add(offset).cast(), len, MEM_DECOMMIT) };
+            assert_ne!(ok, 0, "VirtualFree MEM_DECOMMIT failed");
+        }
+
+        /// Writes `bytes` at `offset`; caller must ensure `[offset..offset + bytes.len())` is committed.
+        unsafe fn write_slice(&self, offset: usize, bytes: &[u8]) {
+            assert!(
+                offset
+                    .checked_add(bytes.len())
+                    .is_some_and(|end| end <= self.len)
+            );
+            // SAFETY: caller guarantees the destination range is committed and writable.
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.ptr.add(offset), bytes.len());
+            }
+        }
+    }
+
+    impl Drop for VirtualRegion {
+        fn drop(&mut self) {
+            // SAFETY: `self.ptr` was allocated with `VirtualAlloc(..., MEM_RESERVE, ...)` and not yet freed.
+            unsafe { VirtualFree(self.ptr.cast(), 0, MEM_RELEASE) };
+        }
+    }
+
+    /// RAII guard releasing a console COM resource so `STAGING` entries are cleaned up on drop.
+    struct ResourceGuard(This);
+
+    impl Drop for ResourceGuard {
+        fn drop(&mut self) {
+            type Release = extern "system" fn(This) -> u32;
+            crate::object::slot::<Release>(self.0, 0x10)(self.0);
+        }
+    }
+
+    #[test]
+    fn partial_residency_reads_only_mapped_regions_and_detects_new_mips() {
+        const TILE: usize = 64 * 1024;
+        const TOTAL: usize = 256 * 1024;
+        let region = VirtualRegion::reserve(TOTAL);
+        let mut dst = vec![0xAAu8; TOTAL];
+
+        assert_eq!(read_resident(region.ptr, &mut dst), Residency::Unmapped);
+
+        region.commit(0, TILE);
+        let tile0: Vec<u8> = (0..TILE)
+            .map(|i| ((i * 37 + 11) & 0xff) as u8 | 1)
+            .collect();
+        // SAFETY: `[0..TILE)` was committed above.
+        unsafe { region.write_slice(0, &tile0) };
+
+        assert_eq!(
+            read_resident(region.ptr, &mut dst),
+            Residency::Partial(vec![(0, TILE)])
+        );
+        assert_eq!(dst[..TILE], tile0[..]);
+        let (hash0, bytes0) = hash_intervals(&dst, &[(0, TILE)]);
+        assert_eq!(bytes0, TILE);
+
+        // Mutating unmapped tail bytes in `dst` must not affect the resident hash.
+        dst[TILE..].fill(0x55);
+        assert_eq!(
+            read_resident(region.ptr, &mut dst),
+            Residency::Partial(vec![(0, TILE)])
+        );
+        let (hash0_repeat, bytes0_repeat) = hash_intervals(&dst, &[(0, TILE)]);
+        assert_eq!((hash0_repeat, bytes0_repeat), (hash0, TILE));
+
+        // Commit a disjoint second 64 KiB tile at `[128 KiB..192 KiB)`.
+        region.commit(2 * TILE, TILE);
+        let tile2: Vec<u8> = (0..TILE)
+            .map(|i| ((i * 53 + 29) & 0xff) as u8 | 1)
+            .collect();
+        // SAFETY: `[2 * TILE..3 * TILE)` was committed above.
+        unsafe { region.write_slice(2 * TILE, &tile2) };
+
+        let res = read_resident(region.ptr, &mut dst);
+        assert_eq!(
+            res,
+            Residency::Partial(vec![(0, TILE), (2 * TILE, 3 * TILE)])
+        );
+        assert_eq!(dst[..TILE], tile0[..]);
+        assert_eq!(dst[2 * TILE..3 * TILE], tile2[..]);
+        let (hash_two, bytes_two) = hash_intervals(&dst, &[(0, TILE), (2 * TILE, 3 * TILE)]);
+        assert_eq!(bytes_two, 2 * TILE);
+        assert_ne!(hash_two, hash0);
+
+        // Decommit the second tile while leaving junk across unmapped gaps; `zero_gaps` must clear it.
+        region.decommit(2 * TILE, TILE);
+        dst[TILE..].fill(0xCC);
+        let res_after_evict = read_resident(region.ptr, &mut dst);
+        assert_eq!(res_after_evict, Residency::Partial(vec![(0, TILE)]));
+        let Residency::Partial(intervals) = res_after_evict else {
+            unreachable!();
+        };
+        let (hash_after_evict, bytes_after_evict) = hash_intervals(&dst, &intervals);
+        assert_eq!((hash_after_evict, bytes_after_evict), (hash0, TILE));
+        zero_gaps(&mut dst, &intervals);
+        assert_eq!(dst[..TILE], tile0[..]);
+        assert!(dst[TILE..].iter().all(|&b| b == 0));
+
+        // Committing the remaining gaps yields `Residency::Full`.
+        region.commit(TILE, TILE);
+        region.commit(2 * TILE, 2 * TILE);
+        assert_eq!(read_resident(region.ptr, &mut dst), Residency::Full);
+    }
+
+    fn readback_mip(
+        host: &crate::host::Host,
+        resource: This,
+        host_tex: &ID3D12Resource,
+        subresource: u32,
+        width: u32,
+        height: u32,
+    ) -> Vec<u8> {
+        let row_pitch = width * 4;
+        assert_eq!(row_pitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT, 0);
+        let byte_len = row_pitch as usize * height as usize;
+
+        let readback_heap = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_READBACK,
+            ..Default::default()
+        };
+        let readback_desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Width: byte_len as u64,
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            ..Default::default()
+        };
+        let mut readback: Option<ID3D12Resource> = None;
+        // SAFETY: plain creation of a D3D12 readback buffer.
+        unsafe {
+            host.device
+                .CreateCommittedResource(
+                    &readback_heap,
+                    D3D12_HEAP_FLAG_NONE,
+                    &readback_desc,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    None,
+                    &mut readback,
+                )
+                .unwrap();
+        }
+        let readback = readback.unwrap();
+
+        let back = host.new_list().unwrap();
+        crate::list::ensure_state(&back, resource, 0x800);
+        let to = D3D12_TEXTURE_COPY_LOCATION {
+            // SAFETY: a borrowed pointer the location never releases.
+            pResource: unsafe { std::mem::transmute_copy(&readback) },
+            Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                    Offset: 0,
+                    Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                        Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                        Width: width,
+                        Height: height,
+                        Depth: 1,
+                        RowPitch: row_pitch,
+                    },
+                },
+            },
+        };
+        let from = D3D12_TEXTURE_COPY_LOCATION {
+            // SAFETY: a borrowed pointer the location never releases.
+            pResource: unsafe { std::mem::transmute_copy(host_tex) },
+            Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                SubresourceIndex: subresource,
+            },
+        };
+        // SAFETY: `back.list` is open and both resources are live.
+        unsafe { back.list.CopyTextureRegion(&to, 0, 0, 0, &from, None) };
+        back.close();
+        host.execute(&[&back]);
+
+        let mut mapped = std::ptr::null_mut();
+        let range = D3D12_RANGE {
+            Begin: 0,
+            End: byte_len,
+        };
+        // SAFETY: `host.execute` waited for GPU completion and the buffer spans `byte_len` bytes.
+        unsafe {
+            readback.Map(0, Some(&range), Some(&mut mapped)).unwrap();
+            let out = std::slice::from_raw_parts(mapped.cast::<u8>(), byte_len).to_vec();
+            readback.Unmap(0, None);
+            out
+        }
+    }
+
+    #[test]
+    fn partially_resident_mip_tail_uploads_to_host_texture() {
+        let Some(host) = crate::host::host() else {
+            return;
+        };
+        use victory_formats::texture::{Dimension, Swizzle, Texture, TextureDesc};
+
+        let tex = Texture::new(&TextureDesc {
+            dimension: Dimension::Tex2d,
+            width: 256,
+            height: 256,
+            depth_or_array: 1,
+            mips: 3,
+            format: DXGI_FORMAT_R8G8B8A8_UNORM.0 as u32,
+            samples: 1,
+            swizzle: Swizzle::SW_64KB_S,
+        })
+        .unwrap();
+        let layout = &tex.planes[0].layout;
+        assert_eq!(layout.first_tail_mip, 2);
+        assert_eq!(layout.mips[2].offset, 0);
+        assert!(layout.mips[2].tail.is_some());
+        assert_eq!(layout.mips[1].offset, 65536);
+        assert_eq!(layout.mips[0].offset, 131072);
+        assert_eq!(layout.size, 393216);
+
+        let region = VirtualRegion::reserve(layout.size as usize);
+        region.commit(0, 65536);
+
+        let expected_mip2: Vec<u8> = (0..64 * 64 * 4)
+            .map(|i| (((i * 13 + 7) % 251) as u8) | 1)
+            .collect();
+        let mut tiled = vec![0u8; layout.size as usize];
+        layout
+            .tile(&mut tiled, 2, 0, &expected_mip2, 256, 64 * 256)
+            .unwrap();
+        assert!(tiled[65536..].iter().all(|&b| b == 0));
+        // SAFETY: tile 0 `[0..65536)` was committed above.
+        unsafe { region.write_slice(0, &tiled[..65536]) };
+        assert!(!committed(region.ptr, layout.size as usize));
+
+        const _: () =
+            assert!(size_of::<D3D12_RESOURCE_DESC>() == size_of::<crate::resource::ResourceDesc>());
+        let desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Alignment: 0,
+            Width: 256,
+            Height: 256,
+            DepthOrArraySize: 1,
+            MipLevels: 3,
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Layout: D3D12_TEXTURE_LAYOUT(0x109),
+            Flags: D3D12_RESOURCE_FLAG_NONE,
+        };
+        let mut resource = std::ptr::null();
+        let hr = crate::resource::create_at_address(
+            std::ptr::null(),
+            region.ptr as u64,
+            (&raw const desc).cast(),
+            0,
+            std::ptr::null(),
+            &crate::resource::PAGEABLE_IIDS[0],
+            &mut resource,
+        );
+        assert_eq!(hr, crate::object::S_OK);
+        let resource_guard = ResourceGuard(resource);
+        let host_tex = crate::resource::host_resource(resource_guard.0).unwrap();
+
+        let list = host.new_list().unwrap();
+        upload(&list, resource_guard.0, host_tex);
+        list.close();
+        host.execute(&[&list]);
+
+        assert_eq!(
+            readback_mip(host, resource_guard.0, host_tex, 2, 64, 64),
+            expected_mip2
+        );
+        assert!(
+            readback_mip(host, resource_guard.0, host_tex, 1, 128, 128)
+                .iter()
+                .all(|&b| b == 0)
+        );
+
+        // Stream in mip 1 while leaving mip 0 `[131072..393216)` unmapped.
+        region.commit(65536, 65536);
+        let expected_mip1: Vec<u8> = (0..128 * 128 * 4)
+            .map(|i| (((i * 29 + 19) % 241) as u8) | 1)
+            .collect();
+        tiled.fill(0);
+        layout
+            .tile(&mut tiled, 1, 0, &expected_mip1, 512, 128 * 512)
+            .unwrap();
+        // SAFETY: tile 1 `[65536..131072)` was committed above.
+        unsafe { region.write_slice(65536, &tiled[65536..131072]) };
+        assert!(!committed(region.ptr, layout.size as usize));
+
+        list.reset();
+        upload(&list, resource_guard.0, host_tex);
+        list.close();
+        host.execute(&[&list]);
+
+        assert_eq!(
+            readback_mip(host, resource_guard.0, host_tex, 1, 128, 128),
+            expected_mip1
+        );
+        assert_eq!(
+            readback_mip(host, resource_guard.0, host_tex, 2, 64, 64),
+            expected_mip2
+        );
+
+        // Evict mip 1: `zero_gaps` must clear stale cached bytes so host mip 1 becomes zeroed.
+        region.decommit(65536, 65536);
+        list.reset();
+        upload(&list, resource_guard.0, host_tex);
+        list.close();
+        host.execute(&[&list]);
+
+        assert!(
+            readback_mip(host, resource_guard.0, host_tex, 1, 128, 128)
+                .iter()
+                .all(|&b| b == 0)
+        );
+        assert_eq!(
+            readback_mip(host, resource_guard.0, host_tex, 2, 64, 64),
+            expected_mip2
+        );
+    }
 }
