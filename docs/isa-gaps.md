@@ -125,38 +125,49 @@ A fix is done when its count reaches zero and the workspace gate is green; a
 fix that lowers a count by converting a refusal into a *wrong value* is worse
 than the refusal and must not be counted as progress.
 
-## A gap this census cannot see: spilled user-data tables
+## The 31 world-load refusals: found, explained, fixed
 
-The 31 compute refusals from the runtime run read "an address in an SGPR
-before the first root parameter", and **none of those 31 shader hashes appears
-in the offline census at all** — not in `shaders.rpf`, and not in `data.rpf`,
-`levels.rpf`, `packs.rpf`, `navmeshes.rpf`, `anim.rpf` or the `pack/`
-directory, all of which report zero containers or zero matches. So the runtime
-is translating shaders the `translate` subcommand does not reach, and the
-"before the first root parameter" message cannot be reproduced offline. Treat
-that message as unconfirmed until it is.
+The runtime run's top refusal — 31 of 74, all compute, all at prologue offsets
+0x2c/0x30/0x40 — read "an address in an SGPR before the first root parameter",
+and **none of those 31 hashes appears in the `shaders.rpf` census**. Six other
+archives and `pack/` report zero containers too. The shaders were not missing;
+they are in a DLL.
 
-A concrete candidate for what those shaders are comes from a third-party fork
-(`github.com/fxceless/victory-fork`), whose `crates/victory-shader/src/spill.rs`
-describes a construct this tree does not model at all:
+```bash
+victory translate <game_dir>/xboxbvhbuilder.dll
+#   containers   52
+#   programs     52 translated of 52
+#   DXIL         0 emitted of 0 compute programs
+#   52  resources: an address in an SGPR before the first root parameter
+```
 
-> A compute program has as many user SGPRs as `COMPUTE_PGM_RSRC2` says. A root
-> signature that needs more dwords than that keeps none of its parameters in
-> registers: user-data dwords 0 and 1 then hold the 40-bit address of a table
-> in memory (`s0`, and `s1 & 0xff` as bits 32-39), and the parameter the layout
-> declares at user-data index N (16 or above) is at byte `4 * (N - 16)` of that
-> table.
+Fifty-two compute programs, one refusal, same offset 0x30 — the runtime's case
+exactly, reproduced offline with no GPU.
 
-Our `resource.rs` maps every root parameter to user SGPRs through
-`HwStage::user_sgpr(p.user_data)` and has no concept of a parameter living in a
-memory table, so such a program's addresses resolve to registers that hold a
-*pointer*, not a parameter — which is exactly the shape that would produce an
-address whose base is not any declared parameter. The fork says it measured
-this on the console's ray-tracing builder, `XboxBvhBuilder.dll`: 118 of 118 such
-loads land on a declared parameter.
+**Cause.** These are computed programs whose root signature needs more
+user-data dwords than `COMPUTE_PGM_RSRC2` grants. The hardware then keeps none
+of them in registers: user-data dwords 0 and 1 hold a pointer to a table, and
+parameter N (index 16 and above) lives at byte `4*(N-16)` of that table, read
+with `s_load_dword*`. This tree mapped every root parameter to user SGPRs
+through `HwStage::user_sgpr`, so for these programs a declared parameter's
+register held a *pointer* — an address whose base is no declared parameter.
+`spill.rs` rewrites those loads before tracking, so each dword becomes the
+entry value of the SGPR its index names.
 
-That is a hypothesis, not a confirmed diagnosis: nobody has yet shown one of the
-31 offending containers, and the fork's claim about `XboxBvhBuilder.dll` is
-its own. The way to settle it is to capture the refused containers (the GPU side
-already logs each hash) and run one through the translator with its layout
-printed.
+**Measured effect** (same machine, same inputs, binaries differing only by that
+module):
+
+| | programs emitted | top refusal |
+| --- | --- | --- |
+| before | 0 of 52 | 52 × "an address in an SGPR before the first root parameter" |
+| after | 0 of 52 | 0 × that refusal; 22 × "an address not from a root parameter", 18 × "a root UAV or typed root view", 7 × "a select on an untracked mask" |
+
+The top refusal is gone. These programs still do not emit: they now fail
+*later*, on the next thing in their way. That is progress of a specific kind —
+a diagnostic that named the wrong subsystem is replaced by refusals that name
+real remaining gaps — and it is not a claim that the BVH builder works yet.
+
+`shaders.rpf` is bit-for-bit identical before and after (26,084 programs,
+same refusal table), which is what the fork predicted: only the BVH builder's
+compute programs are spilled. Both halves of that measurement matter.
+
