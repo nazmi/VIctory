@@ -21,6 +21,34 @@
 
 ## Plan for the first authorized sweep
 
+### Sweep started: 2026-11-24
+
+- User authorized the three-pass sweep and economical workers for small work.
+- Created isolated worktree `../VIctory-integration` on
+  `integration/maintenance`, based on upstream `ffe310e`.
+- Setup commits: `781f328` (workflow/ledger) and `bfea43d` (MSVC pin).
+  The original working copy's modifications remain untouched.
+- Economical workers: `inventory` and `baseline` use `gpt-6.1-sol` at low
+  reasoning; `review_708` uses the same model at medium reasoning.
+- Complete REST snapshot: 445 open PRs, 5 pages; 189 open issues after
+  filtering PRs from 634 issue-endpoint entries across 7 pages. Retrieved
+  2026-11-24 11:51:11-11:51:36 UTC. Raw metadata stays outside the repository.
+- Baseline at `bfea43d`: both CI Clippy commands passed; workspace tests
+  failed at the frame-wait consecutive-tick assertion (ticks 5, 7, 8, 9).
+  Observed 86 passed, 1 failed, 5 ignored before Cargo stopped. Later crates
+  did not run. Policy passed; formatting has 182 existing differing hunks
+  across 35 files. No broad formatting changes applied.
+- PR #689 is under review to address that reproduced test failure. A local
+  candidate `candidate/pr-689` at `f137b30` is not yet accepted or integrated.
+- PR #708 passed independent full-file review (1/1 files, none skipped),
+  targeted core tests (15 passed), and targeted Clippy. Full integration
+  checks are pending. PRs #449 and #480 passed read-only review (1/1 each),
+  but their local tests are pending. No upstream PR integrated yet.
+- Before further integration, user requested a GitHub fork. Created and
+  verified <https://github.com/nazmi/VIctory>, parent `Marvisak/VIctory`.
+  Local `origin` now points to the fork; `upstream` points to Marvisak.
+  Default pushes target `origin`. No branches have been pushed yet.
+
 1. Create an isolated local integration worktree, record upstream/local bases,
    verify MSVC, and run baseline checks.
 2. Inventory every open PR with complete pagination; map dependencies and
@@ -36,17 +64,21 @@ bounded economical workers; keep integration decisions with the coordinator.
 
 | Pass | Retrieved at | Query/source | Upstream base | Pagination complete? | Total inventoried | Next item |
 | --- | --- | --- | --- | --- | --- | --- |
-| PRs | Not started | Pending | Pending fetch | No | Unknown | Full inventory |
-| Issues | Not started | Pending | Pending fetch | No | Unknown | After PR pass |
+| PRs | 2026-11-24 11:51 UTC | REST pulls, 5 pages; see maintenance-pr-inventory.md | ffe310e | Yes, snapshot | 445 | Continue candidate review/integration |
+| Issues | 2026-11-24 11:51 UTC | REST issues, 7 pages; see maintenance-issue-inventory.md | ffe310e | Yes, snapshot | 189 | Refresh and work after PR pass |
 | Gaps | Not started | Local audit | Pending | Not applicable | Unknown | After issue pass |
 
 ## PR decisions and integrations
 
-No entries yet. Add one row per inventoried PR, including rejected,
-duplicate, already-present, deferred, and blocked items.
+Every item in the complete snapshot is tracked in
+[maintenance-pr-inventory.md](maintenance-pr-inventory.md). Dependency and
+overlap leads are in [maintenance-dependencies.md](maintenance-dependencies.md).
+Rows below record completed decisions; unreviewed items remain queued.
 
 | PR/link | Source head SHA | Dependencies/overlap | Review evidence | Tests/evidence | Disposition/reason | Local integration SHA | Date |
 | --- | --- | --- | --- | --- | --- | --- | --- |
+| [#689](https://github.com/Marvisak/VIctory/pull/689) | e1c3557bdc67f31e13d04a00d2d9ad1ebc65c7e3 | Standalone test correction | Coordinator and economical worker: 1/1 file reviewed, no skips/findings; clock permits skipped ticks | 5 targeted repeats; both Clippy gates; full workspace 342 passes, 6 ignored; policy, all exit 0 | integrated-local; reproduced baseline failure fixed without changing production code | f137b30 | 2026-11-24 |
+| [#699](https://github.com/Marvisak/VIctory/pull/699) | db0257e2c133ccdcb4605f0a90bcf03cb1847cad | Superseded by merged #612 | Compared tip algorithm and synthetic two-join test to upstream; 3dd467c is ancestor of ffe310e, and same regression exists at lower.rs:7301 | Existing regression included in passing 342-test workspace run | already-present; no import of mixed branch or duplicate fix | Upstream 3dd467c | 2026-11-24 |
 
 ## Issue outcomes
 
@@ -95,3 +127,25 @@ SHA do not validate later code changes.
 - No commits, merges, pushes, issue closures, or PR submissions performed.
 - Next action for a maintenance sweep: create an isolated integration
   worktree and complete the baseline plus fully paginated inventories.
+
+### PR #689 integration validation: 2026-11-24
+
+- Candidate and accepted code SHA: `f137b30`; parent `bfea43d`.
+- Original author retained; commit includes cherry-pick source attribution.
+- Worker `baseline`, `gpt-6.1-sol`, low reasoning: independent frame test
+  review and 5 targeted repetitions all passed. Coordinator reviewed the
+  full changed file and production clock semantics as well.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0.
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`:
+  exit 0.
+- `cargo test --workspace --locked`: exit 0; 342 reported passes, 6 ignored.
+- `cargo xtask policy`: exit 0; 156 files accepted.
+- Coverage limit: four differential shader tests returned early because
+  console/PC compilers were not configured. Harness passes include these
+  unavailable checks. The validator constant-color test did execute.
+- WARP environment caveat: `VICTORY_D3D12_WARP=1` selects WARP only with
+  diagnostics. Default synthetic GPU tests may use the physical adapter.
+  No actual title/world execution was performed.
+- Known pre-existing formatting drift remains; no unrelated reformatting.
+- Full local logs are outside the repository under the maintenance-data
+  `candidate-689` directory. Source head rechecked before integration.
