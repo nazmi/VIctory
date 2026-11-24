@@ -29,6 +29,11 @@ Tested on one machine: Windows 11, AMD RX 6700 XT.
 > Windows then resets the display driver (every monitor goes black for a
 > moment). To look further, use a diagnostics build with
 > `VICTORY_D3D12_WARP=1`, which renders on the software adapter.
+> A world frame can also outlast Windows' 2 s GPU timeout on slower GPUs
+> (`slow host submission` above 2000 ms, then the device is removed as hung);
+> raising `TdrDelay` and `TdrDdiDelay` (for example to 60) under
+> `HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers` and rebooting
+> avoids that reset.
 
 What each part does today and what it still needs:
 

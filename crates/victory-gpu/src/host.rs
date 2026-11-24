@@ -918,6 +918,12 @@ impl Host {
     /// at and what the draws and dispatches in flight there run (or, in
     /// lists that never started, the pipelines they bind).
     fn removal_data(&self, runs: &[&HostList]) -> String {
+        // Without it the queries fail as unsupported, which reads like a
+        // missing GPU feature.
+        if !dred_on() {
+            return "; a diagnostics build with VICTORY_D3D12_DRED=1 records where the GPU stopped"
+                .to_owned();
+        }
         let Ok(dred) = self.device.cast::<ID3D12DeviceRemovedExtendedData1>() else {
             return String::new();
         };
