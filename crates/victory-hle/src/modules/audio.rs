@@ -1371,7 +1371,6 @@ mod tests {
         ApuFree(input);
     }
 
-    #[test]
     /// One silent frame whose last eleven bits sit in the other rolling
     /// input bank: a naive bank switch drops it, so the ring would get a
     /// zero-padded block instead of the decoded frame.
@@ -1388,7 +1387,7 @@ mod tests {
 
         let start = xma::PACKET_BYTES * 8 - 20;
         let bits = 31usize;
-        let mut put = |data: &mut [u8], at: usize, value: u32, width: usize| {
+        let put = |data: &mut [u8], at: usize, value: u32, width: usize| {
             for i in 0..width {
                 if value >> (width - 1 - i) & 1 == 1 {
                     data[(at + i) / 8] |= 1 << (7 - (at + i) % 8);

@@ -1470,7 +1470,6 @@ mod tests {
         assert_eq!(read_frame(&data, 3 * PACKET_BITS + HEADER_BITS).unwrap().next, None);
     }
 
-    #[test]
     /// A frame whose last eleven bits sit in the next rolling input buffer
     /// comes back byte-for-byte the same as an unsplit frame.
     #[test]
