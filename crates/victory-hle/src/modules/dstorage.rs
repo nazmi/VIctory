@@ -1149,6 +1149,14 @@ mod tests {
         array
     }
 
+    /// The driver's scheduler and its lanes are process-wide. Tests that
+    /// create a queue, and the one that counts lanes, take this lock so one
+    /// test never sees another's lanes appear between its own two reads.
+    fn queue_tests() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn new_queue(source_type: u64) -> *mut c_void {
         let create: extern "system" fn(*mut c_void, *const QueueDesc, *const Guid, Out) -> HRESULT =
             call(factory(), 0x50);
@@ -1254,6 +1262,7 @@ mod tests {
 
     #[test]
     fn raw_and_zlib_reads_from_a_file() {
+        let _serial = queue_tests();
         let plain = pattern(300_000);
         let packed = miniz_oxide::deflate::compress_to_vec_zlib(&plain, 6);
         let mut contents = plain.clone();
@@ -1286,6 +1295,7 @@ mod tests {
 
     #[test]
     fn memory_sources_inflate_too() {
+        let _serial = queue_tests();
         let plain = pattern(70_000);
         let packed = miniz_oxide::deflate::compress_to_vec_zlib(&plain, 6);
         let (queue, array) = (new_queue(1), status_array(1));
@@ -1308,6 +1318,7 @@ mod tests {
 
     #[test]
     fn statuses_complete_in_order_with_the_first_failure() {
+        let _serial = queue_tests();
         let contents = pattern(4096);
         let (_dir, file) = file_with(&contents);
         let (queue, array) = (new_queue(0), status_array(3));
@@ -1340,6 +1351,7 @@ mod tests {
 
     #[test]
     fn queue_reports_and_retrieves_read_errors() {
+        let _serial = queue_tests();
         let contents = pattern(64);
         let (dir, file) = file_with(&contents);
         let (queue, array) = (new_queue(0), status_array(2));
@@ -1432,6 +1444,7 @@ mod tests {
 
     #[test]
     fn half_a_queue_submits_itself() {
+        let _serial = queue_tests();
         let (_dir, file) = file_with(&pattern(64));
         let create: extern "system" fn(*mut c_void, *const QueueDesc, *const Guid, Out) -> HRESULT =
             call(factory(), 0x50);
@@ -1596,6 +1609,7 @@ mod tests {
 
     #[test]
     fn zlib_then_bcpack() {
+        let _serial = queue_tests();
         with_test_tables();
         let packed = miniz_oxide::deflate::compress_to_vec_zlib(&BC4_STREAM, 6);
         let (_dir, file) = file_with(&packed);
@@ -1657,6 +1671,7 @@ mod tests {
 
     #[test]
     fn bcpack_requests_unpack_into_the_destination() {
+        let _serial = queue_tests();
         with_test_tables();
         let mut contents = pattern(100);
         contents.extend_from_slice(&BC4_STREAM);
@@ -1672,6 +1687,7 @@ mod tests {
 
     #[test]
     fn a_closed_queue_completes_nothing() {
+        let _serial = queue_tests();
         let (_dir, file) = file_with(&pattern(64));
         let (queue, array) = (new_queue(0), status_array(1));
         let mut out = [0u8; 16];
@@ -1688,6 +1704,7 @@ mod tests {
     /// and writes their status entries.
     #[test]
     fn closing_a_queue_completes_what_was_submitted() {
+        let _serial = queue_tests();
         let data = pattern(8 << 20);
         let (_dir, file) = file_with(&data);
         let (queue, array) = (new_queue(0), status_array(1));
@@ -1807,6 +1824,7 @@ mod tests {
 
     #[test]
     fn file_released_after_enqueue_stays_alive_until_completion() {
+        let _serial = queue_tests();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("released.bin");
         let payload = pattern(128);
@@ -1833,6 +1851,7 @@ mod tests {
 
     #[test]
     fn file_released_after_enqueue_on_closed_queue_drops_reference() {
+        let _serial = queue_tests();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("discarded.bin");
         std::fs::write(&path, pattern(64)).unwrap();
@@ -1852,6 +1871,7 @@ mod tests {
 
     #[test]
     fn factory_methods_reject_null_out_without_leaking() {
+        let _serial = queue_tests();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("null_out.bin");
         std::fs::write(&path, b"hello").unwrap();
