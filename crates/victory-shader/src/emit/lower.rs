@@ -772,8 +772,27 @@ impl<'a> Lower<'a> {
         let ty = if float { f32t } else { i32t };
         let sfx = if float { "f32" } else { "i32" };
         let r = match (op, prefix) {
-            (Op::AddU | Op::AddF, Some(inclusive)) => {
-                let (k0, k1) = (self.s.m.i8(0), self.s.m.i8(1));
+            (
+                Op::AddU
+                | Op::AddF
+                | Op::MinU
+                | Op::MaxU
+                | Op::MinI
+                | Op::MaxI
+                | Op::MinF
+                | Op::MaxF,
+                Some(inclusive),
+            ) => {
+                // The reduction's kind and signedness, as the active one.
+                let (kind, sop) = match op {
+                    Op::AddU => (0, 1),
+                    Op::AddF => (0, 0),
+                    Op::MinU => (2, 1),
+                    Op::MaxU => (3, 1),
+                    Op::MinI | Op::MinF => (2, 0),
+                    _ => (3, 0),
+                };
+                let (k0, k1) = (self.s.m.i8(kind), self.s.m.i8(sop));
                 let r = self.s.op(
                     c,
                     &format!("wavePrefixOp.{sfx}"),
@@ -782,13 +801,28 @@ impl<'a> Lower<'a> {
                     121,
                     &[arg, k0, k1],
                 );
-                if inclusive {
-                    self.s.m.bin(c, Bin::Add, r, arg)
-                } else {
+                if !inclusive {
                     r
+                } else if matches!(op, Op::AddU | Op::AddF) {
+                    self.s.m.bin(c, Bin::Add, r, arg)
+                } else if matches!(op, Op::MinF | Op::MaxF) {
+                    // FMin/FMax keep the non-NaN operand, as `v_min_f32` does:
+                    // a compare and select would keep the NaN one when this
+                    // lane's own term is the NaN.
+                    self.max_min(matches!(op, Op::MaxF), r, arg)
+                } else {
+                    // The prefix is exclusive of the lane's own term, so an
+                    // inclusive one folds it back in.
+                    let p = match op {
+                        Op::MinU => self.s.m.cmp(c, pred::IULT, r, arg),
+                        Op::MaxU => self.s.m.cmp(c, pred::IUGT, r, arg),
+                        Op::MinI => self.s.m.cmp(c, pred::SLT, r, arg),
+                        _ => self.s.m.cmp(c, pred::SGT, r, arg),
+                    };
+                    self.s.m.select(c, p, r, arg)
                 }
             }
-            (_, Some(_)) => return Err("a wave prefix of an operation other than a sum"),
+            (_, Some(_)) => return Err("a wave prefix of a bitwise operation"),
             (Op::Or | Op::And | Op::Xor, None) => {
                 let k = self.s.m.i8(match op {
                     Op::And => 0,
@@ -6961,6 +6995,11 @@ mod tests {
 
     /// Whether a synthetic compute program translates with these input registers.
     fn lowers(words: &[u32], rsrc2: u32) -> Result<(), crate::ShaderError> {
+        lowered(words, rsrc2).map(|_| ())
+    }
+
+    /// [`lowers`], keeping the lowered program so its DXIL can be inspected.
+    fn lowered(words: &[u32], rsrc2: u32) -> Result<Lowered, crate::ShaderError> {
         let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         let native = NativeProgram {
             stage: HwStage::Cs,
@@ -6989,7 +7028,6 @@ mod tests {
             prims: vec![],
             mesh_stride: 0,
         })
-        .map(|_| ())
     }
 
     /// Lowers a compute program with the root parameters `layout` (in user
@@ -7389,6 +7427,74 @@ mod tests {
         assert_eq!(refusal(&words), refusal(&direct));
         words[8] = 0xBF07_8000; // read the group id instead; the timestamp is dead
         lowers(&words, group_ids_xy).expect("dead timestamp");
+    }
+
+    #[test]
+    fn a_wave_prefix_of_min_lowers() {
+        // A whole-wave section that leaves the inclusive prefix of a min:
+        // each lane the minimum of the lanes up to and including it. The
+        // scan runs with `row_shr` steps inside each row, and the first
+        // row's prefix is read out and folded under the second. The store
+        // after the section reads the prefix, so the value cannot be left
+        // missing: a wave prefix of a min has to lower.
+        let words = [
+            0x7E00_0280, // v_mov_b32 v0, 0
+            // 32-bit scalar forms: the wave32 pass follows their masks.
+            0xBE84_3DC1, // s_or_saveexec_b32 s4, -1
+            0x876A_C104, // s_and_b32 s106, s4, -1
+            0x0202_00C1, // v_cndmask_b32 v1, -1, v0, vcc
+            0x2602_02FA, // v_min_u32 v1, v1 row_shr:1, v1
+            0xFF01_1101,
+            0x2602_02FA, // v_min_u32 v1, v1 row_shr:2, v1
+            0xFF01_1201,
+            0x2602_02FA, // v_min_u32 v1, v1 row_shr:3, v1
+            0xFF01_1301,
+            0x2602_02FA, // v_min_u32 v1, v1 row_shr:4, v1
+            0xFF01_1401,
+            0x2602_02FA, // v_min_u32 v1, v1 row_shr:5, v1
+            0xFF01_1501,
+            0x2602_02FA, // v_min_u32 v1, v1 row_shr:6, v1
+            0xFF01_1601,
+            0x2602_02FA, // v_min_u32 v1, v1 row_shr:7, v1
+            0xFF01_1701,
+            0x2602_02FA, // v_min_u32 v1, v1 row_shr:8, v1
+            0xFF01_1801,
+            0x2602_02FA, // v_min_u32 v1, v1 row_shr:9, v1
+            0xFF01_1901,
+            0x2602_02FA, // v_min_u32 v1, v1 row_shr:10, v1
+            0xFF01_1A01,
+            0x2602_02FA, // v_min_u32 v1, v1 row_shr:11, v1
+            0xFF01_1B01,
+            0x2602_02FA, // v_min_u32 v1, v1 row_shr:12, v1
+            0xFF01_1C01,
+            0x2602_02FA, // v_min_u32 v1, v1 row_shr:13, v1
+            0xFF01_1D01,
+            0x2602_02FA, // v_min_u32 v1, v1 row_shr:14, v1
+            0xFF01_1E01,
+            0x2602_02FA, // v_min_u32 v1, v1 row_shr:15, v1
+            0xFF01_1F01,
+            0xD760_0006, // v_readlane_b32 s6, v1, 15
+            0x0001_1F01,
+            0x7E04_0206, // v_mov_b32 v2, s6
+            0x2602_02FA, // v_min_u32 v1, v2 quad_perm:[0,1,2,3] row_mask:0x2, v1
+            0x2F00_E402,
+            0xBEFE_0304, // s_mov_b32 exec_lo, s4
+            0xD834_0000, // ds_write_b32 v0, v1
+            0x0000_0100,
+            S_ENDPGM,
+        ];
+        lowers(&words, 1 << 15).unwrap();
+        // No compiler emits `wavePrefixOp` kind 2, so dxil.dll, where there is
+        // one, is the only check that the module is well formed.
+        #[cfg(windows)]
+        {
+            let out = lowered(&words, 1 << 15).unwrap();
+            if let Ok(mut v) = super::super::validator::Validator::load(
+                super::super::validator::Validator::default_path().as_deref(),
+            ) {
+                v.validate(&mut out.dxil.clone()).unwrap();
+            }
+        }
     }
 
     #[test]
