@@ -71,26 +71,57 @@ pub(crate) fn range(src: usize, len: usize, us: u64, kind: u32) {
     e.2 += us;
 }
 
-fn page_faults() -> u64 {
+/// A process-wide memory snapshot for the diagnostics line. PrivateUsage
+/// is the process commit charge; WorkingSetSize is the resident physical set.
+#[derive(Clone, Copy)]
+struct ProcessMemory {
+    page_faults: u64,
+    private_usage: u64,
+    working_set: u64,
+}
+
+fn process_memory() -> Option<ProcessMemory> {
     use windows_sys::Win32::System::ProcessStatus::{
-        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
-    let mut c = PROCESS_MEMORY_COUNTERS {
-        cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+
+    let mut counters = PROCESS_MEMORY_COUNTERS_EX {
+        cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
         ..Default::default()
     };
-    // SAFETY: our own process and a sized structure.
-    unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
-    u64::from(c.PageFaultCount)
+    // The Win32 API accepts the base structure pointer, but uses cb to read
+    // the extended structure and fill PrivateUsage as well.
+    // SAFETY: our own process and a correctly sized extended structure.
+    let ok = unsafe {
+        K32GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX).cast::<PROCESS_MEMORY_COUNTERS>(),
+            counters.cb,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+
+    Some(ProcessMemory {
+        page_faults: u64::from(counters.PageFaultCount),
+        private_usage: counters.PrivateUsage as u64,
+        working_set: counters.WorkingSetSize as u64,
+    })
 }
 
 /// Logs the counters per frame over `frames` frames, and the ranges that
 /// took most bytes.
 pub(crate) fn log(frames: f64) {
     static FAULTS: AtomicU64 = AtomicU64::new(0);
-    let faults = page_faults();
-    let faults = faults - FAULTS.swap(faults, Relaxed).min(faults);
+    let memory = process_memory();
+    // Keep the previous successful sample when the OS query fails; otherwise
+    // the next successful read would count all lifetime faults as one interval.
+    let faults = memory.map_or(0, |m| {
+        let previous = FAULTS.swap(m.page_faults, Relaxed);
+        m.page_faults.saturating_sub(previous)
+    });
     let c: Vec<f64> = COUNT
         .iter()
         .map(|a| a.swap(0, Relaxed) as f64 / frames)
@@ -127,6 +158,14 @@ pub(crate) fn log(frames: f64) {
         mb(c[C::TexHashed as usize]),
         mb(c[C::TexChanged as usize]),
     );
+    if let Some(memory) = memory {
+        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+        tracing::info!(
+            private_gib = memory.private_usage as f64 / GIB,
+            working_set_gib = memory.working_set as f64 / GIB,
+            "process memory"
+        );
+    }
     let ranges = RANGES.lock().unwrap_or_else(|e| e.into_inner()).take();
     let mut ranges: Vec<_> = ranges.into_iter().flatten().collect();
     ranges.sort_by_key(|&(_, (_, bytes, _, _))| std::cmp::Reverse(bytes));
