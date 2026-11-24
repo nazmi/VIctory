@@ -203,15 +203,35 @@ pub fn run(
         ..Tally::default()
     });
     for root in &paths {
-        for entry in walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(Result::ok)
-        {
-            if !entry.file_type().is_file() || entry.metadata().map_or(0, |m| m.len()) > MAX_FILE {
+        anyhow::ensure!(root.exists(), "path does not exist: {}", root.display());
+        let mut errors = Vec::new();
+        for entry in walkdir::WalkDir::new(root) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    errors.push(format!("cannot walk {}: {e}", root.display()));
+                    continue;
+                }
+            };
+            if !entry.file_type().is_file() {
                 continue;
             }
-            let Ok(data) = std::fs::read(entry.path()) else {
+            let len = match entry.metadata() {
+                Ok(metadata) => metadata.len(),
+                Err(e) => {
+                    errors.push(format!("cannot inspect {}: {e}", entry.path().display()));
+                    continue;
+                }
+            };
+            if len > MAX_FILE {
                 continue;
+            }
+            let data = match std::fs::read(entry.path()) {
+                Ok(data) => data,
+                Err(e) => {
+                    errors.push(format!("cannot read {}: {e}", entry.path().display()));
+                    continue;
+                }
             };
             let jobs = sources(&data);
             let next = AtomicUsize::new(0);
@@ -239,6 +259,12 @@ pub fn run(
                     });
                 }
             });
+        }
+        for error in &errors {
+            eprintln!("{error}");
+        }
+        if !errors.is_empty() {
+            eprintln!("{} input error(s) under {}", errors.len(), root.display());
         }
     }
     let t = total.into_inner().unwrap_or_else(|e| e.into_inner());
@@ -722,10 +748,19 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 #[cfg(test)]
+#[cfg(test)]
 mod tests {
+    /// Guards the process-wide `VICTORY_EMIT_DUMP`: one test sets it, the
+    /// scan tests call `run`, which reads it.
+    pub(super) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Shader dumps are game-derived, so a dump directory in the repo is refused.
     #[test]
     fn emit_dump_inside_repo_is_refused() {
+        let _serial = env_lock();
         // SAFETY: no other test in this binary touches the environment.
         unsafe { std::env::set_var("VICTORY_EMIT_DUMP", env!("CARGO_MANIFEST_DIR")) };
         let missing = std::env::temp_dir().join("victory-translate-no-such-dir");
@@ -769,5 +804,35 @@ mod tests {
                 assert_eq!(total.lines.len(), if list { 3 } else { 0 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+
+    /// `VICTORY_EMIT_DUMP` is process-wide, so the module that sets it and
+    /// these tests must not run at the same time.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        super::tests::env_lock()
+    }
+
+    #[test]
+    fn a_missing_translation_path_is_an_error() {
+        let _serial = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join("not-there");
+        let error = run(vec![absent.clone()], false, false, false, false, None).unwrap_err();
+        assert!(
+            error.to_string().contains(&absent.display().to_string()),
+            "the diagnostic names the path: {error}"
+        );
+    }
+
+    #[test]
+    fn an_empty_translation_directory_succeeds() {
+        let _serial = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        assert!(run(vec![dir.path().to_path_buf()], false, false, false, false, None).is_ok());
     }
 }

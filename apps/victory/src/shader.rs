@@ -75,20 +75,37 @@ pub fn run(paths: Vec<PathBuf>, verbose: bool, disasm: bool) -> Result<()> {
     let paths = crate::default_paths(paths)?;
     let mut t = Totals::default();
     for root in &paths {
-        for entry in walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(Result::ok)
-        {
+        anyhow::ensure!(root.exists(), "path does not exist: {}", root.display());
+        let mut errors = Vec::new();
+        for entry in walkdir::WalkDir::new(root) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    errors.push(format!("cannot walk {}: {e}", root.display()));
+                    continue;
+                }
+            };
             if !entry.file_type().is_file() {
                 continue;
             }
             let path = entry.path();
-            if entry.metadata().map(|m| m.len()).unwrap_or(0) > MAX_FILE {
+            let len = match entry.metadata() {
+                Ok(metadata) => metadata.len(),
+                Err(e) => {
+                    errors.push(format!("cannot inspect {}: {e}", path.display()));
+                    continue;
+                }
+            };
+            if len > MAX_FILE {
                 eprintln!("skipping large file {}", path.display());
                 continue;
             }
-            let Ok(data) = std::fs::read(path) else {
-                continue;
+            let data = match std::fs::read(path) {
+                Ok(data) => data,
+                Err(e) => {
+                    errors.push(format!("cannot read {}: {e}", path.display()));
+                    continue;
+                }
             };
             let mut found_here = 0;
             for source in sources(&data) {
@@ -177,6 +194,12 @@ pub fn run(paths: Vec<PathBuf>, verbose: bool, disasm: bool) -> Result<()> {
             }
             t.files_with_shaders += usize::from(found_here > 0);
         }
+        for error in &errors {
+            eprintln!("{error}");
+        }
+        if !errors.is_empty() {
+            eprintln!("{} input error(s) under {}", errors.len(), root.display());
+        }
     }
     println!(
         "containers found       {} (in {} files)",
@@ -224,4 +247,26 @@ fn format_instruction(i: &Instruction, wave64: bool) -> String {
         None => format!("<{:?} {:#x}>", i.encoding, i.opcode),
     };
     format!("    {:06x}: {:<44} {text}", i.offset, words.join(" "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_scan_path_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join("not-there");
+        let error = run(vec![absent.clone()], false, false).unwrap_err();
+        assert!(
+            error.to_string().contains(&absent.display().to_string()),
+            "the diagnostic names the path: {error}"
+        );
+    }
+
+    #[test]
+    fn an_empty_scan_directory_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(run(vec![dir.path().to_path_buf()], false, false).is_ok());
+    }
 }
