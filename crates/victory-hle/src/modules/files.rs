@@ -125,21 +125,30 @@ fn verbatim(root: &[u16], tail: &[u16]) -> Vec<u16> {
     while out.last() == Some(&backslash) {
         out.pop();
     }
+    for part in parts(tail) {
+        out.push(backslash);
+        out.extend_from_slice(part);
+    }
+    out
+}
+
+const PARENT: [u16; 2] = [b'.' as u16; 2];
+
+/// The names in the title's `tail`, cleaned up as the host would on a drive
+/// of its own: no empty parts, no `.`, and `..` takes the name before it,
+/// or nothing at the root.
+fn parts(tail: &[u16]) -> Vec<&[u16]> {
     let dot = u16::from(b'.');
     let mut parts: Vec<&[u16]> = Vec::new();
     for part in tail.split(|c| SEPARATORS.contains(c)) {
         match part {
             [] => {}
             [d] if *d == dot => {}
-            [d, e] if [*d, *e] == [dot; 2] => drop(parts.pop()),
+            _ if part == PARENT => drop(parts.pop()),
             _ => parts.push(part),
         }
     }
-    for part in parts {
-        out.push(backslash);
-        out.extend_from_slice(part);
-    }
-    out
+    parts
 }
 
 /// The host path, NUL-terminated, for `path` (without its NUL) if it is on
@@ -162,6 +171,28 @@ pub(crate) fn translate(path: &[u16]) -> Option<Vec<u16>> {
     let tail = &rest[2..];
     if prefix.is_empty() && root.len() + tail.len() >= LONG {
         let mut out = verbatim(root, tail);
+        out.push(0);
+        return Some(out);
+    }
+    // The host resolves `..` against the host folder, which has a parent;
+    // to the title the root is a drive's, where `..` stops. So those are
+    // resolved here. (After `\\?\` they are names, to the host as well.)
+    let separator = |c: &u16| SEPARATORS.contains(c);
+    if prefix.is_empty() && tail.split(separator).any(|part| part == PARENT) {
+        let backslash = u16::from(b'\\');
+        let mut out = root.to_vec();
+        while out.last().is_some_and(separator) {
+            out.pop();
+        }
+        let parts = parts(tail);
+        for part in &parts {
+            out.push(backslash);
+            out.extend_from_slice(part);
+        }
+        // The root itself, and a path that ended in a separator, end in one.
+        if parts.is_empty() || tail.last().is_some_and(separator) {
+            out.push(backslash);
+        }
         out.push(0);
         return Some(out);
     }
@@ -820,6 +851,59 @@ mod tests {
         let host = translate(&w(&path)[..path.len()]).map(|v| text(&v));
         let cwd = std::env::current_dir().unwrap();
         assert_eq!(host, Some(cwd.join("a.rpf").display().to_string()));
+    }
+
+    /// To the title a virtual drive's root is a drive root, where `..`
+    /// stops; the host folder behind it has a parent.
+    #[test]
+    fn parent_parts_stop_at_the_drive_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let title = dir.path().join("title");
+        std::fs::create_dir(&title).unwrap();
+        let root = title.to_string_lossy().into_owned();
+        let letter = mount(&title).unwrap();
+        // Through a call: the file lands in the drive's folder, not beside it.
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const CREATE_ALWAYS: u32 = 2;
+        let close = host!("kernel32.dll", "CloseHandle": extern "system" fn(Handle) -> i32);
+        let null = std::ptr::null_mut();
+        let path = w(&format!(r"{letter}:\..\outside.bin"));
+        let h = CreateFileW(
+            path.as_ptr(),
+            GENERIC_WRITE,
+            0,
+            null,
+            CREATE_ALWAYS,
+            0,
+            null,
+        );
+        assert_ne!(h as isize, -1);
+        close(h);
+        assert!(!dir.path().join("outside.bin").exists(), "left the drive");
+        assert!(title.join("outside.bin").is_file());
+
+        let tr = |s: String| translate(&w(&s)[..s.encode_utf16().count()]).map(|v| text(&v));
+        for (path, host) in [
+            (r":\..\outside.bin", r"\outside.bin"),
+            (r":/../outside.bin", r"\outside.bin"),
+            (r":..\outside.bin", r"\outside.bin"),
+            (r":\a\..\..\b\c.bin", r"\b\c.bin"),
+            (r":\a\.\..\..\..\b\", r"\b\"),
+            (r":\..", r"\"),
+            // Inside the drive: the file it always named.
+            (r":\a\..\b.bin", r"\b.bin"),
+        ] {
+            assert_eq!(
+                tr(format!("{letter}{path}")),
+                Some(format!("{root}{host}")),
+                "{path}"
+            );
+        }
+        // Names that only contain dots are names.
+        assert_eq!(
+            tr(format!(r"{letter}:\a..b\..c")),
+            Some(format!(r"{root}\a..b\..c"))
+        );
     }
 
     #[test]
