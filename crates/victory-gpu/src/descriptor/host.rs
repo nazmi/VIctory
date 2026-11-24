@@ -66,6 +66,9 @@ pub(crate) fn near_heaps(va: u64) -> String {
 /// tiers 1 and 2; tier 3 hardware may take more.
 const PORTABLE_VIEWS: u32 = 1_000_000;
 
+/// The D3D12 limit for shader-visible sampler heaps, on every binding tier.
+const PORTABLE_SAMPLERS: u32 = 2_048;
+
 /// Slots past the title's in a view heap, for tables a draw needs made
 /// afresh (constant buffers copied per draw). A list holds the slots it
 /// took until it is reset (its submissions have run) or released.
@@ -99,9 +102,18 @@ impl HostHeap {
         };
         // The larger dynamic range only where the host takes it on top of
         // every title slot; else the smaller one, and the cap after that.
+        let requested = count;
         let (heap, count, extra) = if sampler {
-            match make(count) {
-                Ok(heap) => (heap, count, 0),
+            let supported = count.min(PORTABLE_SAMPLERS);
+            if supported < count {
+                tracing::warn!(
+                    requested = count,
+                    supported,
+                    "host sampler heap capped; higher sampler slots are unavailable"
+                );
+            }
+            match make(supported) {
+                Ok(heap) => (heap, supported, 0),
                 Err(e) => {
                     tracing::warn!(error = %e, count, sampler, "no host descriptor heap");
                     return None;
@@ -135,7 +147,7 @@ impl HostHeap {
                 host.device.GetDescriptorHandleIncrementSize(kind),
             )
         };
-        tracing::debug!(count, sampler, "host descriptor heap");
+        tracing::debug!(requested, count, sampler, "host descriptor heap");
         // SAFETY: a live shader-visible heap.
         let gpu = unsafe { heap.GetGPUDescriptorHandleForHeapStart().ptr };
         GPU_RANGES.lock().unwrap_or_else(|e| e.into_inner()).push((
