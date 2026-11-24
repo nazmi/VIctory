@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -19,7 +19,17 @@ pub fn run(
     // A title that relaunched itself: the old process must be gone first.
     victory_hle::modules::lifecycle::wait_for_previous();
     let cfg = victory_core::Config::load()?;
-    let original = std::fs::read(exe).with_context(|| format!("reading {}", exe.display()))?;
+    let exe = resolve_game_exe(cfg.game_dir.as_deref(), exe);
+    let original = std::fs::read(&exe).with_context(|| match cfg.game_dir.as_deref() {
+        // A bare name that was not found is a path mistake worth naming.
+        Some(dir) => format!(
+            "reading {} (a bare file name is looked up in the configured \
+             game_dir, {})",
+            exe.display(),
+            dir.display()
+        ),
+        None => format!("reading {}", exe.display()),
+    })?;
     let prepared = victory_loader::prepare(&original)?;
     let hash = prepared.original_hash.to_hex();
     match victory_game::identify(&hash) {
@@ -31,7 +41,7 @@ pub fn run(
     victory_hle::modules::d3d12x::use_shader_cache(cfg.cache_subdir("shaders")?);
     let image = victory_loader::load(&prepared, &images)?;
     victory_hle::runtime::set_main_image(image.base());
-    victory_hle::runtime::set_image_path(image.base(), exe);
+    victory_hle::runtime::set_image_path(image.base(), &exe);
     println!(
         "mapped at      {:#x} (preferred {:#x})",
         image.base(),
@@ -335,4 +345,54 @@ mod tests {
 #[cfg(not(windows))]
 pub fn run(_: &Path, _: Unimplemented, _: bool, _: bool, _: Console) -> Result<()> {
     anyhow::bail!("running titles requires Windows")
+}
+
+/// The title's executable: `exe` as given when it exists, or, for a relative
+/// name that does not, the same name inside the configured `game_dir`. So
+/// `victory run game_scarlett_master.exe` works once `[paths].game_dir` is set.
+fn resolve_game_exe(game_dir: Option<&Path>, exe: &Path) -> PathBuf {
+    if exe.is_absolute() || exe.exists() {
+        return exe.to_owned();
+    }
+    match game_dir.map(|dir| dir.join(exe)) {
+        Some(in_game) if in_game.is_file() => in_game,
+        _ => exe.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod exe_tests {
+    use std::path::{Path, PathBuf};
+
+    use super::resolve_game_exe;
+
+    #[test]
+    fn a_bare_name_is_looked_up_in_the_game_dir() {
+        let game = tempfile::tempdir().unwrap();
+        let title = game.path().join("game_scarlett_master.exe");
+        std::fs::write(&title, b"MZ").unwrap();
+
+        // Found in the game folder.
+        assert_eq!(
+            resolve_game_exe(Some(game.path()), Path::new("game_scarlett_master.exe")),
+            title
+        );
+        // An absolute path is used as given, wherever it points.
+        let absolute = game.path().join("elsewhere.exe");
+        assert_eq!(resolve_game_exe(Some(game.path()), &absolute), absolute);
+        // Nothing configured, or nothing there: unchanged, so the read fails
+        // with the path the user typed.
+        let missing = PathBuf::from("absent.exe");
+        assert_eq!(resolve_game_exe(None, &missing), missing);
+        assert_eq!(resolve_game_exe(Some(game.path()), &missing), missing);
+    }
+
+    #[test]
+    fn an_entry_in_the_game_dir_must_be_a_file() {
+        let game = tempfile::tempdir().unwrap();
+        std::fs::create_dir(game.path().join("sub")).unwrap();
+        // A directory of that name is not the title.
+        let name = PathBuf::from("sub");
+        assert_eq!(resolve_game_exe(Some(game.path()), &name), name);
+    }
 }

@@ -81,8 +81,14 @@ cargo test --workspace                   # needs no game data
 ./target/release/victory.exe run "$VICTORY_GAME_DIR/game_scarlett_master.exe" --execute
 ```
 
-Replace the executable name if your title uses a different one. Without
-`VICTORY_GAME_DIR`, pass the full path to the title's executable instead:
+Replace the executable name if your title uses a different one. A bare file
+name is looked up inside `game_dir`, so this works from any directory:
+
+```bash
+./target/release/victory.exe run game_scarlett_master.exe --execute
+```
+
+An absolute path, or a relative path that exists as given, is used as-is:
 
 ```bash
 ./target/release/victory.exe run '/d/Xbox Games/GTA VI/title.exe' --execute
