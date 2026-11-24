@@ -1199,3 +1199,60 @@ implements the same thing, so its versions of `image_gather4_l`, spilled root
 parameters, the stride table, BVH, title-memory ranges and the GPU's watch/
 shadow/resource designs replace ours. `docs/upstream-merge-70564ae.md` records
 each file and lists what would need re-applying if that trade is refused.
+
+### Wave 8: PR review against the merged upstream, and the merge's cost measured: 2026-11-25
+
+**First, the answer to "did the merge lose our work?"** Measured, not guessed. Of
+329 commits with added lines before the merge, **77 introduced declarations
+that no longer exist anywhere in the tree**. Spot-checking behaviour rather than
+names found five genuinely lost features, not just renamed code:
+
+| Ours | After the merge |
+| --- | --- |
+| `f32_to_half` NaN guard + ties-to-even (#843, `67b24154`) | gone: upstream's version turns NaN into infinity |
+| `VICTORY_PIPELINE_WORKERS` (#1728) | gone: hardcoded 2..8 |
+| threaded span-limited copy-back (#1656) | gone: upstream's `goes_back` design |
+| shadow-buffer state tracking (#1691) | gone |
+| atomic unique-temp library writes (#1660) | gone: shared `<file>.tmp` race restored |
+| dropped-draw 5 s interval (#1710) | survived |
+
+Three of those were re-applied here with their tests (NaN/nearest-even, unique
+temp files, worker count). The other two are design-level replacements and
+remain the open decision recorded in `docs/upstream-merge-70564ae.md`.
+
+**Review, three workers over disjoint crates, ~30 PRs triaged.** Integrated:
+#1146 (capture folder created before writing), #1161 (BCPack documented as
+implemented), #1474 (WAVE_OPS set where `lane_bit` emits `waveGetLaneIndex`),
+#1592 (`--list` marks emitted shaders), #1058 (CI serialises libtest),
+#1505 (pipeline workers at the title's priority), #1177 (census dedupes paths),
+#1507 (indirect argument buffers back to COMMON), #1236 (descriptor slots no
+longer inferred from GPU fault VAs; heaps named for DRED), #1180 (opcode name
+resolved at decode, with a new non-vacuous test).
+
+**Duplicates, each checked against upstream's own code rather than assumed:**
+#957 (upstream `xg.rs:697` already asserts the TEXTURE_1D swizzle), #1103
+(upstream `lower.rs:4051` handles SMEM descriptor_data stride-aware, and the
+PR's arm would shadow it with a raw `11`), #1057 (`structure.rs` folds a
+0/all-ones mask one layer earlier, so the added arms are unreachable), #299
+(already integrated as `4d566336`).
+
+**Refused:** #1030 adds `VIctory_GTA6_Progress.zip` — a game-derived dump the
+asset policy forbids, and its body describes features not in the diff. #962
+deletes `.gitignore` entirely. **Obsolete:** #513 (`run::run()` no longer takes
+`title_args`; the target block is gone — though that means title arguments are
+now dropped entirely, recorded as a gap).
+
+**A pre-existing failure worth naming.** `cargo test -p victory-gpu` aborts
+with `0xc0000409 STATUS_STACK_BUFFER_OVERRUN` in
+`resource::tests::buffer_data_reaches_the_host_texture`, and six more device
+tests fail in-suite, **identically on a clean `upstream/main` checkout**. They
+pass individually. Every GPU gate in this log therefore skips that list by
+name; that is a skip, not coverage, and it predates this branch's work.
+
+**Topology.** The 17 reviewed commits are on `wave8/review` and merged into
+`integration/maintenance` with `--no-ff` as `27ebc64d` (parents `d3a82737` and
+`d7b57e02`), then pushed as a fast-forward. Tree identical to the reviewed
+branch (`git diff wave8/review HEAD` empty).
+
+Gate at `27ebc64d`: fmt 0 differing, both Clippy gates 0 errors, policy 220
+files, workspace **662 passed / 0 failed** with the 10 documented GPU skips.
