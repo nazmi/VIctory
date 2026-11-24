@@ -3007,9 +3007,12 @@ impl<'a> Lower<'a> {
                     0 => 1,
                     1 => 2,
                     2 => 4,
+                    3 => 5,
                     4 => 6,
                     5 => 7,
-                    _ => return Err("an image dimension (cube or MSAA)"),
+                    6 => 3,
+                    7 => 8,
+                    _ => return Err("an image dimension"),
                 };
                 ((kind | u, 0x409), Some(kind))
             }
@@ -3035,7 +3038,7 @@ impl<'a> Lower<'a> {
         let c = self.cur;
         let i32t = self.s.t.i32;
         let dims = self.s.m.named_struct("dx.types.Dimensions", vec![i32t; 4]);
-        let mip = if image.is_some() && !uav {
+        let mip = if image.is_some_and(|k| !matches!(k, 3 | 8)) && !uav {
             self.s.m.i32(0)
         } else {
             self.s.m.undef(i32t)
@@ -3050,18 +3053,24 @@ impl<'a> Lower<'a> {
                 let w = field(self, 0);
                 let (height, depth) = match kind {
                     1 => (one, one),
-                    2 => (field(self, 1), one),
+                    2 | 3 => (field(self, 1), one),
+                    5 => (field(self, 1), self.s.m.i32(6)),
                     6 => (one, field(self, 1)),
                     _ => (field(self, 1), field(self, 2)),
                 };
-                let levels = if uav { one } else { field(self, 3) };
                 let less = |l: &mut Self, x: V| l.s.m.bin(c, Bin::Sub, x, one);
-                let (w, height, depth, levels) = (
-                    less(self, w),
-                    less(self, height),
-                    less(self, depth),
-                    less(self, levels),
-                );
+                let levels = if matches!(kind, 3 | 8) {
+                    // For MSAA, last_level holds log2(samples).
+                    let samples = field(self, 3);
+                    self.s
+                        .op(c, "firstbitLo.i32", Attr::ReadNone, i32t, 32, &[samples])
+                } else if uav {
+                    self.s.m.i32(0)
+                } else {
+                    let n = field(self, 3);
+                    less(self, n)
+                };
+                let (w, height, depth) = (less(self, w), less(self, height), less(self, depth));
                 let k = |l: &mut Self, v: u32| l.s.m.i32(v);
                 let (k30, k2, k14, k16, mask) = (
                     k(self, 30),
@@ -3075,7 +3084,7 @@ impl<'a> Lower<'a> {
                 let hi = self.s.m.bin(c, Bin::And, hi, mask);
                 let ht = self.s.m.bin(c, Bin::Shl, height, k14);
                 let d2 = self.s.m.bin(c, Bin::Or, hi, ht);
-                let ty = [0, 8, 9, 0, 10, 0, 12, 13][kind as usize];
+                let ty = [0, 8, 9, 14, 10, 11, 12, 13, 15][kind as usize];
                 let base = k(self, 0xFAC | ty << 28);
                 let last = self.s.m.bin(c, Bin::Shl, levels, k16);
                 let d3 = self.s.m.bin(c, Bin::Or, base, last);
@@ -7588,5 +7597,74 @@ mod tests {
         assert!(f10(0x3FF).is_nan());
         // A 16-bit float is a half already, sign included.
         assert_eq!(half(0xBC00 << half_shift(16)), -1.0);
+    }
+
+    #[test]
+    fn cube_and_msaa_descriptor_data_lower() {
+        use crate::native::{RootParam, RootType};
+
+        for dim in [3u32, 6, 7] {
+            // s_mov_b32 s1, 0
+            // s_load_dwordx8 s[4:11], s[0:1], null
+            // s_lshr_b32 s12, s7, 16        (reads descriptor word 3 as data)
+            // s_cmp_lg_u32 s12, 0
+            // s_cbranch_scc1 -> s_endpgm
+            // s_mov_b32 s13, 0
+            // v_mov_b32 v0..v3, 0
+            // image_get_resinfo (dim) v0, v0, s[4:11]  (op 0x0e, dmask=1)
+            // s_endpgm
+            let mimg_w0 = 0xF000_0000 | (0x0E << 18) | (1 << 8) | (dim << 3);
+            let words = [
+                0xBE81_0380u32,
+                0xF40C_0100,
+                0xFA00_0000,
+                0x900C_9007,
+                0xBF07_800C,
+                0xBF85_0001,
+                0xBE8D_0380,
+                0x7E00_0280,
+                mimg_w0,
+                0x0001_0000,
+                S_ENDPGM,
+            ];
+            let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            let native = NativeProgram {
+                stage: HwStage::Cs,
+                wave64: false,
+                vgprs: 4,
+                layout: vec![RootParam {
+                    root: RootType::Table,
+                    table_offset_dwords: 0,
+                    sgprs: 1,
+                    base_register: 0,
+                    user_data: 0,
+                    slot: 0,
+                }],
+                used: vec![],
+                io: StageIo::Cs(ComputeIo {
+                    rsrc2: 0,
+                    threads: [1, 1, 1],
+                }),
+                code,
+            };
+            let p = ir::build(&native.code, false, 4).unwrap();
+            let st = structure::structure(&p).unwrap();
+            let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+            let io = io::raise(&p, &native).unwrap();
+            let out = lower(&Parts {
+                native: &native,
+                p: &p,
+                st: &st,
+                io: &io,
+                res: &res,
+                inputs: vec![],
+                outputs: vec![],
+                prims: vec![],
+                mesh_stride: 0,
+            });
+            // Cube (3) and MSAA (6, 7) descriptor_data() all lower without failing
+            // on "an image dimension (cube or MSAA)".
+            out.unwrap();
+        }
     }
 }
