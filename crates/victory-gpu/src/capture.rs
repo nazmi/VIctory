@@ -271,8 +271,101 @@ fn dump_on() -> bool {
     *ON.get_or_init(|| folder().is_some() && crate::switch::on("VICTORY_DUMP_TARGETS"))
 }
 
+/// `VICTORY_SHOW_TARGET=<w>x<h>-f<format>` (e.g. `2560x1440-f28`): the size and format of
+/// the render target to show in place of the title's frame.
+fn show_spec() -> Option<(u64, u32, i32)> {
+    static SPEC: std::sync::OnceLock<Option<(u64, u32, i32)>> = std::sync::OnceLock::new();
+    *SPEC.get_or_init(|| parse_show_spec(&std::env::var("VICTORY_SHOW_TARGET").ok()?))
+}
+
+/// `<w>x<h>-f<format>` as (width, height, DXGI format); `None` if malformed.
+fn parse_show_spec(v: &str) -> Option<(u64, u32, i32)> {
+    let (size, format) = v.trim().split_once("-f")?;
+    let (w, h) = size.split_once('x')?;
+    Some((w.parse().ok()?, h.parse().ok()?, format.parse().ok()?))
+}
+
+#[cfg(test)]
+mod show_tests {
+    #[test]
+    fn show_spec_reads_size_and_format() {
+        assert_eq!(
+            super::parse_show_spec(" 2560x1440-f28 "),
+            Some((2560, 1440, 28))
+        );
+        assert_eq!(super::parse_show_spec("2560x1440"), None);
+        assert_eq!(super::parse_show_spec("2560-f28"), None);
+        assert_eq!(super::parse_show_spec("ax1440-f28"), None);
+    }
+}
+
+/// The last render target bound that matches [`show_spec`].
+static SHOWN: std::sync::Mutex<Option<std::sync::Arc<crate::resource::HostTexture>>> =
+    std::sync::Mutex::new(None);
+
+/// Records, into `list`, a copy of the [`SHOWN`] target to the top left of
+/// `back` (in the copy-destination state); false (nothing recorded) without
+/// one or when the formats differ.
+/// shortcut: copies 1:1 without scaling or conversion; a blit shader would fit any target.
+pub(crate) fn show(list: &ID3D12GraphicsCommandList, back: &ID3D12Resource) -> bool {
+    let Some(shown) = SHOWN.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+        return false;
+    };
+    let texture = &shown.texture;
+    // SAFETY: live resources.
+    let (d, b) = unsafe { (texture.GetDesc(), back.GetDesc()) };
+    if d.Format != b.Format {
+        return false;
+    }
+    let state = D3D12_RESOURCE_STATES(crate::host::legal_state(
+        texture,
+        shown.state.load(std::sync::atomic::Ordering::Relaxed),
+    ) as i32);
+    let copy = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    let area = D3D12_BOX {
+        right: d.Width.min(b.Width) as u32,
+        bottom: d.Height.min(b.Height),
+        back: 1,
+        ..Default::default()
+    };
+    // SAFETY: an open list of ours; both live, `back` already a copy destination.
+    unsafe {
+        if state != copy {
+            list.ResourceBarrier(&[crate::host::transition(texture, state, copy)]);
+        }
+        let dst = D3D12_TEXTURE_COPY_LOCATION {
+            pResource: std::mem::transmute_copy(back),
+            Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                SubresourceIndex: 0,
+            },
+        };
+        let src = D3D12_TEXTURE_COPY_LOCATION {
+            pResource: std::mem::transmute_copy(texture),
+            Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                SubresourceIndex: 0,
+            },
+        };
+        list.CopyTextureRegion(&dst, 0, 0, 0, &src, Some(&area));
+        if state != copy {
+            list.ResourceBarrier(&[crate::host::transition(texture, copy, state)]);
+        }
+    }
+    true
+}
+
 /// Notes a title texture the frame being built renders to or writes.
 pub(crate) fn note_target(resource: crate::object::This) {
+    if let Some((w, h, f)) = show_spec()
+        && let Some(copy) = crate::resource::host_copy(resource)
+    {
+        // SAFETY: a live resource.
+        let d = unsafe { copy.texture.GetDesc() };
+        if (d.Width, d.Height, d.Format.0) == (w, h, f) {
+            *SHOWN.lock().unwrap_or_else(|e| e.into_inner()) = Some(copy);
+        }
+    }
     if resource.is_null() || !dump_on() || !listed(crate::queue::presented() + 1) {
         return;
     }

@@ -2142,7 +2142,14 @@ impl Host {
                     D3D12_RESOURCE_STATE_COPY_DEST,
                 ),
             ]);
-            list.CopyResource(&back, texture);
+            // Diagnostics: `VICTORY_SHOW_TARGET` shows one of the title's render targets instead.
+            #[cfg(feature = "diagnostics")]
+            let shown = crate::capture::show(list, &back);
+            #[cfg(not(feature = "diagnostics"))]
+            let shown = false;
+            if !shown {
+                list.CopyResource(&back, texture);
+            }
             #[cfg(feature = "diagnostics")]
             let capture = crate::capture::wanted(frame)
                 .then(|| crate::capture::read_back(&self.device, list, texture))
