@@ -204,6 +204,7 @@ The on/off switches below (`...=1`) are off when unset or set to `0`.
 | `VICTORY_STACKS=20,60` | every thread's stack at those seconds |
 | `VICTORY_WATCH=<rva>,...` | logs a title u32 when it changes |
 | `VICTORY_KEYS=30:Enter,35:X` | presses keys at those seconds, focus or not |
+| `VICTORY_NO_HOST_PAD=1` | ignores XInput pads, so the keyboard drives the stand-in pad |
 | `VICTORY_CRASH_SAVE=<rva>:<len>,...` | saves title memory to the cache folder on a crash |
 | `VICTORY_CAPTURE=<dir>` | saves presented frames (powers of two, or `VICTORY_CAPTURE_FRAMES=<list>`) |
 | `VICTORY_CAPTURE_DRAWS=<draws>[,<frames>]` | with the above, the first frame recording at least `draws` draws picks the `frames` frames after it (default 3), as if listed: for a scene whose frame number moves between runs |

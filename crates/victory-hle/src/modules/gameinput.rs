@@ -1239,9 +1239,24 @@ mod host {
         }
     }
 
-    #[derive(Default)]
+    /// XInput pads, and `VICTORY_NO_HOST_PAD` to ignore them: a host pad the
+    /// title mis-handles would otherwise keep the keyboard stand-in unplugged.
     pub(super) struct Host {
         empty_until: [Option<Instant>; PADS],
+        hide_pads: bool,
+    }
+
+    impl Default for Host {
+        fn default() -> Self {
+            let hide_pads = std::env::var_os("VICTORY_NO_HOST_PAD").is_some();
+            if hide_pads {
+                tracing::info!("VICTORY_NO_HOST_PAD: ignoring XInput pads");
+            }
+            Host {
+                empty_until: [None; PADS],
+                hide_pads,
+            }
+        }
     }
 
     /// Only the diagnostics key script reaches this; a host pad reports
@@ -1260,6 +1275,9 @@ mod host {
 
     impl Source for Host {
         fn pad(&mut self, slot: usize) -> Option<PadState> {
+            if self.hide_pads {
+                return None;
+            }
             if self.empty_until[slot].is_some_and(|until| Instant::now() < until) {
                 return None;
             }
@@ -1454,6 +1472,17 @@ mod host {
             GetWindowThreadProcessId(GetForegroundWindow(), &mut process);
             process == GetCurrentProcessId()
         }
+    }
+
+    #[test]
+    fn host_pads_can_be_hidden_for_the_keyboard_stand_in() {
+        let mut host = Host {
+            empty_until: [None; PADS],
+            hide_pads: true,
+        };
+        // No XInput call is made, whatever the slots are.
+        assert!(host.pad(0).is_none());
+        assert!(host.pad(3).is_none());
     }
 
     #[test]
