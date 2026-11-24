@@ -22,6 +22,7 @@ use windows::Win32::Graphics::Direct3D12::*;
 
 use crate::host::{HostList, host};
 use crate::object::This;
+use crate::resource::HostTexture;
 
 macro_rules! once {
     ($($arg:tt)*) => {{
@@ -178,20 +179,43 @@ fn placed_sync_on() -> bool {
     })
 }
 
+/// One subresource of a placed copy, staged: the writer's texels as a buffer
+/// holds them, and the same bytes as the placed copy's format reads them.
+struct Placement {
+    /// With the writer's format (texture to buffer): where in the buffer the
+    /// writer's subresource goes.
+    from: D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
+    /// With the placed copy's format (buffer to texture): where the same
+    /// bytes start for the placed copy's subresource.
+    to: D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
+    /// The part of the subresource both textures have (the smaller of the
+    /// two at this mip): the copy box at both ends, so neither can be asked
+    /// for texels past its own mip.
+    copy: D3D12_BOX,
+}
+
 /// The staged copy of one placed copy's contents from the resource that
 /// writes its memory. The two formats are of different families (the writer
 /// writes 32-bit words, the reader's is the console's packed one), which the
-/// host refuses to copy between, so the texels go through a buffer that
-/// names the writer's format at one end and the placed copy's at the other.
+/// host refuses to copy a texture between, so the texels go through a buffer
+/// that names the writer's format at one end and the placed copy's at the
+/// other.
 struct PlaceSync {
     buffer: ID3D12Resource,
-    /// Per subresource, with the writer's format (texture to buffer).
-    from: Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>,
-    /// The same, with the placed copy's format (buffer to texture).
-    to: Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>,
+    /// The descriptions the buffer and its footprints were made for. A
+    /// released host texture's address comes back for another one, so a
+    /// cached cell is only used while both descriptions are the same: the
+    /// other one's formats, sizes and mips are what a copy is made of.
+    from_desc: D3D12_RESOURCE_DESC,
+    to_desc: D3D12_RESOURCE_DESC,
+    /// The subresources, as one buffer holds them.
+    subs: Vec<Placement>,
 }
 
-static PLACE_SYNCS: Mutex<Option<HashMap<(usize, usize), Arc<PlaceSync>>>> = Mutex::new(None);
+/// The recorded copies, by the two host textures' addresses.
+type PlaceSyncs = HashMap<(usize, usize), Arc<PlaceSync>>;
+
+static PLACE_SYNCS: Mutex<Option<PlaceSyncs>> = Mutex::new(None);
 
 /// Copies of placed copies recorded since the frame line last read it.
 static SYNCS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -201,56 +225,201 @@ pub(crate) fn take_syncs() -> u64 {
     SYNCS.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The staging state of the pair (writer, placed copy), made on first use.
-fn place_sync(
-    writer: &ID3D12Resource,
-    placed: &ID3D12Resource,
-    address: u64,
-) -> Option<Arc<PlaceSync>> {
-    use windows::core::Interface;
-    let key = (writer.as_raw() as usize, placed.as_raw() as usize);
-    {
-        let map = PLACE_SYNCS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(cell) = map.as_ref().and_then(|m| m.get(&key)) {
-            return Some(cell.clone());
-        }
-    }
-    let host = host()?;
-    // SAFETY: live resources.
-    let (from_desc, to_desc) = unsafe { (writer.GetDesc(), placed.GetDesc()) };
-    let count = if from_desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D {
-        u32::from(from_desc.MipLevels)
+/// The host's copyable layout of a texture: the bytes of the staging buffer
+/// that holds it, and one footprint per subresource (`None` for a
+/// description the host has no layout for).
+struct Layout {
+    total: u64,
+    subs: Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>,
+}
+
+/// [`Layout`] of a description, from the host.
+fn layout(desc: &D3D12_RESOURCE_DESC) -> Option<Layout> {
+    let device = &host()?.device;
+    let mips = u32::from(desc.MipLevels);
+    let count = if desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D {
+        mips
     } else {
-        u32::from(from_desc.MipLevels) * u32::from(from_desc.DepthOrArraySize)
+        mips.checked_mul(u32::from(desc.DepthOrArraySize))?
     };
-    let mut from = vec![D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default(); count as usize];
+    if count == 0 {
+        return None;
+    }
+    let mut subs = vec![D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default(); count as usize];
     let mut total = 0u64;
     // SAFETY: outputs for `count` subresources.
     unsafe {
-        host.device.GetCopyableFootprints(
-            &from_desc,
+        device.GetCopyableFootprints(
+            desc,
             0,
             count,
             0,
-            Some(from.as_mut_ptr()),
+            Some(subs.as_mut_ptr()),
             None,
             None,
             Some(&mut total),
         );
     }
-    if total == 0 {
+    (total != 0).then_some(Layout { total, subs })
+}
+
+/// The bytes one row of `sub` holds, without the pitch's padding, from the
+/// description (the host's own row sizes are not the ones a copy reads by
+/// for a 3D texture).
+fn row_bytes(desc: &D3D12_RESOURCE_DESC, sub: u32) -> Option<u64> {
+    let (bytes, block) = crate::resource::element(desc.Format.0 as u32)?;
+    let mips = u32::from(desc.MipLevels).max(1);
+    let mip = if desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D {
+        sub
+    } else {
+        sub % mips
+    };
+    let width = (desc.Width >> mip).max(1).div_ceil(block);
+    Some(width * bytes)
+}
+
+/// The buffer layout of the pair: the writer's subresources as a buffer
+/// holds them, and the same bytes as the placed copy's format reads them.
+/// `None` when the two do not hold the same texels in the same places, in
+/// which case no copy is recorded at all.
+fn placements(
+    writer: &D3D12_RESOURCE_DESC,
+    placed: &D3D12_RESOURCE_DESC,
+) -> Option<(u64, Vec<Placement>)> {
+    let from = layout(writer)?;
+    let to = layout(placed)?;
+    if from.subs.len() != to.subs.len() {
         return None;
     }
-    // The same rows both ways (the two formats are the same bytes per
-    // texel); the footprint names whichever format that end's resource has.
-    let to: Vec<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> = from
-        .iter()
-        .map(|f| {
-            let mut f = *f;
-            f.Footprint.Format = to_desc.Format;
-            f
-        })
-        .collect();
+    let total = from.total.max(to.total);
+    let mut subs = Vec::with_capacity(from.subs.len());
+    for (i, (from_sub, to_sub)) in from.subs.into_iter().zip(to.subs).enumerate() {
+        let (a, b) = (from_sub.Footprint, to_sub.Footprint);
+        // The same rows both ways: a row-per-row copy through the buffer
+        // needs the two ends laid out alike (same bytes per row and texel,
+        // same rows and slices, the same places in the buffer).
+        let row = row_bytes(writer, i as u32)?;
+        if a.Width != b.Width
+            || a.Height != b.Height
+            || a.Depth != b.Depth
+            || a.RowPitch != b.RowPitch
+            || from_sub.Offset != to_sub.Offset
+            || row != row_bytes(placed, i as u32)?
+            || row > u64::from(a.RowPitch)
+        {
+            return None;
+        }
+        // The footprint must lie inside the buffer: every row of every
+        // slice, the last one as long as its row is (the pitch pads the
+        // others).
+        let rows = u64::from(a.Height).checked_mul(u64::from(a.Depth))?;
+        let end = rows
+            .checked_sub(1)?
+            .checked_mul(u64::from(a.RowPitch))?
+            .checked_add(row)?
+            .checked_add(from_sub.Offset)?;
+        if a.Width == 0 || a.Height == 0 || a.Depth == 0 || end > total {
+            return None;
+        }
+        subs.push(Placement {
+            from: from_sub,
+            to: to_sub,
+            copy: D3D12_BOX {
+                left: 0,
+                top: 0,
+                front: 0,
+                right: a.Width,
+                bottom: a.Height,
+                back: a.Depth,
+            },
+        });
+    }
+    Some((total, subs))
+}
+
+/// Whether the host copies a texture of `format` in `dimension`: the copy
+/// commands take only formats the adapter can make a texture of.
+fn copyable(device: &ID3D12Device, format: u32, dimension: D3D12_RESOURCE_DIMENSION) -> bool {
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
+    let wanted = match dimension {
+        D3D12_RESOURCE_DIMENSION_TEXTURE1D => D3D12_FORMAT_SUPPORT1_TEXTURE1D,
+        D3D12_RESOURCE_DIMENSION_TEXTURE2D => D3D12_FORMAT_SUPPORT1_TEXTURE2D,
+        D3D12_RESOURCE_DIMENSION_TEXTURE3D => D3D12_FORMAT_SUPPORT1_TEXTURE3D,
+        _ => return false,
+    };
+    let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
+        Format: DXGI_FORMAT(format as i32),
+        ..Default::default()
+    };
+    // SAFETY: the query writes the structure it is given, whole.
+    let asked = unsafe {
+        device.CheckFeatureSupport(
+            D3D12_FEATURE_FORMAT_SUPPORT,
+            std::ptr::from_mut(&mut support).cast(),
+            size_of::<D3D12_FEATURE_DATA_FORMAT_SUPPORT>() as u32,
+        )
+    };
+    asked.is_ok() && support.Support1.contains(wanted)
+}
+
+/// The staging state of the pair (writer, placed copy), made on first use
+/// and remade when the descriptions behind its addresses changed.
+fn place_sync(writer: &HostTexture, placed: &HostTexture, address: u64) -> Option<Arc<PlaceSync>> {
+    use windows::core::Interface;
+    let device = &host()?.device;
+    // SAFETY: live host textures, both held by the caller across the copy.
+    let (from_desc, to_desc) = unsafe { (writer.texture.GetDesc(), placed.texture.GetDesc()) };
+    let refuse = |why: &str| {
+        tracing::debug!(
+            why,
+            address = format_args!("{address:#x}"),
+            from = ?from_desc,
+            to = ?to_desc,
+            "placed copy: not staged"
+        );
+        None
+    };
+    if writer.texture.as_raw() == placed.texture.as_raw() {
+        return refuse("the same texture");
+    }
+    let texture = |d: &D3D12_RESOURCE_DESC| {
+        d.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER
+            && d.SampleDesc.Count == 1
+            // The copy commands take only the plain layout.
+            && d.Layout == D3D12_TEXTURE_LAYOUT_UNKNOWN
+    };
+    if !texture(&from_desc) || !texture(&to_desc) || from_desc.Dimension != to_desc.Dimension {
+        return refuse("not two single-sample plain textures of one dimension");
+    }
+    if from_desc.Format == to_desc.Format {
+        return refuse("the same format at both ends: no buffer needed");
+    }
+    // The same texels: the same bytes and block width at both ends, so the
+    // rows the writer leaves are the rows the reader reads.
+    let (from_bytes, from_block) = crate::resource::element(from_desc.Format.0 as u32)?;
+    let (to_bytes, to_block) = crate::resource::element(to_desc.Format.0 as u32)?;
+    if (from_bytes, from_block) != (to_bytes, to_block) {
+        return refuse("formats of different texel sizes");
+    }
+    if !copyable(device, from_desc.Format.0 as u32, from_desc.Dimension)
+        || !copyable(device, to_desc.Format.0 as u32, to_desc.Dimension)
+    {
+        return refuse("a format the host cannot copy as a texture");
+    }
+    let key = (writer.texture.as_raw() as usize, placed.texture.as_raw() as usize);
+    {
+        let map = PLACE_SYNCS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(cell) = map.as_ref().and_then(|m| m.get(&key))
+            && cell.from_desc == from_desc
+            && cell.to_desc == to_desc
+        {
+            return Some(cell.clone());
+        }
+    }
+    let (total, subs) = placements(&from_desc, &to_desc)?;
+    if subs.is_empty() {
+        return None;
+    }
     let desc = D3D12_RESOURCE_DESC {
         Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
         Width: total,
@@ -271,7 +440,7 @@ fn place_sync(
     let mut buffer: Option<ID3D12Resource> = None;
     // SAFETY: plain creation of a staging buffer.
     unsafe {
-        host.device
+        device
             .CreateCommittedResource(
                 &heap,
                 D3D12_HEAP_FLAG_NONE,
@@ -286,7 +455,7 @@ fn place_sync(
     crate::host::name(&buffer, || format!("placed copy staging {total:#x}"));
     tracing::info!(
         bytes = total,
-        subresources = count,
+        subresources = subs.len(),
         from = from_desc.Format.0,
         to = to_desc.Format.0,
         width = from_desc.Width,
@@ -295,7 +464,12 @@ fn place_sync(
         address = format_args!("{address:#x}"),
         "placed copy: staged between the writer's format and the placed one"
     );
-    let cell = Arc::new(PlaceSync { buffer, from, to });
+    let cell = Arc::new(PlaceSync {
+        buffer,
+        from_desc,
+        to_desc,
+        subs,
+    });
     let mut map = PLACE_SYNCS.lock().unwrap_or_else(|e| e.into_inner());
     map.get_or_insert_with(HashMap::new)
         .insert(key, cell.clone());
@@ -342,13 +516,19 @@ pub(crate) fn sync_placed(list: &HostList, placed: This, view: &crate::descripto
     else {
         return false;
     };
-    let Some(cell) = place_sync(&writer.texture, &placed_copy.texture, memory as u64) else {
+    // Both host copies are held here until the copy is recorded below, and
+    // the list keeps them (and the staging buffer) until it is reset: a
+    // concurrent release cannot free what the recorded copy names.
+    let Some(cell) = place_sync(&writer, &placed_copy, memory as u64) else {
         return false;
     };
     if !list.first_sync(Arc::as_ptr(&placed_copy) as usize) {
         return true;
     }
     SYNCS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    list.keep(&cell.buffer);
+    list.keep(&writer.texture);
+    list.keep(&placed_copy.texture);
     const COPY_DEST: u32 = 0x400;
     const COPY_SOURCE: u32 = 0x800;
     // The writer's shaders may have written it: a barrier orders the copy
@@ -356,7 +536,7 @@ pub(crate) fn sync_placed(list: &HostList, placed: This, view: &crate::descripto
     // uses it).
     crate::list::ensure_state_host(list, &writer, COPY_SOURCE);
     crate::list::ensure_state_host(list, &placed_copy, COPY_DEST);
-    for (i, from) in cell.from.iter().enumerate() {
+    for (i, sub) in cell.subs.iter().enumerate() {
         let source = D3D12_TEXTURE_COPY_LOCATION {
             // SAFETY: borrowed pointers the locations never release.
             pResource: unsafe { std::mem::transmute_copy(&writer.texture) },
@@ -370,47 +550,47 @@ pub(crate) fn sync_placed(list: &HostList, placed: This, view: &crate::descripto
             pResource: unsafe { std::mem::transmute_copy(&cell.buffer) },
             Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                PlacedFootprint: *from,
+                PlacedFootprint: sub.from,
             },
         };
-        // SAFETY: an open list; both locations name live resources of the
-        // same size and texel width.
         #[cfg(feature = "diagnostics")]
-        {
-            let (from_f, to_f) = (
-                cell.from[i].Footprint.Format.0,
-                cell.to[i].Footprint.Format.0,
-            );
-            let (w, h, d) = (
-                cell.from[i].Footprint.Width,
-                cell.from[i].Footprint.Height,
-                cell.from[i].Footprint.Depth,
-            );
-            list.note_read(
-                || {
-                    format!(
-                        "placed copy {:#x} sub {i} of {} from the writer: {:#x} {w}x{h}x{d} f{from_f} to f{to_f}",
-                        placed as usize,
-                        cell.from.len(),
-                        memory as usize,
-                    )
-                },
-                (0, 0),
-            );
-        }
+        list.note_read(
+            || {
+                format!(
+                    "placed copy {:#x} sub {i} of {} from the writer: {:#x} {w}x{h}x{d} f{from_f} to f{to_f}",
+                    placed as usize,
+                    cell.subs.len(),
+                    memory as usize,
+                    w = sub.copy.right,
+                    h = sub.copy.bottom,
+                    d = sub.copy.back,
+                    from_f = sub.from.Footprint.Format.0,
+                    to_f = cell.to_desc.Format.0,
+                )
+            },
+            (0, 0),
+        );
+        // SAFETY: an open list; both locations name live resources, and the
+        // box is inside each subresource and the buffer (`placements`).
         unsafe {
-            list.list
-                .CopyTextureRegion(&staging, 0, 0, 0, &source, None)
+            list.list.CopyTextureRegion(
+                &staging,
+                0,
+                0,
+                0,
+                &source,
+                Some(&raw const sub.copy),
+            )
         };
     }
     staging_barrier(list, &cell.buffer, COPY_DEST, COPY_SOURCE);
-    for (i, to) in cell.to.iter().enumerate() {
+    for (i, sub) in cell.subs.iter().enumerate() {
         let staging = D3D12_TEXTURE_COPY_LOCATION {
             // SAFETY: borrowed pointers the locations never release.
             pResource: unsafe { std::mem::transmute_copy(&cell.buffer) },
             Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                PlacedFootprint: *to,
+                PlacedFootprint: sub.to,
             },
         };
         let placed_at = D3D12_TEXTURE_COPY_LOCATION {
@@ -421,39 +601,40 @@ pub(crate) fn sync_placed(list: &HostList, placed: This, view: &crate::descripto
                 SubresourceIndex: i as u32,
             },
         };
-        // SAFETY: an open list; the staging buffer covers the subresource.
         #[cfg(feature = "diagnostics")]
-        {
-            let (from_f, to_f) = (
-                cell.from[i].Footprint.Format.0,
-                cell.to[i].Footprint.Format.0,
-            );
-            let (w, h, d) = (
-                cell.to[i].Footprint.Width,
-                cell.to[i].Footprint.Height,
-                cell.to[i].Footprint.Depth,
-            );
-            list.note_read(
-                || {
-                    format!(
-                        "placed copy {:#x} sub {i} of {} to the placed copy: {:#x} {w}x{h}x{d} f{from_f} to f{to_f}",
-                        placed as usize,
-                        cell.from.len(),
-                        memory as usize,
-                    )
-                },
-                (0, 0),
-            );
-        }
+        list.note_read(
+            || {
+                format!(
+                    "placed copy {:#x} sub {i} of {} to the placed copy: {:#x} {w}x{h}x{d} f{from_f} to f{to_f}",
+                    placed as usize,
+                    cell.subs.len(),
+                    memory as usize,
+                    w = sub.copy.right,
+                    h = sub.copy.bottom,
+                    d = sub.copy.back,
+                    from_f = sub.to.Footprint.Format.0,
+                    to_f = cell.to_desc.Format.0,
+                )
+            },
+            (0, 0),
+        );
+        // SAFETY: an open list; the staging buffer covers the subresource,
+        // and the box is inside the placed copy's subresource.
         unsafe {
-            list.list
-                .CopyTextureRegion(&placed_at, 0, 0, 0, &staging, None)
+            list.list.CopyTextureRegion(
+                &placed_at,
+                0,
+                0,
+                0,
+                &staging,
+                Some(&raw const sub.copy),
+            )
         };
     }
     staging_barrier(list, &cell.buffer, COPY_SOURCE, COPY_DEST);
     tracing::debug!(
         placed = format_args!("{:#x}", placed as usize),
-        subresources = cell.from.len(),
+        subresources = cell.subs.len(),
         address = format_args!("{:#x}", memory as usize),
         "placed copy synced from the resource that writes its memory"
     );
@@ -1139,4 +1320,50 @@ mod tests {
             expected_mip2
         );
     }
+
+    /// A description the pair's stages are made from (as a host texture's
+    /// would be).
+    fn desc(format: u32, width: u64, height: u32, depth: u16, mips: u16) -> D3D12_RESOURCE_DESC {
+        D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE3D,
+            Width: width,
+            Height: height,
+            DepthOrArraySize: depth,
+            MipLevels: mips,
+            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT(format as i32),
+            SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_placed_copy_is_staged_only_between_the_same_texels() {
+        let Some(host) = crate::host::host() else {
+            return; // no host GPU
+        };
+        let _ = host;
+        // The world's fog volumes: R32 written, R9G9B9E5 read.
+        let writer = desc(42, 8, 4, 2, 1);
+        let placed = desc(67, 8, 4, 2, 1);
+        let (total, subs) = placements(&writer, &placed).expect("staged");
+        assert_eq!(subs.len(), 1, "one subresource");
+        assert_eq!(subs[0].copy.right, 8);
+        assert_eq!(subs[0].copy.bottom, 4);
+        assert_eq!(subs[0].copy.back, 2);
+        // The last row's bytes are inside the buffer, past the padded rows.
+        let last = subs[0].from.Offset
+            + 3 * u64::from(subs[0].from.Footprint.RowPitch)
+            + 8 * 4;
+        assert!(last <= total, "{last} of {total}");
+        // 8 bytes a texel (R16G16B16A16) does not hold the same texels.
+        assert!(placements(&writer, &desc(10, 8, 4, 2, 1)).is_none());
+        // Nor do another mip count or size lay out alike.
+        assert!(placements(&writer, &desc(67, 8, 4, 2, 2)).is_none());
+        assert!(placements(&writer, &desc(67, 16, 4, 2, 1)).is_none());
+    }
+
 }

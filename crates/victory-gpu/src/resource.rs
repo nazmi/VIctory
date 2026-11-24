@@ -1503,10 +1503,16 @@ pub(crate) fn writer_at(
     placed_copy: &windows::Win32::Graphics::Direct3D12::ID3D12Resource,
 ) -> Option<std::sync::Arc<HostTexture>> {
     use windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    use windows::core::Interface;
     // SAFETY: a live resource.
     let copy = unsafe { placed_copy.GetDesc() };
-    let bytes = element(copy.Format.0 as u32)?.0;
-    if copy.Dimension.0 == BUFFER as i32 || copy.SampleDesc.Count != 1 {
+    let (bytes, block) = element(copy.Format.0 as u32)?;
+    // A placed copy of a buffer, or of a multisampled or non-plain-layout
+    // texture, is not something a copy between textures reaches.
+    if copy.Dimension.0 == BUFFER as i32
+        || copy.SampleDesc.Count != 1
+        || copy.Layout != windows::Win32::Graphics::Direct3D12::D3D12_TEXTURE_LAYOUT_UNKNOWN
+    {
         return None;
     }
     let map = ADDRESSED.lock().unwrap_or_else(|e| e.into_inner());
@@ -1515,6 +1521,10 @@ pub(crate) fn writer_at(
             continue;
         }
         // SAFETY: live host textures (each entry holds one).
+        if entry.host.texture.as_raw() == placed_copy.as_raw() {
+            continue;
+        }
+        // SAFETY: a live host texture (the entry holds one).
         let d = unsafe { entry.host.texture.GetDesc() };
         if d.Dimension != copy.Dimension
             || d.Width != copy.Width
@@ -1522,12 +1532,13 @@ pub(crate) fn writer_at(
             || d.DepthOrArraySize != copy.DepthOrArraySize
             || d.MipLevels != copy.MipLevels
             || d.SampleDesc.Count != copy.SampleDesc.Count
+            || d.Layout != copy.Layout
             || d.Format == copy.Format
             || d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0
         {
             continue;
         }
-        if element(d.Format.0 as u32).map(|(b, _)| b) != Some(bytes) {
+        if element(d.Format.0 as u32) != Some((bytes, block)) {
             continue;
         }
         tracing::debug!(

@@ -1405,7 +1405,7 @@ impl HostList {
             unsafe { &*(&copy.texture as *const ID3D12Resource) };
         let wanted = legal_state(texture, wanted);
         let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
-        match states.entry(std::sync::Arc::as_ptr(&copy) as usize) {
+        match states.entry(std::sync::Arc::as_ptr(copy) as usize) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert((wanted, wanted, copy.clone()));
                 None
