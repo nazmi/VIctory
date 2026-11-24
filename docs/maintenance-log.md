@@ -1308,3 +1308,50 @@ this workflow requires costs disk. Removing the finished workers' targets freed
 Gate at `efda2c5e`/`309fd8d0`: fmt 0 differing, both Clippy gates 0 errors,
 policy 219 files, workspace **674 passed / 0 failed** with the 10 documented
 GPU skips (all of which fail identically on a clean `upstream/main`).
+
+### Wave 10: #1634 corrected, and the merge's payoff measured: 2026-11-25
+
+Merged as `3d18226e` (parents `ea9892ad`, `b976f7ff`), pushed as a
+fast-forward.
+
+**A defect I introduced and then fixed.** In wave 9 I merged #1634, which wires
+`GetDeviceRemovedReason` to return `S_OK` unconditionally. A worker pointed out
+that this *asserts a live device even when the host's device was removed* — a
+wrong value where `E_NOTIMPL` had at least been honest. #928 wires the same
+slot to the host's real state, and #1634's own author had closed it in #928's
+favour. So #1634 was reverted and #928 applied in the same wave. The reverted
+commit and its replacement are both in the history, so the reasoning is
+auditable rather than erased.
+
+**The merge's payoff, measured.** The question the merge left open was whether
+upstream's designs are better than the ones this branch had. For the case that
+started the whole investigation:
+
+```
+victory translate xboxbvhbuilder.dll
+  before the merge (our spill.rs):        0 of 52 programs emitted
+  after  the merge (upstream USER_DATA): 36 of 52
+```
+
+Upstream's spilled-root-parameter mechanism takes the same 52 programs from
+none to thirty-six. That is behavioural evidence, on the same machine and
+inputs, and it settles the trade for the shader side.
+
+**PRs integrated this wave:** #1476 (MD5 round constants precomputed and a
+stack buffer in place of a per-block `Vec`), #1590 (XMA frame counting follows
+the selected packet chain), #1635 (an indirect call with no host pipeline is
+dropped before the argument refresh), #988 (a fault past the end of its
+title-memory copy now says how far past), #928, and the FLAT-offset test from
+#1636 whose code was already right.
+
+**Duplicates verified against the tree:** #1268, #522, #528, #1494. Obsolete:
+#1523 (withdrawn by its author — three NVIDIA GPUs all cap at exactly
+1,000,000). Refused: #1634, as above.
+
+**An operational note.** The first HLE worker timed out after ten minutes with
+no commits; it was replaced by two three-PR workers with an explicit call
+budget. Small batches report; large ones time out.
+
+Gate at `b976f7ff`/`3d18226e`: fmt 0 differing, both Clippy gates 0 errors,
+policy 219 files, workspace **678 passed / 0 failed** with the 10 documented
+GPU skips.
