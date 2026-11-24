@@ -408,9 +408,7 @@ fn parse_tls(
             callback_rvas.push(va_to_rva(va, image_base)?);
         }
         if !terminated {
-            return Err(PeError::Malformed(
-                "unterminated TLS callback array".into(),
-            ));
+            return Err(PeError::Malformed("unterminated TLS callback array".into()));
         }
     }
     Ok(Some(TlsInfo {
@@ -530,67 +528,42 @@ mod tests {
         d
     }
 
-
     fn synthetic_tls(terminated: bool) -> Vec<u8> {
         let mut body = vec![0u8; 0x200];
         let base = 0x1_8000_0000u64;
-        let callback_rva = if terminated {
-            0x11f0
-        } else {
-            0x11f8
-        };
+        let callback_rva = if terminated { 0x11f0 } else { 0x11f8 };
 
-        body[24..32].copy_from_slice(
-            &(base + callback_rva).to_le_bytes()
-        );
+        body[24..32].copy_from_slice(&(base + callback_rva).to_le_bytes());
 
         let off = (callback_rva - 0x1000) as usize;
-        body[off..off + 8].copy_from_slice(
-            &(base + 0x1010).to_le_bytes()
-        );
+        body[off..off + 8].copy_from_slice(&(base + 0x1010).to_le_bytes());
 
         let mut data = synthetic_image(&body);
 
-        let export = layout::data_directory_offset(
-            &data, 0
-        ).unwrap();
+        let export = layout::data_directory_offset(&data, 0).unwrap();
         data[export..export + 8].fill(0);
 
-        let tls = layout::data_directory_offset(
-            &data, 9
-        ).unwrap();
-        data[tls..tls + 4].copy_from_slice(
-            &0x1000u32.to_le_bytes()
-        );
-        data[tls + 4..tls + 8].copy_from_slice(
-            &40u32.to_le_bytes()
-        );
+        let tls = layout::data_directory_offset(&data, 9).unwrap();
+        data[tls..tls + 4].copy_from_slice(&0x1000u32.to_le_bytes());
+        data[tls + 4..tls + 8].copy_from_slice(&40u32.to_le_bytes());
 
         data
     }
 
     #[test]
     fn tls_probe_accepts_terminated_callbacks() {
-        let info = ImageInfo::parse(
-            &synthetic_tls(true)
-        ).unwrap();
-        assert_eq!(
-            info.tls.unwrap().callback_rvas,
-            vec![0x1010]
-        );
+        let info = ImageInfo::parse(&synthetic_tls(true)).unwrap();
+        assert_eq!(info.tls.unwrap().callback_rvas, vec![0x1010]);
     }
 
     #[test]
     fn tls_probe_rejects_unterminated_callbacks() {
-        let result = ImageInfo::parse(
-            &synthetic_tls(false)
-        );
+        let result = ImageInfo::parse(&synthetic_tls(false));
         assert!(
             matches!(result, Err(PeError::Malformed(_))),
             "Expected malformed TLS array, got {result:?}"
         );
     }
-
 
     fn synthetic_tls_many(count: usize) -> Vec<u8> {
         let mut data = synthetic_tls(true);
@@ -600,20 +573,16 @@ mod tests {
         data.resize(0x2600, 0);
 
         for offset in [sec + 8, sec + 16] {
-            data[offset..offset + 4]
-                .copy_from_slice(&0x2400u32.to_le_bytes());
+            data[offset..offset + 4].copy_from_slice(&0x2400u32.to_le_bytes());
         }
 
-        data[0x90..0x94]
-            .copy_from_slice(&0x4000u32.to_le_bytes());
+        data[0x90..0x94].copy_from_slice(&0x4000u32.to_le_bytes());
 
-        data[0x218..0x220]
-            .copy_from_slice(&(base + 0x1040).to_le_bytes());
+        data[0x218..0x220].copy_from_slice(&(base + 0x1040).to_le_bytes());
 
         for i in 0..count {
             let off = 0x240 + i * 8;
-            data[off..off + 8]
-                .copy_from_slice(&(base + 0x1010).to_le_bytes());
+            data[off..off + 8].copy_from_slice(&(base + 0x1010).to_le_bytes());
         }
 
         let end = 0x240 + count * 8;
@@ -624,14 +593,9 @@ mod tests {
 
     #[test]
     fn tls_probe_accepts_exact_callback_limit() {
-        let info = ImageInfo::parse(
-            &synthetic_tls_many(MAX_TLS_CALLBACKS)
-        ).unwrap();
+        let info = ImageInfo::parse(&synthetic_tls_many(MAX_TLS_CALLBACKS)).unwrap();
 
-        assert_eq!(
-            info.tls.unwrap().callback_rvas.len(),
-            MAX_TLS_CALLBACKS
-        );
+        assert_eq!(info.tls.unwrap().callback_rvas.len(), MAX_TLS_CALLBACKS);
     }
 
     #[test]

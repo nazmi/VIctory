@@ -53,7 +53,9 @@ pub fn prepare(original: &[u8]) -> Result<PreparedImage, PrepareError> {
     write_u16(
         &mut bytes,
         fh.checked_add(layout::FILE_HEADER_CHARACTERISTICS)
-            .ok_or(PrepareError::Patch("file header characteristics offset overflow"))?,
+            .ok_or(PrepareError::Patch(
+                "file header characteristics offset overflow",
+            ))?,
         characteristics,
     )?;
     write_u32(

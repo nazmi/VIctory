@@ -468,7 +468,10 @@ fn work(scheduler: &'static Scheduler) {
     let mut lanes = scheduler.lock();
     loop {
         let Some(mut job) = lanes.start() else {
-            lanes = scheduler.work.wait(lanes).unwrap_or_else(|e| e.into_inner());
+            lanes = scheduler
+                .work
+                .wait(lanes)
+                .unwrap_or_else(|e| e.into_inner());
             continue;
         };
         drop(lanes);
@@ -512,7 +515,8 @@ impl Lanes {
                 reading_workers = format_args!("{:.2}", reading / elapsed.as_secs_f64()),
                 staging_waits = std::mem::take(&mut self.refused),
                 bcpack_mb = self.bcpack.0 / 1_000_000,
-                bcpack_workers = format_args!("{:.2}", self.bcpack.1.as_secs_f64() / elapsed.as_secs_f64()),
+                bcpack_workers =
+                    format_args!("{:.2}", self.bcpack.1.as_secs_f64() / elapsed.as_secs_f64()),
                 waiting,
                 "dstorage: last {:.1} s",
                 elapsed.as_secs_f64()
@@ -667,8 +671,7 @@ fn close_lane(id: u64) {
     };
     lane.closed = true;
     lane.unsubmitted.clear();
-    let pending =
-        |l: &Lane| !(l.reads.is_empty() && l.running.is_empty() && l.statuses.is_empty());
+    let pending = |l: &Lane| !(l.reads.is_empty() && l.running.is_empty() && l.statuses.is_empty());
     while lanes.lanes.get(&id).is_some_and(pending) {
         lanes = scheduler
             .finished
@@ -748,7 +751,6 @@ impl Drop for QueuedRead {
         self.release_file();
     }
 }
-
 
 /// A status entry to write, holding a reference on its array.
 struct Status {
@@ -851,7 +853,10 @@ extern "system" fn get_error_event(this: QueueRef) -> HANDLE {
     scheduler()
         .and_then(|scheduler| {
             let lanes = scheduler.lock();
-            lanes.lanes.get(&id).map(|lane| lane.errors.duplicate_event())
+            lanes
+                .lanes
+                .get(&id)
+                .map(|lane| lane.errors.duplicate_event())
         })
         .unwrap_or(std::ptr::null_mut())
 }
@@ -905,7 +910,11 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
         return into_destination(request, size, |out| read_into(request, out).map(|()| size))
             .map_err(|hr| fail(hr, "copying"));
     }
-    let tables = if bc != 0 { Some(bcpack_tables()?) } else { None };
+    let tables = if bc != 0 {
+        Some(bcpack_tables()?)
+    } else {
+        None
+    };
     let source = read_source(request).map_err(|hr| fail(hr, "reading the source"))?;
     // The console's order: zlib first, then BCPack.
     let source = if bc != 0 && options & ZLIB != 0 {
@@ -977,7 +986,9 @@ fn use_bcpack_tables(dir: std::path::PathBuf) {
 
 #[cfg(test)]
 fn load_bcpack_tables() -> Result<Tables, String> {
-    let dir = BCPACK_DIR.get().ok_or("no folder set for the test tables")?;
+    let dir = BCPACK_DIR
+        .get()
+        .ok_or("no folder set for the test tables")?;
     let bytes = std::fs::read(dir.join("tables.bin")).map_err(|e| e.to_string())?;
     Tables::parse(&bytes).map_err(|e| e.to_string())
 }
@@ -1003,7 +1014,9 @@ static READING: AtomicU64 = AtomicU64::new(0);
 fn read_into(request: &Request, out: &mut [u8]) -> Result<(), HRESULT> {
     if request.options & MEMORY_SOURCE != 0 {
         // SAFETY: the title's source holds `out.len()` bytes until completion.
-        out.copy_from_slice(unsafe { std::slice::from_raw_parts(request.source.cast(), out.len()) });
+        out.copy_from_slice(unsafe {
+            std::slice::from_raw_parts(request.source.cast(), out.len())
+        });
         return Ok(());
     }
     if request.source.is_null() {
@@ -1078,15 +1091,15 @@ static QUEUE_VTABLE: Methods<12> = Methods([
     missing::<0> as *const (),
     add_ref_instance::<Queue> as *const (),
     release::<Queue> as *const (),
-    enqueue_request as *const (), // 0x18
-    enqueue_status as *const (),  // 0x20
-    missing::<5> as *const (),    // 0x28 (2020: fence signal)
-    submit as *const (),          // 0x30
-    missing::<7> as *const (),    // 0x38 (2020: cancel by tag)
-    close as *const (),           // 0x40
-    get_error_event as *const (),        // 0x48
+    enqueue_request as *const (),       // 0x18
+    enqueue_status as *const (),        // 0x20
+    missing::<5> as *const (),          // 0x28 (2020: fence signal)
+    submit as *const (),                // 0x30
+    missing::<7> as *const (),          // 0x38 (2020: cancel by tag)
+    close as *const (),                 // 0x40
+    get_error_event as *const (),       // 0x48
     retrieve_error_record as *const (), // 0x50
-    missing::<11> as *const (),   // 0x58 (2020: queue info)
+    missing::<11> as *const (),         // 0x58 (2020: queue info)
 ]);
 
 pub(crate) fn module() -> HleModule {
@@ -1325,7 +1338,8 @@ mod tests {
         // Requests in flight together run in any order, so none of them
         // shares a destination (failed ones leave theirs undefined).
         let mut buffers = [[0u8; 16]; 5];
-        let [failed, failed_too, out, other, bcpack] = buffers.each_mut().map(|b| b.as_mut_ptr().cast());
+        let [failed, failed_too, out, other, bcpack] =
+            buffers.each_mut().map(|b| b.as_mut_ptr().cast());
 
         // Segment 0: a read past the end, then a bad stream; the first wins.
         enqueue(queue, &request(0, failed, 16, file, 4090, 16));
@@ -1591,7 +1605,10 @@ mod tests {
         l.finish(&first, Some(Box::new(failure)));
         assert_eq!(poll_event(&event), WAIT_OBJECT_0);
         let record = l.lanes.get_mut(&0).unwrap().errors.take();
-        assert_eq!((record.failure_count, record.first.result), (2, END_OF_FILE));
+        assert_eq!(
+            (record.failure_count, record.first.result),
+            (2, END_OF_FILE)
+        );
         assert_eq!(record.first.source, data.as_ptr() as usize);
         assert_eq!(record.first.file_offset, 0);
         assert!(record.first.filename.iter().all(|&unit| unit == 0));
@@ -1678,7 +1695,10 @@ mod tests {
         let (_dir, file) = file_with(&contents);
         let (queue, array) = (new_queue(0), status_array(1));
         let mut out = [0u8; 16];
-        enqueue(queue, &request(4 << 1, out.as_mut_ptr().cast(), 16, file, 100, 88));
+        enqueue(
+            queue,
+            &request(4 << 1, out.as_mut_ptr().cast(), 16, file, 100, 88),
+        );
         enqueue_status(queue, array, 0);
         void(queue, 0x30);
         assert_eq!(wait(array, 0), S_OK);
@@ -1712,7 +1732,10 @@ mod tests {
         let mut out = vec![0u8; data.len()];
         for k in 0..32 {
             let dst = out[k * chunk..].as_mut_ptr().cast();
-            enqueue(queue, &request(0, dst, chunk, file, (k * chunk) as u64, chunk));
+            enqueue(
+                queue,
+                &request(0, dst, chunk, file, (k * chunk) as u64, chunk),
+            );
         }
         enqueue_status(queue, array, 0);
         void(queue, 0x30);
@@ -1833,7 +1856,10 @@ mod tests {
         let (queue, array) = (new_queue(0), status_array(1));
         let mut out = [0u8; 64];
 
-        enqueue(queue, &request(0, out.as_mut_ptr().cast(), 64, file, 32, 64));
+        enqueue(
+            queue,
+            &request(0, out.as_mut_ptr().cast(), 64, file, 32, 64),
+        );
         // Release the caller's reference immediately after enqueueing; the queue
         // must still hold its own reference (refcount drops from 2 to 1).
         let release_com: extern "system" fn(*mut c_void) -> u32 = call(file, 0x10);
@@ -1880,7 +1906,12 @@ mod tests {
         let open_fn: extern "system" fn(*mut c_void, *const u16, *const Guid, Out) -> HRESULT =
             call(factory(), 0x20);
         assert_eq!(
-            open_fn(factory(), wide.as_ptr(), std::ptr::null(), std::ptr::null_mut()),
+            open_fn(
+                factory(),
+                wide.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null_mut()
+            ),
             E_INVALIDARG
         );
         // No leaked OS file handle.
@@ -1904,8 +1935,12 @@ mod tests {
             E_INVALIDARG
         );
 
-        let queue_fn: extern "system" fn(*mut c_void, *const QueueDesc, *const Guid, Out) -> HRESULT =
-            call(factory(), 0x50);
+        let queue_fn: extern "system" fn(
+            *mut c_void,
+            *const QueueDesc,
+            *const Guid,
+            Out,
+        ) -> HRESULT = call(factory(), 0x50);
         let desc = QueueDesc {
             source_type: 0,
             capacity: 4,

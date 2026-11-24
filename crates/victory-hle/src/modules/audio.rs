@@ -613,9 +613,8 @@ fn decode(context: Context, voice: &mut Voice) -> bool {
         None => {
             let other = 1 - current;
             let spanning = if valid & (1 << other) != 0 {
-                bank_data(other).and_then(|(tail, _)| {
-                    xma::read_frame_spanning(data, data.len() * 8, tail, at)
-                })
+                bank_data(other)
+                    .and_then(|(tail, _)| xma::read_frame_spanning(data, data.len() * 8, tail, at))
             } else {
                 None
             };
@@ -1219,7 +1218,10 @@ mod tests {
         // Blocks 2, 3 and 0 written (silence), 1 left for the title, and
         // nothing past the ring.
         assert_eq!((write, writable), (1, 0));
-        assert!(ring[0x400..].iter().all(|&b| b == 0x55), "written past the ring");
+        assert!(
+            ring[0x400..].iter().all(|&b| b == 0x55),
+            "written past the ring"
+        );
         let block = |n: usize| &ring[n * 0x100..(n + 1) * 0x100];
         assert!([0, 2, 3].iter().all(|&n| block(n).iter().all(|&b| b == 0)));
         assert!(block(1).iter().all(|&b| b == 0x55));
@@ -1411,7 +1413,10 @@ mod tests {
             std::ptr::copy_nonoverlapping(tail.as_ptr(), input1.cast(), tail.len());
         }
         let (mut output, mut output_apu) = (std::ptr::null_mut(), 0);
-        assert_eq!(ApuAlloc(&mut output, &mut output_apu, 0x400, 0x100, 2), S_OK);
+        assert_eq!(
+            ApuAlloc(&mut output, &mut output_apu, 0x400, 0x100, 2),
+            S_OK
+        );
 
         context.set(0, 1 | 1 << 20 | 1 << 21 | 4 << 22); // bank 0: one packet, both valid
         context.set(1, 1 | 1 << 31 | 3 << 27); // bank 1: one packet, writable

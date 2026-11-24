@@ -287,12 +287,12 @@ fn track_impl(
     for (block, (accesses, mut reads)) in first_lane_at {
         reads.sort_unstable();
         reads.dedup();
-        let proof = t
-            .waterfall(block, &accesses, &reads)
-            .map_err(|what| ShaderError::Unsupported {
-                offset: t.inst((block, accesses[0])).machine.offset,
-                what,
-            })?;
+        let proof =
+            t.waterfall(block, &accesses, &reads)
+                .map_err(|what| ShaderError::Unsupported {
+                    offset: t.inst((block, accesses[0])).machine.offset,
+                    what,
+                })?;
         out.waterfall.compares.extend(proof.compares);
         out.waterfall.reads.extend(proof.reads);
     }
@@ -343,7 +343,6 @@ struct Tracer<'a> {
     /// Address sums already traced, indexed by SSA value.
     sums: Vec<Option<Sum>>,
     failure: Option<&'a std::cell::Cell<Option<DescriptorFailure>>>,
-
 }
 
 /// What lanes are known to satisfy: each [`Bool`] where its flag is set,
@@ -407,7 +406,6 @@ impl<'a> Tracer<'a> {
             rpo,
             sums: Vec::new(),
             failure: None,
-
         };
         t.origin = t.propagate_copies(n)?;
         Ok(t)
@@ -1301,7 +1299,6 @@ impl<'a> Tracer<'a> {
         } else {
             "computed"
         }
-
     }
 
     /// Dwords of `global_load_dword*` that line up: `first..` of one load,

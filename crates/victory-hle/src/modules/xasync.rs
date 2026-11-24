@@ -553,7 +553,9 @@ pub fn XAsyncBegin(
 ) -> HRESULT {
     // SAFETY: a null block is checked below; the title passes its own async
     // block with a queue handle from XTaskQueueCreate or the process queue.
-    let resolved = (!block.is_null()).then(|| queue(unsafe { (*block).queue })).flatten();
+    let resolved = (!block.is_null())
+        .then(|| queue(unsafe { (*block).queue }))
+        .flatten();
     begin(block, context, identity, identity_name, provider, resolved)
 }
 
@@ -892,7 +894,13 @@ pub fn pending_with(
     let work: Work = Box::new(work);
     let state: Box<Data> = Box::new(Arc::new(Mutex::new((Some(work), Vec::new()))));
     let context = Box::into_raw(state);
-    let hr = XAsyncBegin(block, context.cast(), identity, std::ptr::null(), Some(provider));
+    let hr = XAsyncBegin(
+        block,
+        context.cast(),
+        identity,
+        std::ptr::null(),
+        Some(provider),
+    );
     if hr < 0 {
         // SAFETY: refused before the call existed; still ours.
         drop(unsafe { Box::from_raw(context) });
@@ -1290,10 +1298,19 @@ mod tests {
         // The title changes the block's queue before the call finishes.
         block.queue = second;
         assert_eq!(block.queue, second);
-        assert!(XTaskQueueDispatch(first, WORK, 0), "work is on the first queue");
+        assert!(
+            XTaskQueueDispatch(first, WORK, 0),
+            "work is on the first queue"
+        );
         assert_eq!(PINNED_COMPLETED.load(Ordering::SeqCst), before);
-        assert!(!XTaskQueueDispatch(second, COMPLETION, 0), "not the new queue");
-        assert!(XTaskQueueDispatch(first, COMPLETION, 0), "completion is on the first queue");
+        assert!(
+            !XTaskQueueDispatch(second, COMPLETION, 0),
+            "not the new queue"
+        );
+        assert!(
+            XTaskQueueDispatch(first, COMPLETION, 0),
+            "completion is on the first queue"
+        );
         assert_eq!(PINNED_COMPLETED.load(Ordering::SeqCst), before + 1);
         XTaskQueueCloseHandle(first);
         XTaskQueueCloseHandle(second);
@@ -1484,7 +1501,13 @@ mod tests {
         };
         let identity = 0x77 as *const c_void;
         assert_eq!(
-            XAsyncBegin(&mut block, std::ptr::null_mut(), identity, std::ptr::null(), Some(provider)),
+            XAsyncBegin(
+                &mut block,
+                std::ptr::null_mut(),
+                identity,
+                std::ptr::null(),
+                Some(provider)
+            ),
             S_OK
         );
         assert!(XTaskQueueDispatch(q, WORK, 0));
@@ -1495,11 +1518,20 @@ mod tests {
         let mut value = 0u64;
         let mut used = 0;
         assert_eq!(
-            XAsyncGetResult(&mut block, identity, 8, (&mut value as *mut u64).cast(), &mut used),
+            XAsyncGetResult(
+                &mut block,
+                identity,
+                8,
+                (&mut value as *mut u64).cast(),
+                &mut used
+            ),
             S_OK
         );
         assert_eq!((value, used), (0x1234, 8));
-        assert!(call(&raw mut block).is_none(), "the call ends with its result");
+        assert!(
+            call(&raw mut block).is_none(),
+            "the call ends with its result"
+        );
         XTaskQueueCloseHandle(q);
     }
 

@@ -536,7 +536,10 @@ extern "system" fn tiling(
         }
         if let Some(n) = count.as_mut() {
             let slices = if tail { l.slices.min(2) } else { l.slices };
-            let wanted = standard.saturating_mul(slices).saturating_sub(first).min(*n);
+            let wanted = standard
+                .saturating_mul(slices)
+                .saturating_sub(first)
+                .min(*n);
             for i in 0..wanted {
                 let (slice, mip) = ((first + i) / standard, (first + i) % standard);
                 let m = &l.mips[mip as usize];
@@ -607,19 +610,19 @@ struct Vtable([*const (); 13]);
 unsafe impl Sync for Vtable {}
 
 static VTABLE: Vtable = Vtable([
-    add_ref as *const (),   // 0x00
-    release as *const (),   // 0x08
-    layout as *const (),    // 0x10
-    unused as *const (),    // 0x18 size
-    unused as *const (),    // 0x20 alignment
-    unused as *const (),    // 0x28 mip offset
+    add_ref as *const (),        // 0x00
+    release as *const (),        // 0x08
+    layout as *const (),         // 0x10
+    unused as *const (),         // 0x18 size
+    unused as *const (),         // 0x20 alignment
+    unused as *const (),         // 0x28 mip offset
     element_offset as *const (), // 0x30
-    unused as *const (),    // 0x38 element coordinate
-    copy_into as *const (), // 0x40
-    copy_from as *const (), // 0x48
-    tiling as *const (),    // 0x50
-    unused as *const (),    // 0x58 view descriptor
-    unused as *const (),    // 0x60 tiled resource?
+    unused as *const (),         // 0x38 element coordinate
+    copy_into as *const (),      // 0x40
+    copy_from as *const (),      // 0x48
+    tiling as *const (),         // 0x50
+    unused as *const (),         // 0x58 view descriptor
+    unused as *const (),         // 0x60 tiled resource?
 ]);
 
 pub(crate) fn module() -> HleModule {
