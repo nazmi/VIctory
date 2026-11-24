@@ -21,7 +21,7 @@ use windows::core::Interface;
 
 use crate::host::HostList;
 use crate::object::This;
-use crate::pipeline::host::HostPipeline;
+use crate::pipeline::host::{HostPipeline, UserDataBind};
 
 /// A root argument as the title set it.
 #[derive(Debug, Clone, Default)]
@@ -539,7 +539,13 @@ impl State {
                 }
                 return false;
             }
-            if let Some((param, dwords)) = stage.user_data {
+            if let Some(bind) = stage.user_data {
+                let dwords = match bind {
+                    UserDataBind::Constants { dwords, .. } | UserDataBind::Cbv { dwords, .. } => {
+                        dwords
+                    }
+                };
+
                 let mut values = vec![0u32; dwords as usize];
                 for u in &t.host.user_data {
                     let fresh = made
@@ -550,12 +556,54 @@ impl State {
                         None => self.user_value(compute, u.slot, u.root, u.dword),
                     };
                 }
-                // SAFETY: an open list; `values` covers the parameter.
-                unsafe {
-                    if compute {
-                        l.SetComputeRoot32BitConstants(param, dwords, values.as_ptr().cast(), 0);
-                    } else {
-                        l.SetGraphicsRoot32BitConstants(param, dwords, values.as_ptr().cast(), 0);
+                match bind {
+                    UserDataBind::Constants { param, dwords } => {
+                        // SAFETY: an open list; `values` covers the parameter.
+                        unsafe {
+                            if compute {
+                                l.SetComputeRoot32BitConstants(
+                                    param,
+                                    dwords,
+                                    values.as_ptr().cast(),
+                                    0,
+                                );
+                            } else {
+                                l.SetGraphicsRoot32BitConstants(
+                                    param,
+                                    dwords,
+                                    values.as_ptr().cast(),
+                                    0,
+                                );
+                            }
+                        }
+                    }
+                    UserDataBind::Cbv { param, dwords } => {
+                        let bytes = u64::from(dwords) * 4;
+                        assert_eq!(values.len(), dwords as usize);
+                        let Some((gpu, to)) = list.scratch(bytes) else {
+                            once!("no scratch memory for spilled user-data CBV");
+                            return false;
+                        };
+                        // SAFETY: `to` is mapped upload memory of at least
+                        // `bytes` (rounded up to 256 bytes by `HostList::scratch`),
+                        // written before the root CBV is bound on the list.
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                values.as_ptr().cast::<u8>(),
+                                to,
+                                bytes as usize,
+                            );
+                        }
+                        // SAFETY: an open list; `gpu` is a 256-byte-aligned
+                        // address in the list's scratch upload buffer, kept
+                        // alive until reset.
+                        unsafe {
+                            if compute {
+                                l.SetComputeRootConstantBufferView(param, gpu);
+                            } else {
+                                l.SetGraphicsRootConstantBufferView(param, gpu);
+                            }
+                        }
                     }
                 }
             }
@@ -1440,5 +1488,295 @@ mod tests {
         assert_eq!(expanded_vertices(7), Some(12));
         assert_eq!(expanded_vertices(u32::MAX / 6 * 3), Some(u32::MAX / 6 * 6));
         assert_eq!(expanded_vertices(u32::MAX), None);
+    }
+
+    use crate::pipeline::host::{
+        Stage, fit_root_signature, root_signature, root_signature_cost, test_shader,
+    };
+    use victory_shader::emit::{HostShader, ROOT_CBV_SPACE, USER_DATA_SPACE, UserData};
+    use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
+    use windows::Win32::Graphics::Direct3D::ID3DBlob;
+    use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+    use windows::core::s;
+
+    #[test]
+    fn spilled_user_data_cbv_executes_distinct_dispatches_on_host() {
+        let Some(host) = crate::host::host() else {
+            return;
+        };
+        let _ = host.log_messages();
+
+        let hlsl = r#"
+            cbuffer UserData : register(b0, space0) { uint4 data[18]; };
+            RWByteAddressBuffer out_buf : register(u0, space1);
+            [numthreads(1, 1, 1)]
+            void main() {
+                uint dst = data[0].x;
+                out_buf.Store(dst, data[7].w);
+                out_buf.Store(dst + 4, data[17].w);
+            }
+        "#;
+        let mut code: Option<ID3DBlob> = None;
+        let mut errors: Option<ID3DBlob> = None;
+        // SAFETY: `hlsl` and entry/target literals live for the call; output pointers are valid.
+        let compiled = unsafe {
+            D3DCompile(
+                hlsl.as_ptr().cast(),
+                hlsl.len(),
+                s!("spilled_user_data_test"),
+                None,
+                None,
+                s!("main"),
+                s!("cs_5_1"),
+                0,
+                0,
+                &mut code,
+                Some(&mut errors),
+            )
+        };
+        if let Err(e) = compiled {
+            let msg = errors.map_or_else(String::new, |err| {
+                // SAFETY: `err` is a live `ID3DBlob` returned by `D3DCompile`.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        err.GetBufferPointer().cast::<u8>(),
+                        err.GetBufferSize(),
+                    )
+                };
+                String::from_utf8_lossy(bytes).into_owned()
+            });
+            panic!("D3DCompile failed: {e}: {msg}");
+        }
+        let code = code.expect("compiled shader blob");
+        // SAFETY: `code` is a live `ID3DBlob` returned by `D3DCompile`.
+        let dxil = unsafe {
+            std::slice::from_raw_parts(code.GetBufferPointer().cast::<u8>(), code.GetBufferSize())
+                .to_vec()
+        };
+
+        let host_shader = HostShader {
+            stage: victory_shader::HwStage::Cs,
+            dxil: dxil.clone(),
+            user_data: vec![
+                UserData {
+                    index: 0,
+                    slot: 0,
+                    root: RootType::Constants,
+                    dword: 0,
+                },
+                UserData {
+                    index: 31,
+                    slot: 0,
+                    root: RootType::Constants,
+                    dword: 31,
+                },
+                UserData {
+                    index: 71,
+                    slot: 0,
+                    root: RootType::Constants,
+                    dword: 71,
+                },
+            ],
+            samplers: Vec::new(),
+            static_samplers: Vec::new(),
+            root_cbvs: Vec::new(),
+            root_srvs: Vec::new(),
+        };
+        assert_eq!(host_shader.user_data_dwords(), 72);
+
+        let mut params = vec![
+            D3D12_ROOT_PARAMETER1 {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+                Anonymous: D3D12_ROOT_PARAMETER1_0 {
+                    Constants: D3D12_ROOT_CONSTANTS {
+                        ShaderRegister: 0,
+                        RegisterSpace: USER_DATA_SPACE,
+                        Num32BitValues: 72,
+                    },
+                },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            },
+            D3D12_ROOT_PARAMETER1 {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_UAV,
+                Anonymous: D3D12_ROOT_PARAMETER1_0 {
+                    Descriptor: D3D12_ROOT_DESCRIPTOR1 {
+                        ShaderRegister: 0,
+                        RegisterSpace: ROOT_CBV_SPACE,
+                        Flags: D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE,
+                    },
+                },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            },
+        ];
+        let mut stages = vec![Stage {
+            shader: test_shader("compute", host_shader),
+            user_data: Some(UserDataBind::Constants {
+                param: 0,
+                dwords: 72,
+            }),
+            root_cbvs: Vec::new(),
+            root_srvs: Vec::new(),
+        }];
+
+        assert!(root_signature(&host.device, &params, &[], true).is_err());
+        let _ = host.log_messages();
+
+        fit_root_signature(&mut params, &mut stages);
+        assert_eq!(
+            stages[0].user_data,
+            Some(UserDataBind::Cbv {
+                param: 0,
+                dwords: 72
+            })
+        );
+        assert_eq!(root_signature_cost(&params), 4);
+
+        let (root, _) =
+            root_signature(&host.device, &params, &[], true).expect("fitted root signature");
+        let pso_desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
+            // SAFETY: a borrowed pointer the description never releases.
+            pRootSignature: unsafe { std::mem::transmute_copy(&root) },
+            CS: D3D12_SHADER_BYTECODE {
+                pShaderBytecode: dxil.as_ptr().cast(),
+                BytecodeLength: dxil.len(),
+            },
+            ..Default::default()
+        };
+        // SAFETY: `pso_desc` points to live `root` and `dxil`.
+        let pso =
+            unsafe { host.device.CreateComputePipelineState(&pso_desc) }.expect("compute pipeline");
+
+        let pipeline = HostPipeline {
+            compute: true,
+            mesh: false,
+            pso,
+            root,
+            stages,
+            slots: 0,
+            inputs: Vec::new(),
+            name: "spilled-user-data-test".to_owned(),
+        };
+
+        let (out_buf, out_ptr) = host.shared_buffer(256).expect("shared buffer");
+        // SAFETY: `out_ptr` is mapped for 256 bytes and not yet read by the GPU.
+        unsafe { std::ptr::write_bytes(out_ptr, 0, 256) };
+        // SAFETY: `out_buf` is a live buffer resource.
+        let out_gpu = unsafe { out_buf.GetGPUVirtualAddress() };
+
+        let list = host.new_list().expect("host list");
+        // SAFETY: creating minimal shader-visible heaps required by root signatures
+        // with `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED | SAMPLER_HEAP_DIRECTLY_INDEXED`.
+        let (view_heap, sampler_heap) = unsafe {
+            let views: ID3D12DescriptorHeap = host
+                .device
+                .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+                    Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                    NumDescriptors: 1,
+                    Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                    ..Default::default()
+                })
+                .expect("view heap");
+            let samplers: ID3D12DescriptorHeap = host
+                .device
+                .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+                    Type: D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+                    NumDescriptors: 1,
+                    Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                    ..Default::default()
+                })
+                .expect("sampler heap");
+            list.list
+                .SetDescriptorHeaps(&[Some(views.clone()), Some(samplers.clone())]);
+            (views, samplers)
+        };
+        let mut state = State::default();
+
+        let make_vals = |dst: u32, d31: u32, d71: u32| {
+            let mut v = vec![0u32; 72];
+            v[0] = dst;
+            v[31] = d31;
+            v[71] = d71;
+            v
+        };
+
+        // Dispatch 1: initial bind.
+        let vals1 = make_vals(0, 0x1122_3344, 0xCAFE_BABE);
+        state.set_constants(true, 0, &vals1, 0);
+        assert!(state.bind(&list, &pipeline, true));
+        // SAFETY: `list.list` is open and `out_gpu` is a live UAV buffer.
+        unsafe {
+            list.list.SetComputeRootUnorderedAccessView(1, out_gpu);
+            list.list.Dispatch(1, 1, 1);
+        }
+
+        // Dispatch 2: dirty user-data values on the same pipeline.
+        let vals2 = make_vals(8, 0x5566_7788, 0xDEAD_BEEF);
+        state.set_constants(true, 0, &vals2, 0);
+        assert!(state.bind(&list, &pipeline, true));
+        // SAFETY: `list.list` is open and `out_gpu` is a live UAV buffer.
+        unsafe {
+            list.list.SetComputeRootUnorderedAccessView(1, out_gpu);
+            list.list.Dispatch(1, 1, 1);
+        }
+
+        // Dispatch 3: rebind after pipeline/root switch.
+        state.host_roots = [0; 2];
+        state.host_pipeline = 0;
+        let vals3 = make_vals(16, 0x99AA_BBCC, 0xFEED_FACE);
+        state.set_constants(true, 0, &vals3, 0);
+        assert!(state.bind(&list, &pipeline, true));
+        // SAFETY: `list.list` is open and `out_gpu` is a live UAV buffer.
+        unsafe {
+            list.list.SetComputeRootUnorderedAccessView(1, out_gpu);
+            list.list.Dispatch(1, 1, 1);
+        }
+
+        list.close();
+
+        // Execute on a dedicated direct queue so `Host::execute` does not drain
+        // `host.log_messages()` before our assertion.
+        // SAFETY: plain D3D12 queue/fence/event setup and synchronous wait.
+        unsafe {
+            let queue: ID3D12CommandQueue = host
+                .device
+                .CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
+                    Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
+                    ..Default::default()
+                })
+                .expect("command queue");
+            let fence: ID3D12Fence = host
+                .device
+                .CreateFence(0, D3D12_FENCE_FLAG_NONE)
+                .expect("fence");
+            let event = CreateEventW(None, false, false, None).expect("event");
+            let cmd_list: ID3D12CommandList = list.list.cast().expect("command list");
+            queue.ExecuteCommandLists(&[Some(cmd_list)]);
+            queue.Signal(&fence, 1).expect("signal");
+            fence.SetEventOnCompletion(1, event).expect("set event");
+            WaitForSingleObject(event, INFINITE);
+            windows_sys::Win32::Foundation::CloseHandle(event.0);
+        }
+
+        assert_eq!(
+            host.log_messages(),
+            None,
+            "D3D12 debug layer reported an error"
+        );
+
+        // SAFETY: the GPU fence has completed and `out_ptr` is 256 bytes of
+        // mapped write-back memory.
+        let readback = unsafe { std::slice::from_raw_parts(out_ptr.cast::<u32>(), 6) };
+        assert_eq!(
+            readback,
+            &[
+                0x1122_3344,
+                0xCAFE_BABE,
+                0x5566_7788,
+                0xDEAD_BEEF,
+                0x99AA_BBCC,
+                0xFEED_FACE,
+            ]
+        );
+        drop((view_heap, sampler_heap));
     }
 }

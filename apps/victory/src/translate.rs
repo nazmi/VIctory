@@ -833,6 +833,16 @@ mod scan_tests {
     fn an_empty_translation_directory_succeeds() {
         let _serial = env_lock();
         let dir = tempfile::tempdir().unwrap();
-        assert!(run(vec![dir.path().to_path_buf()], false, false, false, false, None).is_ok());
+        assert!(
+            run(
+                vec![dir.path().to_path_buf()],
+                false,
+                false,
+                false,
+                false,
+                None
+            )
+            .is_ok()
+        );
     }
 }
