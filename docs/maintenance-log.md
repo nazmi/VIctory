@@ -83,6 +83,9 @@ Rows below record completed decisions; unreviewed items remain queued.
 | [#449](https://github.com/Marvisak/VIctory/pull/449) | f625cc508c0d3a1b3f124cd3714dde681440d8c4 | Standalone null-output guard for AnalyticsInfo | Coordinator and economical worker reviewed 1/1 file, no skips/findings; ABI unchanged | Source xsystem tests 4/4; candidate HLE tests 94/94; both workspace Clippy gates, workspace 346 passes/6 ignored, policy 161 files, diff check all exit 0 on fresh candidate target | integrated-local; null output is refused before writing | c64f8aab | 2026-11-24 |
 | [#480](https://github.com/Marvisak/VIctory/pull/480) | 75fe6c02b278f18eab33ad893bda1dd68d176287 | Standalone decoder fix; its patch also occurs in JMAN's history | Coordinator reviewed 1/1 file and the decoder's callers; no ABI change; source-head media run 3/3 | Candidate media tests 3/3; both workspace Clippy gates, workspace 347 passes/6 ignored, policy 161 files, diff check all exit 0 on fresh candidate target | integrated-local; malformed escapes are copied verbatim | 06daf0f7 | 2026-11-24 |
 | [#396](https://github.com/Marvisak/VIctory/pull/396) | 10e9f56a50214df67dca98b19daac0d8e9b04075 | Standalone PE bounds fix; not in JMAN's fork | Coordinator reviewed 1/1 file, PR discussion, and every `data_directory_offset` caller in `prepare.rs`/`image.rs`; malformed headers now yield `None` instead of an out-of-bounds offset | Candidate PE tests 8/8 and loader tests 25/25 (22 unit + `load_probe` + `title_dlls`); both workspace Clippy gates, workspace 348 passes/6 ignored, policy 161 files, diff check all exit 0 on fresh candidate target | integrated-local; malformed/truncated optional header is refused before any offset is returned | 27dd4a73 | 2026-11-24 |
+| [#629](https://github.com/Marvisak/VIctory/pull/629) | 350f91c23a9402b2a556a84c208a80030910ae3f | Standalone format validation; cites AMD's addrlib | Coordinator reviewed 1/1 file, PR body and the `Layout::new` validation chain; `Layout::new` is the only entry point and no caller depends on linear MSAA | Candidate formats tests 24/24 + 4 ignored; both workspace Clippy gates, workspace 349 passes/6 ignored, policy 161 files, diff check all exit 0 on fresh candidate target | integrated-local; multisampled linear descriptors are refused before a layout is built | 25e797e9 | 2026-11-24 |
+| [#363](https://github.com/Marvisak/VIctory/pull/363) | 4874c3fdc18e01d0a1973fc62558669ed9e18ead | Conflicts with tests added after its base; overlaps #241's config rework | Coordinator reviewed 1/1 file and resolved the test-only conflict by keeping both sides; author preserved | Candidate core tests 16/16; both workspace Clippy gates, workspace 349 passes/6 ignored, policy 161 files, diff check all exit 0 on fresh candidate target | integrated-local; empty `VICTORY_CONFIG` counts as unset | 4dbc5a71 | 2026-11-24 |
+| [#337](https://github.com/Marvisak/VIctory/pull/337) | 5cf259e5fe2f9361fffbc00e9b5bd46067b6686d | Four commits squashed to their reviewed net patch | Coordinator reviewed the net diff of `Title::from_manifest`; storage quota now saturates instead of wrapping | Candidate HLE tests 97/97; both workspace Clippy gates, workspace 350 passes/6 ignored, policy 161 files, diff check all exit 0 on fresh candidate target | integrated-local; quota parse type is explicit `u64` | feeff994 | 2026-11-24 |
 
 ## Issue outcomes
 
@@ -227,17 +230,107 @@ SHA do not validate later code changes.
 
 ### Pending bounded PR candidates
 
-- #629 at `350f91c`: coordinator reviewed the full changed file, discussion,
-  and surrounding layout logic; source tests 21 passed, 3 ignored. Full
-  candidate gate pending.
-- #363 at `4874c3f` and #337 at `5cf259e`: static reviews 1/1 file each,
-  no skips/blockers; source and integration tests pending. #363 overlaps
-  #241's broader config change; #337 needs all four source commits or its
-  reviewed net patch, not just its initially uncompilable first commit.
-- Next PR integration order: #629, refreshing its exact head first, then
-  #363/#337. JMAN's wholesale batch is deferred by reproduced failures.
-  Remaining inventoried PRs are still queued; the issue and gap passes have
-  not started. This is an ongoing sweep, not a completed audit.
+- The five curated candidates (#449, #480, #396, #629, #363, #337) are all
+  integrated; nothing from that group remains pending.
+- The wider snapshot (445 open PRs) is still largely unreviewed: only the
+  curated set above has a disposition. JMAN's wholesale batch stays deferred
+  by reproduced failures. The issue and gap passes have not started. This is
+  an ongoing sweep, not a completed audit.
+- Next: refresh the PR snapshot, then triage the remaining open PRs into
+  bounded candidates (correctness and unblockers first).
+
+### PR #363 integration validation: 2026-11-24
+
+- Refreshed upstream PR state: open, head unchanged at
+  `4874c3fdc18e01d0a1973fc62558669ed9e18ead`; one commit; GitHub reported
+  `mergeable: false` against current `main`.
+- Review: `Config::load` in `crates/victory-core/src/config.rs` only. An empty
+  `VICTORY_CONFIG` was treated as a path, so it bailed out with "points at ,
+  which does not exist"; the patch routes the variable through a testable
+  `explicit_config_path` helper that treats empty as unset, matching the
+  other path variables.
+- Conflict resolution: the only conflict was test placement against tests
+  added after the PR's base. Resolved semantically by keeping both existing
+  tests (`empty_test_titles_env_is_ignored`, `test_titles_env_splits_paths`)
+  and appending `empty_config_env_is_ignored`; no production hunk was
+  rewritten, the author is preserved, and the `-x` trailer names the source.
+- Candidate `candidate/pr-363` was based on `b3cf5b9d`, rebased onto
+  `25e797e9` after review, and integrated with the original author and `-x`
+  source reference.
+- Targeted `cargo test -p victory-core --locked`: 16 passed, including
+  `config::tests::empty_config_env_is_ignored`.
+- Full workspace gate on a fresh isolated target with Rust 1.98.1 x86_64
+  Windows MSVC: both required Clippy commands passed; workspace tests 349
+  passed with 6 ignored; `cargo xtask policy` 161 files ok; `git diff
+  --check` passed. The targeted suite was re-run after the rebase.
+- Local integration commit: `4dbc5a71`. No upstream PR action was taken.
+
+### PR #337 integration validation: 2026-11-24
+
+- Refreshed upstream PR state: open, head at
+  `5cf259e5fe2f9361fffbc00e9b5bd46067b6686d`; four commits, `mergeable`
+  true against base `main`.
+- Review: `Title::from_manifest` in `crates/victory-hle/src/runtime.rs` only.
+  `SizeMB` was shifted into bytes, which wraps for values at or above 2^44
+  instead of saturating, and its parse type was implicit. The net patch
+  parses `u64` explicitly and uses `saturating_mul`. The regression test
+  pins both the exact-at-limit value and the saturated `u64::MAX`.
+- Integration choice: the PR's first commit did not compile on its own, so
+  the reviewed net diff of all four commits was applied as one commit,
+  keeping the author and recording both the PR head SHA and all four source
+  commit SHAs in the message. The two `rustfmt` commits are folded into it.
+- Candidate `candidate/pr-337` was based on `25e797e9`, rebased onto
+  `4dbc5a71`, and integrated with the original author.
+- Targeted `cargo test -p victory-hle --locked`: 97 passed, including
+  `runtime::tests::storage_quota_saturates_when_megabytes_exceed_u64_bytes`.
+- Full workspace gate on a fresh isolated target with Rust 1.98.1 x86_64
+  Windows MSVC: both required Clippy commands passed; workspace tests 350
+  passed with 6 ignored; `cargo xtask policy` 161 files ok; `git diff
+  --check` passed. The targeted suite was re-run after the rebase.
+- Local integration commit: `feeff994`. No upstream PR action was taken.
+
+### Batch gate: 2026-11-24
+
+- Combined tip `feeff99438738b3c8ba9cc6412f11e5cc0b0c42b` on a newly created,
+  worktree-specific external target (`integration-final2-target`); no
+  cross-worktree artifacts reused.
+- Both required Clippy commands: exit 0. `cargo test --workspace --locked`:
+  exit 0, 351 passed, 6 ignored, no failures. `cargo xtask policy`: 161 files
+  ok. `git diff --check`: exit 0. No title execution and no GPU/loader
+  behaviour was exercised beyond the existing synthetic fixtures.
+- The five newly integrated regressions all executed in this run:
+  `percent_decode_requires_two_hex_digits`,
+  `directory_entries_must_fit_in_the_optional_header_and_file`,
+  `linear_layouts_require_one_sample`, `empty_config_env_is_ignored`,
+  `storage_quota_saturates_when_megabytes_exceed_u64_bytes`.
+- Accepted local integrations now: #689, #708, #449, #480, #396, #629,
+  #363, #337. Logs remain outside the repository.
+
+### PR #629 integration validation: 2026-11-24
+
+- Refreshed upstream PR state: open, head unchanged at
+  `350f91c23a9402b2a556a84c208a80030910ae3f`; one commit, `mergeable` true
+  against base `main`.
+- Review: `Layout::new` in `crates/victory-formats/src/texture.rs` only. The
+  multisample allowance accepted a `Swizzle::LINEAR` descriptor, but the
+  linear path computes rows and offsets for one sample, so a 2x-MSAA linear
+  surface reported the same size as 1x. The patch requires a tiled swizzle
+  for multisampling, matching the cited GFX10 addrlib validation, and is a
+  refusal: it returns `Error::Invalid` before `Layout::linear` runs.
+- Checked for behavioural fallout: `Layout::new` has no callers outside the
+  module (textures go through `Texture`), and `addressable()` already
+  treated multisampled linear layouts as unaddressable, so no working path
+  loses support.
+- Candidate `candidate/pr-629` was based on `b3cf5b9d` and integrated with
+  the original author and `-x` source reference.
+- Targeted `cargo test -p victory-formats --locked`: 24 passed, 4 ignored,
+  including `texture::tests::linear_layouts_require_one_sample`; the four
+  ignored tests need external data and were not counted as coverage.
+- Full workspace gate on a fresh isolated target with Rust 1.98.1 x86_64
+  Windows MSVC: both required Clippy commands passed; workspace tests 349
+  passed with 6 ignored (348 plus the new regression); `cargo xtask policy`
+  161 files ok; `git diff --check` passed.
+- Local integration commit: `25e797e9`. No upstream PR action was taken.
 
 ### PR #396 integration validation: 2026-11-24
 
