@@ -18,6 +18,8 @@ pub const ROOT_CBV_SPACE: u32 = 1;
 pub(crate) mod flags {
     pub const RAW_BUFFERS: u64 = 1 << 4;
     pub const STENCIL_REF: u64 = 1 << 11;
+    /// `CheckAccessFullyMapped` (texel residency).
+    pub const TILED_RESOURCES: u64 = 1 << 12;
     pub const TYPED_UAV_LOADS: u64 = 1 << 13;
     pub const WAVE_OPS: u64 = 1 << 19;
     pub const INT64: u64 = 1 << 20;
@@ -661,6 +663,9 @@ impl Shader {
         dxil.extend(&bitcode);
 
         let mut features = 0u64;
+        if self.flags & flags::TILED_RESOURCES != 0 {
+            features |= 0x100;
+        }
         if self.flags & flags::STENCIL_REF != 0 {
             features |= 0x200;
         }

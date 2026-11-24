@@ -56,6 +56,10 @@
 //!   atomically is declared a 32-bit unsigned single-channel view; the
 //!   host's view at that index must be an R32 integer view (64-bit atomics
 //!   stop the translation). Global loads from a root SRV read it raw.
+//! * **Texel residency** (added 2026-11-24): a load, sample or gather with
+//!   `tfe` gets its status dword from `CheckAccessFullyMapped` (0 when
+//!   resident, else 1), which declares the tiled-resources feature, so the
+//!   host device needs tiled resources tier 2.
 //!
 //! Entry points: [`translate`] (container bytes as the title passes them
 //! at pipeline creation → [`HostShader`]), [`emit`] (the same with the
@@ -87,6 +91,8 @@ pub mod host;
 mod lower;
 mod sampler;
 mod shader;
+#[cfg(test)]
+mod tfe_tests;
 #[cfg(windows)]
 pub mod validator;
 #[cfg(all(test, windows))]
