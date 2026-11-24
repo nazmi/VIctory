@@ -11,6 +11,9 @@ pub const NT_SIGNATURE_SIZE: usize = 4;
 /// Size of `IMAGE_FILE_HEADER`.
 pub const FILE_HEADER_SIZE: usize = 20;
 
+/// `IMAGE_FILE_HEADER::SizeOfOptionalHeader` (u16).
+const FILE_HEADER_SIZE_OF_OPTIONAL_HEADER: usize = 16;
+
 /// `IMAGE_FILE_HEADER::Characteristics` (u16).
 pub const FILE_HEADER_CHARACTERISTICS: usize = 18;
 
@@ -78,13 +81,19 @@ pub fn file_header_offset(data: &[u8]) -> Option<usize> {
 
 /// Offset of data directory `index` from the start of the file.
 pub fn data_directory_offset(data: &[u8], index: usize) -> Option<usize> {
-    let opt = optional_header_offset(data)?;
-    let count = read_u32(data, opt.checked_add(OPT_NUMBER_OF_RVA_AND_SIZES)?)? as usize;
+    let file_header = file_header_offset(data)?;
+    let size_at = file_header.checked_add(FILE_HEADER_SIZE_OF_OPTIONAL_HEADER)?;
+    let size_end = size_at.checked_add(2)?;
+    let size = u16::from_le_bytes(data.get(size_at..size_end)?.try_into().ok()?);
+    let opt = file_header.checked_add(FILE_HEADER_SIZE)?;
+    let header = data.get(opt..opt.checked_add(usize::from(size))?)?;
+    let count = read_u32(header, OPT_NUMBER_OF_RVA_AND_SIZES)? as usize;
     if index >= count {
         return None;
     }
-    opt.checked_add(OPT_DATA_DIRECTORY)?
-        .checked_add(index.checked_mul(DATA_DIRECTORY_SIZE)?)
+    let entry = OPT_DATA_DIRECTORY.checked_add(index.checked_mul(DATA_DIRECTORY_SIZE)?)?;
+    header.get(entry..entry.checked_add(DATA_DIRECTORY_SIZE)?)?;
+    opt.checked_add(entry)
 }
 
 pub fn read_u32(data: &[u8], at: usize) -> Option<u32> {
@@ -100,6 +109,30 @@ pub fn read_u64(data: &[u8], at: usize) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_entries_must_fit_in_the_optional_header_and_file() {
+        const FILE_HEADER: usize = DOS_E_LFANEW + 4 + NT_SIGNATURE_SIZE;
+        const OPTIONAL_HEADER: usize = FILE_HEADER + FILE_HEADER_SIZE;
+        const HEADER_SIZE: usize = OPT_DATA_DIRECTORY + DATA_DIRECTORY_SIZE;
+        const ENTRY: usize = OPTIONAL_HEADER + OPT_DATA_DIRECTORY;
+
+        let mut data = [0u8; OPTIONAL_HEADER + HEADER_SIZE];
+        let nt_signature = (FILE_HEADER - NT_SIGNATURE_SIZE) as u32;
+        data[DOS_E_LFANEW..][..4].copy_from_slice(&nt_signature.to_le_bytes());
+        data[FILE_HEADER + FILE_HEADER_SIZE_OF_OPTIONAL_HEADER..][..2]
+            .copy_from_slice(&(HEADER_SIZE as u16).to_le_bytes());
+        data[OPTIONAL_HEADER + OPT_NUMBER_OF_RVA_AND_SIZES..][..4]
+            .copy_from_slice(&1u32.to_le_bytes());
+
+        assert_eq!(data_directory_offset(&data, 0), Some(ENTRY));
+        assert_eq!(data_directory_offset(&data, 1), None);
+        assert_eq!(data_directory_offset(&data[..data.len() - 1], 0), None);
+
+        data[FILE_HEADER + FILE_HEADER_SIZE_OF_OPTIONAL_HEADER..][..2]
+            .copy_from_slice(&((HEADER_SIZE - 1) as u16).to_le_bytes());
+        assert_eq!(data_directory_offset(&data, 0), None);
+    }
 
     #[test]
     fn reads_reject_overflowing_offsets() {
