@@ -228,6 +228,44 @@ SHA do not validate later code changes.
   Workflow now requires one Cargo target per worktree. A final fresh-target
   integration gate will replace any ambiguous shared-target evidence.
 
+### Wave 5 integrations and the world-load diagnosis: 2026-11-25
+
+Gate at `6db9bb08`: both Clippy commands exit 0; workspace 660 passed,
+14 ignored, 0 failed; policy 194 files; `cargo fmt --check` 0 differing files.
+
+**A real run of the title was captured** (`latest dump.txt`, local and
+gitignored) and analysed in `docs/world-load-diagnosis.md`. It reached frame
+3,910 with 596 shaders translated and 251 host pipelines, then faulted writing
+to address 0 from title code on a worker thread. 74 distinct shaders were
+refused; the full ranked table is in the diagnosis.
+
+Acted on, because the dump proves they matter:
+- **#705, 64-bit image atomics** (7 refusals, pixel stage). Adds SFI0 bits 22
+  and 24, which DXC calls AtomicInt64OnTypedResource and
+  AtomicInt64OnDescriptorHeapResource.
+- **The top refusal (31 refreshes, all compute, all at offsets 0x2c–0x40)** is
+  a prologue failure in 31 *distinct* shaders, so one systematic cause, not
+  thirty-one bugs. The refusal message said "no root parameter" even when the
+  parameter existed at a later dword; it now names the actual case (descriptor
+  high half / root constant past the first dword / heap index / later dword /
+  no parameter) so the next run decides the fix. Diagnostics only — the
+  lowering is unchanged, because guessing at address semantics would risk
+  mis-binding every buffer in the world.
+- **#390** puts a Rust backtrace in the panic log, and **#1071**, **#1110** are
+  small correctness fixes (datagram connect-to-zero, save quota arithmetic).
+
+Deliberately not merged, with reasons:
+- **#694** would make `image_gather4_l` (7 refusals) translate by dropping the
+  LOD operand: wrong texels instead of a refusal. DXIL's `textureGather` has no
+  LOD, so a correct lowering needs four `sampleLevel` taps or a mip-specific
+  view.
+- **#1067** and **#1084** each restructure descriptor inference in the most
+  contested function for two refusals apiece; both conflict there.
+
+Also fixed this wave: a 3,358-line run log was committed by accident and
+removed again (the branch now gitignores `latest dump.txt` and `*.crash.log`);
+two rustfmt drifts were caught after the fact and corrected.
+
 ### Wave 4 integrations: 2026-11-24 (28 PRs + 2 lint fixes)
 
 Gate at `2b7cbae1`: both Clippy commands exit 0; workspace 638 passed,
