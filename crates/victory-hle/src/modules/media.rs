@@ -750,8 +750,7 @@ mod tests {
         assert_eq!(host_path("file:///movies/a.mp4"), r"\movies\a.mp4");
     }
 
-    #[test]
-    /// The host's Media Foundation resolves these URLs and paths with its
+        /// The host's Media Foundation resolves these URLs and paths with its
     /// own resolver and file calls, past the proxy and `files`: a network
     /// URL is fetched and a virtual-drive path is not rewritten.
     #[test]

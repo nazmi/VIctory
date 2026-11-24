@@ -1191,6 +1191,9 @@ mod host {
         empty_until: [Option<Instant>; PADS],
     }
 
+    /// Only the diagnostics key script reaches this; a host pad reports
+    /// its own scan codes.
+    #[cfg(feature = "diagnostics")]
     fn key_state(vk: u8) -> KeyState {
         KeyState {
             // SAFETY: plain query.

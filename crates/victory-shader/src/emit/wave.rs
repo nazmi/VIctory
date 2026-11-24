@@ -784,7 +784,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn constant_decodes_width_and_inline_kinds() {
         let b64 = 0x04;
         let b32 = 0x03;
