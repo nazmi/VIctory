@@ -1078,7 +1078,10 @@ mod tests {
             assert!(!kept(1), "a view of no elements (unordered: {unordered})");
             // SAFETY: a plain device query.
             let removed = unsafe { host.device.GetDeviceRemovedReason() };
-            assert!(removed.is_ok(), "device removed: {removed:?} (unordered: {unordered})");
+            assert!(
+                removed.is_ok(),
+                "device removed: {removed:?} (unordered: {unordered})"
+            );
         }
         crate::shadow::unregister(usize::MAX - 1, address);
     }

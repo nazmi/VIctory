@@ -83,6 +83,7 @@ fn shared_address_keeps_its_dynamic_term_and_wraps_offsets() {
                 (0, 3),
                 Address {
                     param: 0,
+                    dword: 0,
                     offset: 0xFFFF_FFF4,
                     dynamic: Some(dynamic)
                 }
@@ -91,6 +92,7 @@ fn shared_address_keeps_its_dynamic_term_and_wraps_offsets() {
                 (0, 4),
                 Address {
                     param: 0,
+                    dword: 0,
                     offset: 4,
                     dynamic: Some(dynamic)
                 }
@@ -120,6 +122,7 @@ fn shared_sum_with_two_dynamic_terms_stays_opaque() {
                 (0, 3),
                 Address {
                     param: 0,
+                    dword: 0,
                     offset: 0,
                     dynamic: Some(dynamic)
                 }
@@ -128,6 +131,7 @@ fn shared_sum_with_two_dynamic_terms_stays_opaque() {
                 (0, 4),
                 Address {
                     param: 0,
+                    dword: 0,
                     offset: 4,
                     dynamic: Some(dynamic)
                 }

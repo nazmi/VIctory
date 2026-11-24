@@ -297,9 +297,11 @@ pub(crate) struct Stage {
     pub(crate) shader: Arc<Shader>,
     /// How its user data is bound, if the shader reads any.
     pub(crate) user_data: Option<UserDataBind>,
-    /// Root parameters of its root views: (title root parameter, ours).
-    pub(crate) root_cbvs: Vec<(u8, u32)>,
-    pub(crate) root_srvs: Vec<(u8, u32)>,
+    /// Root parameters of its root views: (register, ours). The register
+    /// names where the title sets the address
+    /// ([`victory_shader::emit::RootView`]).
+    pub(crate) root_cbvs: Vec<(u16, u32)>,
+    pub(crate) root_srvs: Vec<(u16, u32)>,
 }
 
 impl Stage {
@@ -1043,8 +1045,8 @@ mod tests {
         name: &'static str,
         vis: D3D12_SHADER_VISIBILITY,
         user_dwords: u32,
-        cbv_slots: &[u8],
-        srv_slots: &[u8],
+        cbv_slots: &[u16],
+        srv_slots: &[u16],
     ) -> Stage {
         let user_data = (user_dwords > 0).then(|| {
             let param = params.len() as u32;
@@ -1172,7 +1174,7 @@ mod tests {
     #[test]
     fn fit_spills_both_stages_with_heavy_root_views() {
         let mut params = Vec::new();
-        let srvs: Vec<u8> = (0..18).collect();
+        let srvs: Vec<u16> = (0..18).collect();
         let mut stages = vec![
             add_stage(
                 &mut params,
@@ -1238,8 +1240,8 @@ mod tests {
 
     #[test]
     fn fit_phase2_deduplicates_shared_root_views_and_remaps() {
-        let cbvs: Vec<u8> = (0..10).collect();
-        let srvs: Vec<u8> = (0..10).collect();
+        let cbvs: Vec<u16> = (0..10).collect();
+        let srvs: Vec<u16> = (0..10).collect();
         let mut params = Vec::new();
         let mut stages = vec![
             add_stage(
@@ -1308,7 +1310,7 @@ mod tests {
             },
             ShaderVisibility: vis,
         };
-        let srvs: Vec<u8> = (0..18).collect();
+        let srvs: Vec<u16> = (0..18).collect();
         let mut params = Vec::new();
         let mut stages = vec![
             add_stage(
@@ -1394,8 +1396,8 @@ mod tests {
         assert_eq!(host.log_messages(), None);
 
         // Case 2: 144 DWORDs (Phase 1 spill + Phase 2 deduplication).
-        let cbvs: Vec<u8> = (0..10).collect();
-        let srvs: Vec<u8> = (0..10).collect();
+        let cbvs: Vec<u16> = (0..10).collect();
+        let srvs: Vec<u16> = (0..10).collect();
         let mut params = Vec::new();
         let mut stages = vec![
             add_stage(

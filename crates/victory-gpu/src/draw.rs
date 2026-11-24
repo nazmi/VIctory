@@ -10,6 +10,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use victory_shader::emit::RootView;
 use victory_shader::{ResourceType, RootType, UsedResource};
 
 use crate::descriptor::View;
@@ -608,13 +609,12 @@ impl State {
                 }
             }
             for (views, srv) in [(&stage.root_cbvs, false), (&stage.root_srvs, true)] {
-                for &(slot, param) in views {
-                    let Some(Root::View(address)) = self.roots_ref(compute).get(usize::from(slot))
-                    else {
-                        once!(slot, "a shader reads a root view the title did not set");
+                for &(register, param) in views {
+                    let Some(address) = self.view_address(compute, register) else {
+                        once!(register, "a shader reads a root view the title did not set");
                         continue;
                     };
-                    let Some(gpu) = root_view(list, *address, srv) else {
+                    let Some(gpu) = root_view(list, address, srv) else {
                         continue;
                     };
                     // SAFETY: an open list; the address is in live memory.
@@ -761,11 +761,11 @@ impl State {
                     let _ = write!(text, " [{at} {index}: {slot}]");
                 }
             }
-            for &(slot, _) in stage.root_cbvs.iter().chain(&stage.root_srvs) {
-                if let Some(Root::View(address)) = self.roots_ref(compute).get(usize::from(slot)) {
-                    let host = crate::shadow::find(*address, 1)
-                        .map(|s| (s.gpu(*address), s.left(*address)));
-                    let _ = write!(text, " root{slot}={address:#x} host {host:#x?}");
+            for &(register, _) in stage.root_cbvs.iter().chain(&stage.root_srvs) {
+                if let Some(address) = self.view_address(compute, register) {
+                    let host =
+                        crate::shadow::find(address, 1).map(|s| (s.gpu(address), s.left(address)));
+                    let _ = write!(text, " root{register:#x}={address:#x} host {host:#x?}");
                 }
             }
         }
@@ -796,6 +796,23 @@ impl State {
             DROPPED.fetch_add(1, Ordering::Relaxed);
             #[cfg(feature = "diagnostics")]
             dropped(self.pipeline);
+        }
+    }
+
+    /// The address the root view at `register` reads ([`RootView`]): a root
+    /// view the title set, or an address it passes in two root constants.
+    fn view_address(&self, compute: bool, register: u16) -> Option<u64> {
+        let view = RootView::of(register);
+        match (
+            self.roots_ref(compute).get(usize::from(view.slot))?,
+            view.dword,
+        ) {
+            (Root::View(address), None) => Some(*address),
+            (Root::Constants(c), Some(dword)) => {
+                let d = usize::from(dword);
+                Some(u64::from(*c.get(d)?) | u64::from(*c.get(d + 1)?) << 32)
+            }
+            _ => None,
         }
     }
 
@@ -1879,5 +1896,22 @@ mod tests {
             ]
         );
         drop((view_heap, sampler_heap));
+    }
+
+    #[test]
+    fn root_views_read_their_address_where_the_title_sets_it() {
+        let mut s = State::default();
+        s.set_view(true, 1, 0x1234_5678_9000);
+        s.set_constants(true, 3, &[7, 0x9abc_0000, 0x12, 9], 0);
+        let at = |slot, dword| RootView { slot, dword }.register();
+        assert_eq!(s.view_address(true, at(1, None)), Some(0x1234_5678_9000));
+        // An address in root constants 1 and 2 of parameter 3 (#614).
+        assert_eq!(s.view_address(true, at(3, Some(1))), Some(0x12_9abc_0000));
+        // Its high half past the constants the title set, the wrong kind of
+        // parameter, the other pipeline kind's roots.
+        assert_eq!(s.view_address(true, at(3, Some(3))), None);
+        assert_eq!(s.view_address(true, at(1, Some(0))), None);
+        assert_eq!(s.view_address(true, at(3, None)), None);
+        assert_eq!(s.view_address(false, at(1, None)), None);
     }
 }

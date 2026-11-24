@@ -8,10 +8,10 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use super::UserData;
 use super::bitcode::{Attr, Bin, Cast, Term, V, pred};
 use super::container::SigElement;
 use super::shader::{Shader, flags};
+use super::{RootView, UserData};
 use crate::ShaderError;
 use crate::gfx10::{Dpp, Fields, NULL, Operand};
 use crate::io::{Barycentric, Export, Input, Interp, Io, Target};
@@ -33,8 +33,8 @@ pub(crate) struct Lowered {
     pub dxil: Vec<u8>,
     /// Bit n: immediate sampler n is used for comparisons.
     pub cmp_samplers: u64,
-    pub root_cbvs: Vec<u8>,
-    pub root_srvs: Vec<u8>,
+    pub root_cbvs: Vec<u16>,
+    pub root_srvs: Vec<u16>,
     pub user_data: Vec<UserData>,
     pub samplers: Vec<[u32; 4]>,
     /// Heap handles made with a non-uniform index.
@@ -4274,12 +4274,30 @@ impl<'a> Lower<'a> {
                     .iter()
                     .find(|u| u.user_data == rp.user_data)
                     .map(|u| u.kind);
+                let view = |dword| {
+                    let dword = u8::try_from(dword).ok().filter(|&d| d < u8::MAX)?;
+                    let view = RootView {
+                        slot: rp.slot,
+                        dword: Some(dword),
+                    };
+                    Some(view.register())
+                };
                 match (rp.root, kind, props.0) {
                     (RootType::Descriptor, Some(ResourceType::Cbv) | None, 13) => {
-                        Ok(self.s.root_cbv_handle(rp.slot))
+                        Ok(self.s.root_cbv_handle(u16::from(rp.slot)))
                     }
                     (RootType::Descriptor, Some(ResourceType::Srv), 11) => {
-                        Ok(self.s.root_srv_handle(rp.slot))
+                        Ok(self.s.root_srv_handle(u16::from(rp.slot)))
+                    }
+                    // An address in two root constants: what the program does
+                    // with it says which view it is.
+                    (RootType::Constants, _, 13) => {
+                        let r = view(address.dword).ok_or("an address past the root constants")?;
+                        Ok(self.s.root_cbv_handle(r))
+                    }
+                    (RootType::Constants, _, 11) => {
+                        let r = view(address.dword).ok_or("an address past the root constants")?;
+                        Ok(self.s.root_srv_handle(r))
                     }
                     _ => Err("a root UAV or typed root view"),
                 }
@@ -8513,6 +8531,66 @@ mod tests {
             mesh_stride: 0,
         })
         .map(|_| ())
+        .map(|_| ())
+    }
+
+    #[test]
+    fn a_buffer_around_two_root_constants_is_a_root_view() {
+        // Root constants at user data 8 (root parameter 3); the program
+        // builds a buffer descriptor around dwords 2 and 3 (s[10:11]) and
+        // branches on a dword it reads through it (#614).
+        let words = [
+            0x8801_FF0B,
+            0x0010_0000, // s_or_b32 s1, s11, 0x100000
+            0xBE80_030A, // s_mov_b32 s0, s10
+            0xBE82_03C1, // s_mov_b32 s2, -1
+            0xBE83_03FF,
+            0x1101_4FAC, // s_mov_b32 s3, 0x11014fac
+            0xF420_0100,
+            0xFA00_0000, // s_buffer_load_dword s4, s[0:3], null
+            0xBF07_8004, // s_cmp_lg_u32 s4, 0
+            0xBF85_0001, // s_cbranch_scc1 -> s_endpgm
+            0xBE85_0380, // s_mov_b32 s5, 0
+            S_ENDPGM,
+        ];
+        let constants = crate::native::RootParam {
+            root: crate::native::RootType::Constants,
+            table_offset_dwords: 0,
+            sgprs: 4,
+            base_register: 0,
+            user_data: 8,
+            slot: 3,
+        };
+        let l = lower_with(&words, vec![constants], vec![]).unwrap();
+        let view = super::RootView {
+            slot: 3,
+            dword: Some(2),
+        };
+        assert_eq!(l.root_cbvs, [view.register()]);
+        assert!(l.root_srvs.is_empty());
+        assert_eq!(super::RootView::of(view.register()), view);
+        assert_eq!(super::RootView::of(3).dword, None);
+        #[cfg(windows)]
+        {
+            use super::super::{HostShader, host::Host, validator::Validator};
+            let mut dxil = l.dxil.clone();
+            if let Ok(mut v) = Validator::load(Validator::default_path().as_deref()) {
+                v.validate(&mut dxil).unwrap();
+            }
+            // The host takes the root view at its register.
+            if let Ok(host) = Host::new(false) {
+                let cs = HostShader {
+                    stage: HwStage::Cs,
+                    dxil,
+                    user_data: l.user_data,
+                    samplers: l.samplers,
+                    static_samplers: Vec::new(),
+                    root_cbvs: l.root_cbvs,
+                    root_srvs: l.root_srvs,
+                };
+                host.compute_pipeline(&cs).unwrap();
+            }
+        }
     }
 
     #[test]
