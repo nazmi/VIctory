@@ -55,6 +55,64 @@ sides keep their behaviour, never "ours dropped to make it apply".
 | wave7-gpu | `e88c5752` | Pipelines: VICTORY_PIPELINE_WORKERS (#1728) | in branch |
 | wave7-gpu | `ea8b7f31` | Shaders: wait on an event instead of spinning (#1734) | in branch |
 
+## The integration gate: run this before every new wave
+
+The rule, stated as a check rather than an intention:
+
+> No new wave starts until every worker branch has been audited, and every
+> branch reports **0 added lines absent from the integrated branch**, or the
+> exceptions are named and justified in this file.
+
+The audit compares the lines a worker *added* against the integrated branch's
+copy of the same files. Patch-id comparisons (`git cherry`) are not enough on
+their own: a cherry-pick after conflict resolution, or any reformatting, gives
+the same content a different patch id, so `git cherry` reports `+` for work that
+is in fact present. The test that survives reflow is line containment after
+whitespace normalisation:
+
+```bash
+# agent-audit.py, kept outside the repo (game/maintenance tooling)
+# for each codex/agent-* branch:
+#   base = merge-base HEAD branch
+#   for each file in `git diff --name-only base branch`:
+#     for each line the branch added: is it in `git show HEAD:<file>` after
+#     collapsing runs of whitespace?
+```
+
+### Result at 2026-11-24 21:54 UTC, over the six branches in question
+
+| Branch | Added lines absent from the integrated branch |
+| --- | --- |
+| `codex/agent-fork-small-1a4ffce1` | 0 |
+| `codex/agent-verify-next-892d57be` | 0 |
+| `codex/agent-verify-hle-457cb189` | 0 |
+| `codex/agent-verify-gpu-c7d011be` | 0 |
+| `codex/agent-fork-mid-c461d326` | 0 |
+| `codex/agent-verify-shadow-0971b878` | 1, justified below |
+
+The single flagged line is
+
+```rust
+handles.into_iter().map(|h| h.join().unwrap_or(0)).sum()
+```
+
+in `crates/victory-gpu/src/host.rs`. It is **absent on purpose**: the worker's
+copy absorbed a panicking copy-back thread and carried on, which leaves the
+submission with a partial write-back that the frame then continues past. It was
+replaced with `std::panic::resume_unwind`, so the panic propagates as it did
+when this ran on one thread. The reason is in the commit message of `e08c93e0`.
+That is the only difference; the rest of the branch, including the `pooled()`
+resize fix, the span write-back and the threading, is present.
+
+### What went wrong before this rule
+
+The wave7-gpu worker finished and reported, and its seven commits were verified
+but not yet cherry-picked when the next question arrived. Every other branch
+was already in. The cause was ordering, not lost work: the coordinator moved on
+to reading the next result instead of integrating the finished one first. The
+table above is the first time this was checked exhaustively rather than by
+sampling, and the rule exists so it cannot recur silently.
+
 ## The audit method, and a real miss it caught
 
 A worker branch never merges into the main branch by itself: workers commit on
