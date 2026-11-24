@@ -53,8 +53,12 @@ pub fn log_crashes_to(file: std::path::PathBuf) {
         let print = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             print(info);
+            // A panic in an `extern "system"` function aborts the process,
+            // so the log is all that is left: it gets our stack, whatever
+            // RUST_BACKTRACE says (a release build has line tables).
+            let stack = std::backtrace::Backtrace::force_capture();
             append_to_log(&format!(
-                "VIctory: panic on thread {:?}: {info}\n{}",
+                "VIctory: panic on thread {:?}: {info}\n{}  our stack:\n{stack}\n",
                 std::thread::current().name().unwrap_or("?"),
                 report_end()
             ));
@@ -843,6 +847,39 @@ mod tests {
     use windows_sys::Win32::System::Diagnostics::Debug::{
         EXCEPTION_RECORD, RtlCaptureContext, RtlCaptureStackBackTrace,
     };
+
+    #[inline(never)]
+    fn panics_here() {
+        panic!("a test panic");
+    }
+
+    /// In a child process of the next test: logs crashes to the file it is
+    /// given and panics.
+    #[test]
+    fn panic_child() {
+        let Some(log) = std::env::var_os("VICTORY_PANIC_CHILD") else {
+            return;
+        };
+        log_crashes_to(log.into());
+        panics_here();
+    }
+
+    #[test]
+    fn a_panic_logs_our_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("crashes.log");
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "crash::tests::panic_child", "--nocapture"])
+            .env("VICTORY_PANIC_CHILD", &log)
+            .env_remove("RUST_BACKTRACE")
+            .output()
+            .unwrap();
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(!out.status.success(), "the child panicked");
+        assert!(text.contains("a test panic"), "{text}");
+        assert!(text.contains("our stack:"), "{text}");
+        assert!(text.contains("panics_here"), "{text}");
+    }
 
     #[test]
     #[inline(never)]
