@@ -60,7 +60,8 @@ extern "system" fn text_entry_async(
     _scope: u32,
     max_length: u32,
 ) -> HRESULT {
-    let [title, description, default] = [title, description, default].map(|t| text(t).unwrap_or_default());
+    let [title, description, default] =
+        [title, description, default].map(|t| text(t).unwrap_or_default());
     tracing::info!(title, description, max_length, "text entry");
     xasync::pending_with(block, (&raw const TEXT).cast(), move || {
         match ask(&title, &description, &default, max_length) {
@@ -79,6 +80,9 @@ extern "system" fn text_entry_async(
 }
 /// Bytes of the result, its NUL included.
 extern "system" fn text_entry_size(_: This, block: *mut AsyncBlock, out: *mut u32) -> HRESULT {
+    if out.is_null() {
+        return xasync::E_INVALIDARG;
+    }
     let mut size = 0;
     let hr = xasync::XAsyncGetResultSize(block, &mut size);
     if hr < 0 {
@@ -93,6 +97,9 @@ extern "system" fn text_entry_result(
     buffer: *mut c_char,
     used: *mut u32,
 ) -> HRESULT {
+    if size > 0 && buffer.is_null() {
+        return xasync::E_INVALIDARG;
+    }
     let mut written = 0;
     let identity = (&raw const TEXT).cast();
     let hr = xasync::XAsyncGetResult(block, identity, size as usize, buffer.cast(), &mut written);
@@ -178,7 +185,13 @@ mod dialog {
         let ok = wm::BS_DEFPUSHBUTTON as u32 | tab;
         item(ok, [129, 40, 50, 14], wm::IDOK as u16, button, "OK");
         let cancel = wm::BS_PUSHBUTTON as u32 | tab;
-        item(cancel, [183, 40, 50, 14], wm::IDCANCEL as u16, button, "Cancel");
+        item(
+            cancel,
+            [183, 40, 50, 14],
+            wm::IDCANCEL as u16,
+            button,
+            "Cancel",
+        );
         // The template must start on a DWORD.
         let template: Vec<u32> = t
             .chunks(2)
@@ -199,7 +212,12 @@ mod dialog {
         entry.typed
     }
 
-    extern "system" fn procedure(dialog: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> isize {
+    extern "system" fn procedure(
+        dialog: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> isize {
         // SAFETY: our dialog; its user data is the `Entry` from `ask`,
         // stored at WM_INITDIALOG.
         unsafe {
@@ -214,12 +232,16 @@ mod dialog {
                     0 // focus set here
                 }
                 wm::WM_COMMAND => {
-                    let entry = &mut *(wm::GetWindowLongPtrW(dialog, wm::GWLP_USERDATA) as *mut Entry);
+                    let entry =
+                        &mut *(wm::GetWindowLongPtrW(dialog, wm::GWLP_USERDATA) as *mut Entry);
                     match (wparam & 0xffff) as i32 {
                         wm::IDOK => {
-                            let mut buffer = vec![0u16; wm::GetWindowTextLengthW(edit) as usize + 1];
-                            let n = wm::GetWindowTextW(edit, buffer.as_mut_ptr(), buffer.len() as i32);
-                            entry.typed = Some(String::from_utf16_lossy(&buffer[..n.max(0) as usize]));
+                            let mut buffer =
+                                vec![0u16; wm::GetWindowTextLengthW(edit) as usize + 1];
+                            let n =
+                                wm::GetWindowTextW(edit, buffer.as_mut_ptr(), buffer.len() as i32);
+                            entry.typed =
+                                Some(String::from_utf16_lossy(&buffer[..n.max(0) as usize]));
                             wm::EndDialog(dialog, 1);
                         }
                         wm::IDCANCEL => {
@@ -295,25 +317,43 @@ mod tests {
             u32,
         ) -> HRESULT;
         type Size = extern "system" fn(This, *mut AsyncBlock, *mut u32) -> HRESULT;
-        type Result_ = extern "system" fn(This, *mut AsyncBlock, u32, *mut c_char, *mut u32) -> HRESULT;
+        type Result_ =
+            extern "system" fn(This, *mut AsyncBlock, u32, *mut c_char, *mut u32) -> HRESULT;
         let null = std::ptr::null();
         let entry = method::<Entry>(&OBJECT, 0x88);
         // Dismissed: cancelled.
         let mut b = block();
-        assert_eq!(entry(this, &mut b, c"Name".as_ptr(), null, null, 0, 16), S_OK);
+        assert_eq!(
+            entry(this, &mut b, c"Name".as_ptr(), null, null, 0, 16),
+            S_OK
+        );
         assert_eq!(xasync::XAsyncGetStatus(&mut b, true), E_ABORT);
         let mut size = 0;
-        assert_eq!(method::<Size>(&OBJECT, 0x90)(this, &mut b, &mut size), E_ABORT);
+        assert_eq!(
+            method::<Size>(&OBJECT, 0x90)(this, &mut b, &mut size),
+            E_ABORT
+        );
         // Typed: the text, cut to the limit, with its NUL.
         let mut b = block();
         let default = c"abc".as_ptr();
-        assert_eq!(entry(this, &mut b, c"Type".as_ptr(), null, default, 0, 6), S_OK);
+        assert_eq!(
+            entry(this, &mut b, c"Type".as_ptr(), null, default, 0, 6),
+            S_OK
+        );
         assert_eq!(xasync::XAsyncGetStatus(&mut b, true), S_OK);
         assert_eq!(method::<Size>(&OBJECT, 0x90)(this, &mut b, &mut size), S_OK);
         assert_eq!(size, 7);
         let mut out = [0 as c_char; 7];
         let mut used = 0;
         let result = method::<Result_>(&OBJECT, 0x98);
+        assert_eq!(
+            method::<Size>(&OBJECT, 0x90)(this, &mut b, std::ptr::null_mut()),
+            xasync::E_INVALIDARG
+        );
+        assert_eq!(
+            result(this, &mut b, 7, std::ptr::null_mut(), &mut used),
+            xasync::E_INVALIDARG
+        );
         assert_eq!(result(this, &mut b, 7, out.as_mut_ptr(), &mut used), S_OK);
         assert_eq!((text(out.as_ptr()).as_deref(), used), (Some("abctyp"), 7));
         assert_eq!(limit("\u{e9}t\u{e9}s", 3), "\u{e9}t\u{e9}");
