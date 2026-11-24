@@ -4,8 +4,11 @@
 //!
 //! Needs `VICTORY_CONSOLE_DXC` (the console SDK's `dxc.exe`) and a PC
 //! `dxc.exe` (`VICTORY_PC_DXC`, else the newest Windows SDK's); skipped
-//! without them. Set `VICTORY_WARP=1` to draw on WARP.
+//! without them. A skipped test prints `SKIP` with its reason. The standard
+//! test harness still counts the early return as a pass.
+//! Set `VICTORY_WARP=1` to draw on WARP.
 
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use windows::Win32::Graphics::Direct3D12::*;
@@ -757,6 +760,13 @@ fn tools() -> Option<(PathBuf, PathBuf)> {
     (console.exists() && pc.exists()).then_some((console, pc))
 }
 
+fn report_skip(reason: &str) {
+    let thread = std::thread::current();
+    let test = thread.name().unwrap_or("shader differential test");
+    // Write directly so libtest does not hide the skip in a successful test.
+    let _ = writeln!(io::stderr().lock(), "\nSKIP {test}: {reason}");
+}
+
 fn compile(dxc: &Path, dir: &Path, src: &str, entry: &str, profile: &str) -> Vec<u8> {
     let input = dir.join("t.hlsl");
     let output = dir.join(format!("{entry}.bin"));
@@ -818,11 +828,11 @@ fn user_data(s: &HostShader, k: &[u32; 4]) -> Vec<u32> {
 #[test]
 fn translated_shaders_draw_as_pc_ones() {
     let Some((console, pc)) = tools() else {
-        eprintln!("no console or PC compiler; skipped");
+        report_skip("console or PC DXC unavailable");
         return;
     };
     let Ok(host) = Host::new(false) else {
-        eprintln!("no SM 6.6 device; skipped");
+        report_skip("no SM 6.6 device");
         return;
     };
     let dir = std::env::temp_dir().join(format!("victory-diff-{}", std::process::id()));
@@ -974,11 +984,11 @@ fn translated_shaders_draw_as_pc_ones() {
 #[test]
 fn translated_mesh_shaders_draw_as_pc_ones() {
     let Some((console, pc)) = tools() else {
-        eprintln!("no console or PC compiler; skipped");
+        report_skip("console or PC DXC unavailable");
         return;
     };
     let Ok(host) = Host::new(false) else {
-        eprintln!("no SM 6.6 device; skipped");
+        report_skip("no SM 6.6 device");
         return;
     };
     let dir = std::env::temp_dir().join(format!("victory-diff-ms-{}", std::process::id()));
@@ -1091,11 +1101,11 @@ fn translated_mesh_shaders_draw_as_pc_ones() {
 fn float_semantics_are_the_consoles() {
     use super::host::{Dispatch, View};
     let Some((console, _)) = tools() else {
-        eprintln!("no console compiler; skipped");
+        report_skip("console or PC DXC unavailable");
         return;
     };
     let Ok(host) = Host::new(false) else {
-        eprintln!("no SM 6.6 device; skipped");
+        report_skip("no SM 6.6 device");
         return;
     };
     let dir = std::env::temp_dir().join(format!("victory-float-{}", std::process::id()));
@@ -1329,11 +1339,11 @@ fn close(a: u32, b: u32) -> bool {
 fn translated_compute_matches_pc() {
     use super::host::{Dispatch, Stride, View};
     let Some((console, pc)) = tools() else {
-        eprintln!("no console or PC compiler; skipped");
+        report_skip("console or PC DXC unavailable");
         return;
     };
     let Ok(host) = Host::new(false) else {
-        eprintln!("no SM 6.6 device; skipped");
+        report_skip("no SM 6.6 device");
         return;
     };
     let dir = std::env::temp_dir().join(format!("victory-diff-cs-{}", std::process::id()));
