@@ -1,6 +1,6 @@
 # Disposition of every open upstream PR
 
-Snapshot: **1043 open PRs**, retrieved 2026-11-24 21:33 UTC by paginated REST.
+Snapshot: **1057 open PRs**, retrieved 2026-11-24 21:33 UTC by paginated REST.
 Every head is fetched into `refs/remotes/pr/<n>`, so any row can be inspected
 locally. Generated from git and that snapshot; regenerate, do not hand-edit.
 
@@ -12,21 +12,22 @@ happened to each open PR". Per-worker accounting is in
 
 | Disposition | Count |
 | --- | --- |
-| integrated | 197 |
+| integrated | 205 |
 | rejected | 19 |
-| deferred | 9 |
+| deferred | 8 |
 | held | 5 |
-| duplicate | 3 |
+| duplicate | 4 |
+| obsolete | 1 |
 | already-present | 1 |
-| not yet reviewed | 809 |
-| total open | 1043 |
+| not yet reviewed | 814 |
+| total open | 1057 |
 
-A further 16 PRs are in the branch and no longer open upstream;
+A further 18 PRs are in the branch and no longer open upstream;
 they are in [pr-integration-ledger.md](pr-integration-ledger.md).
 
 ## Read this before trusting a row
 
-**809 of 1043 have no reviewed disposition.** They are
+**814 of 1057 have no reviewed disposition.** They are
 listed rather than omitted so that silence is never read as approval.
 
 `integrated` means the change is in **this branch**, reviewed and tested when
@@ -39,18 +40,44 @@ Newest first. `—` in the commit column means nothing is in the tree.
 
 | PR | Head | State | Local commit | Reason | Title |
 | --- | --- | --- | --- | --- | --- |
-| #1734 | `fb5eeb47216c` | integrated | — |  | victory-shader: wait for a test's fence on an event, not in a spin (emit suit… |
+| #1773 | `496ae1c5e0ce` | not yet reviewed | — |  | raise the fault of an emulated clzero at the title's instruction |
+| #1772 | `69662be1d56b` | not yet reviewed | — |  | HLE: handle verbatim/drive-root mounts and UNC/verbatim GetDiskFreeSpaceW roo… |
+| #1770 | `1beaca67e124` | not yet reviewed | — |  | Descriptor tests: take the capped heap's design into account |
+| #1769 | `7e9907c76f59` | not yet reviewed | — |  | Shaders: LDS accesses outside the program's allocation read 0 and drop their … |
+| #1768 | `968950d98233` | not yet reviewed | — |  | GPU: retry a root signature without the heap-directly-indexed flags when the … |
+| #1767 | `882856f0f8ff` | not yet reviewed | — |  | translate: report the validator's own reason, not the line that hides it |
+| #1766 | `368643182465` | not yet reviewed | — |  | Shaders: cube-map face coordinates read denormals as zeros |
+| #1765 | `d02e007b7973` | not yet reviewed | — |  | GPU tests: the castable pair is two host textures where the host refuses cast… |
+| #1763 | `ca168ded3716` | not yet reviewed | — |  | GPU: refuse typed UAVs in unsupported formats regardless of family or castabi… |
+| #1762 | `550cac2b9f37` | not yet reviewed | — |  | GPU: structured buffer views are raw views of the same bytes on the host (NVI… |
+| #1761 | `d06bfe76c72d` | not yet reviewed | — |  | Input: trigger rumble through Windows.Gaming.Input with one pad conne… |
+| #1759 | `dc80215d5c72` | not yet reviewed | — |  | Shaders: lower numerical Wave32 mesh masks at uniform entry |
+| #1757 | `29d5f6e0dc7c` | not yet reviewed | — |  | Shaders: one arena per program for instruction operands and effects |
+| #1756 | `ab3c38d3793b` | not yet reviewed | — |  | Shaders: image atomics on a handle of their own element type |
+| #1752 | `1bf4933db92f` | not yet reviewed | — |  | Shader tests: a software adapter (a CI runner's) skips what only GPU hardware… |
+| #1751 | `45215912b474` | not yet reviewed | — |  | GPU: capped view heaps keep the full dynamic range (NVIDIA) |
+| #1750 | `b58b779fdedc` | not yet reviewed | — |  | GPU: a wait for a submission ends when the device is lost or the GPU stalls |
+| #1749 | `27514c6a864c` | not yet reviewed | — |  | GPU: indirect mesh dispatches run as an indirect execution of one record |
+| #1747 | `fbf1dc32bb0c` | not yet reviewed | — |  | Shaders: lower v_div_scale_f32 and v_div_fmas_f32 |
+| #1743 | `332152b58105` | not yet reviewed | — |  | GPU tests: replay a world frame's copies of title memory (benchmark for the c… |
+| #1741 | `d2c9a469e7ae` | not yet reviewed | — |  | Docs: AGENTS.md for AI agents working on VIctory |
+| #1740 | `075e963a73c9` | not yet reviewed | — |  | GPU: occlusion queries and timestamps run on the host (FIND-8) |
+| #1739 | `9c7ca2c630e7` | not yet reviewed | — |  | GPU: clear final pipeline stream padding after moves (on #1690) |
+| #1738 | `d39a027f2eb9` | not yet reviewed | — |  | Shaders: preserve live interpolation first halves (on #453) |
+| #1737 | `108b38be2ee7` | not yet reviewed | — |  | Shaders: honor permlane EXEC and FI/BC flags (on #1014) |
+| #1735 | `8ec5de1ac765` | not yet reviewed | — |  | GPU: time commands by pipeline in VICTORY_GPU_TIMING |
+| #1734 | `90ebae3dbc33` | integrated | — |  | victory-shader: make the test dispatches cheap - an event wait and reused com… |
 | #1733 | `54f693e4c556` | duplicate | — | landed locally as 694c4944, verified at lower.rs:5387 | Shaders: a helper lane's v_readfirstlane reads its own value (#908) |
 | #1732 | `3dc6c12410c9` | duplicate | — | landed locally as 67b24154, verified against the tree function | GPU: f32_to_half keeps NaN and rounds normals to nearest even (#843) |
-| #1731 | `64317c5135a4` | integrated | — |  | GPU: occlusion queries measure on the host instead of reporting every draw vi… |
+| #1731 | `1f84c2330954` | integrated | — |  | GPU: occlusion queries measure on the host instead of reporting every draw vi… |
 | #1730 | `87a93820d96d` | not yet reviewed | — |  | translate: --cache DIR fills the runtime's shader cache |
 | #1729 | `23a5a6a6feca` | rejected | — | rejects v0 and returns an older readable version where HEAD refuses an unreadable newest one: a silent rollback, and it breaks two integrated tests | XGameSave: a stray or unreadable version folder never costs the save (#870) |
-| #1728 | `ba0494701a6f` | integrated | — |  | Pipelines: VICTORY_PIPELINE_WORKERS sets the worker count |
+| #1728 | `463e835868ba` | integrated | — |  | Pipelines: VICTORY_PIPELINE_WORKERS sets the worker count |
 | #1727 | `6cd8375a23d5` | integrated | — |  | GPU: 1D textures are 2D on the host, one texel high (GBV id=940) |
 | #1726 | `d09f3aa86c4e` | integrated | `64fa2831` | in the branch | DirectStorage: read a page list naming page 0 again before failing its request |
 | #1725 | `a6365c376b37` | integrated | — |  | GPU: placed copies take the bytes a GPU write leaves in their memory |
 | #1724 | `674f3b9118d1` | not yet reviewed | — |  | Make the VIctory game window borderless by default |
-| #1723 | `4bfa21253ce6` | not yet reviewed | — |  | GPU diagnostics: pipeline statistics per noted command with VICTORY_GPU_TIMING |
+| #1723 | `5542340831d3` | not yet reviewed | — |  | GPU diagnostics: pipeline statistics per noted command with VICTORY_GPU_TIMING |
 | #1722 | `ad06ac715e28` | not yet reviewed | — |  | GPU: the host pipeline library works under Wine (null blob for an empty libra… |
 | #1721 | `619a8e8b158c` | not yet reviewed | — |  | Launcher: a GUI that checks the game directory and runs victory.exe |
 | #1720 | `2f61f7c0fc27` | integrated | `d101c0b0` | in the branch | report apu heap allocations that fail |
@@ -64,33 +91,33 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1709 | `3821b53040ff` | not yet reviewed | — |  | Shaders: flush subnormals in f32 min/max/median and cube |
 | #1707 | `423d66d3dfcc` | not yet reviewed | — |  | Docs: add AGENTS.md for agent contributors |
 | #1704 | `7e6e5788202d` | not yet reviewed | — |  | FidelityFX: answer the upscale calls with DLSS through Streamline (stacked on… |
-| #1703 | `b754a0f7e6a7` | integrated | `336bee70` | in the branch | README: the GPU timing switch needs DRED for the per-command notes |
+| #1703 | `120df922ba73` | integrated | `336bee70` | in the branch | README: the GPU timing switch needs DRED for the per-command notes |
 | #1702 | `10b96dea7bb5` | integrated | `a9040302` | in the branch | HLE: add VICTORY_NO_HOST_PAD to hide host gamepads |
-| #1701 | `68e0bda2ae11` | integrated | `5c61aa48` | in the branch | GPU: VICTORY_MODE overrides the reported console display mode |
+| #1701 | `2e33598b9292` | integrated | `5c61aa48` | in the branch | GPU: VICTORY_MODE overrides the reported console display mode |
 | #1700 | `0e1024d695f7` | integrated | `aec7eb38` | in the branch | GPU: say when a draw's render target has no host copy or lost its permission |
 | #1699 | `6fd640a2ae53` | rejected | — | reads src2 with half_src where src0/src1 use half_int_src; probe measured 15366 where hardware gives 0 | shader: lower v_add_nc_i16, v_sub_nc_i16, v_mad_i16, and v_mad_u16 with clamp |
-| #1696 | `c0988284fddc` | integrated | `f1b9a490` | in the branch | Shaders: honor op_sel, omod and clamp on v_interp_p2_f16 |
+| #1696 | `e29391f56c49` | integrated | `f1b9a490` | in the branch | Shaders: honor op_sel, omod and clamp on v_interp_p2_f16 |
 | #1695 | `6493dd93100c` | integrated | `c21cee43` | in the branch | Shader tests: require a device readback in every waterfall test |
 | #1694 | `da18cb8bab09` | held | — | would revert the single-rounding v_dot2_f32_f16 fix | shader: lower 6 RDNA2 integer dot-product instructions without INT64 |
 | #1693 | `77d21c68af28` | integrated | `c4a9469c` | in the branch | victory-shader: lower TFE image loads/samples/gathers via CheckAccessFullyMap… |
 | #1692 | `2b3da5eb353a` | not yet reviewed | — |  | [BUNDLE] GPU diagnostics: 16 PRs, #279 #491 #500 #537 #602 #669 #1064 #1081 #… |
 | #1691 | `667e7dc9a4fd` | integrated | `76adf6a1` | in the branch | GPU: track D3D12 shadow-buffer states (#1670) |
-| #1690 | `1cd223804cb5` | integrated | `67be115d` | in the branch | GPU: zero pipeline library description padding and stop storing a kind the ho… |
-| #1688 | `65ae507fd4d2` | integrated | `cd2b6c39` | in the branch | Shaders: lower v_mad_u32_u16, v_mad_i32_i16, and v_lerp_u8 |
+| #1690 | `6c22344b1e4f` | integrated | `67be115d` | in the branch | GPU: zero pipeline library description padding |
+| #1688 | `c7242f1c66f2` | integrated | `cd2b6c39` | in the branch | Shaders: lower v_mad_u32_u16, v_mad_i32_i16, and v_lerp_u8 |
 | #1687 | `df9c42347055` | integrated | `fe245cf6` | in the branch | Shaders: lower image_gather4_c_lz(_o) and offset sample variants |
-| #1686 | `bbe091e6fc03` | integrated | `621c3c17` | in the branch | Shaders: lower pixel shader SV_Coverage input via dx.op.coverage |
-| #1685 | `04e65b64f027` | integrated | `138e43c5` | in the branch | Shaders: lower v_cmp_{f,t}_{i64,u64} constant 64-bit compares |
+| #1686 | `14ca12162bed` | integrated | `621c3c17` | in the branch | Shaders: lower pixel shader SV_Coverage input via dx.op.coverage |
+| #1685 | `d7536bdd9ca5` | integrated | `138e43c5` | in the branch | Shaders: lower v_cmp_{f,t}_{i64,u64} constant 64-bit compares |
 | #1684 | `c0b3633e5762` | not yet reviewed | — |  | shader: lower 10 scalar bitops (bcnt0/ff0/flbit64/brev64/bitset64/bitreplicat… |
 | #1682 | `3b0c7dad7330` | not yet reviewed | — |  | Shaders: interpolations with any i/j by hand; barycentrics read as data |
 | #1681 | `9c447fbdd049` | not yet reviewed | — |  | GPU: verify exact dirty-page masks on D3D12 |
 | #1680 | `2a686ebfb222` | integrated | `9e91c1d2` | in the branch | GPU: pipeline library loads take a lock for their name, not one for all |
 | #1677 | `9145d9d3dabb` | integrated | `e832c2fb` | in the branch | HLE: show title windows through a stand-in that always reads its messages |
-| #1676 | `7e8fa4d76c80` | integrated | `29289af8` | in the branch | Shaders, CLI: name a host without mesh shaders in the pipeline census |
+| #1676 | `00b4b1b3b4a6` | integrated | `29289af8` | in the branch | Shaders, CLI: name a host without mesh shaders in the pipeline census |
 | #1675 | `5a3f25a48bcd` | duplicate | — | lowering already at lower.rs:3567 | shader: lower s_absdiff_i32 and s_pack_{ll,lh,hh}_b32_b16 |
 | #1674 | `b9d3e8364e61` | not yet reviewed | — |  | Shaders: guard speculative and EXEC-predicated heap descriptor loads (#1595) |
 | #1673 | `dda166c8f17e` | integrated | `7e80b534` | in the branch | HLE: XTaskQueueTerminate cancels only its own tasks on shared ports |
 | #1669 | `70d3a821155f` | integrated | `ee61aa1c` | in the branch | shader: handle dword-straddling 16-bit typed buffer loads at byte offset 3 |
-| #1668 | `d027c4fb3819` | integrated | `bc9c0f60` | in the branch | Shaders: read inline floats as f32 bits in 16-bit integer ops |
+| #1668 | `c4d626b250d1` | integrated | `bc9c0f60` | in the branch | Shaders: read inline floats as f32 bits in 16-bit integer ops |
 | #1667 | `eb7cc2d43711` | integrated | `13ab09bb` | in the branch | flush a kept save blob that had to be copied |
 | #1666 | `a67255631622` | not yet reviewed | — |  | GPU: small first scratch chunk per list; log host memory against budget |
 | #1665 | `6d760bc05a3a` | not yet reviewed | — |  | Docs: add Windows 10 and GPU compatibility guide |
@@ -102,40 +129,39 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1659 | `79107fd52f9e` | not yet reviewed | — |  | shader: lower v_frexp_{exp,mant}_{f32,f16} in pure 32-bit DXIL |
 | #1658 | `4fc9d70fee4c` | not yet reviewed | — |  | GPU: keep Staging::detile inside the staging buffer and harden committed() |
 | #1657 | `932dcbf89f96` | integrated | `15316a22` | in the branch | XSystem: name the analytics family Windows.Xbox |
-| #1656 | `3a1c3bd209b9` | integrated | `e08c93e0` | in the branch | victory-gpu: dedupe copy-back ranges in a set, and take the 64 KiB piece buff… |
 | #1655 | `4f1d0acf4d5c` | not yet reviewed | — |  | xtask: the Forge and claims (one branch of every pull request that builds; wh… |
 | #1654 | `3a08221a6246` | held | — | inline constant 248 expanded from f64 among f32 siblings | shader: lower v_mad_u64_u32 and v_mad_i64_i32 without INT64 |
-| #1653 | `f26e6ae3f1c6` | not yet reviewed | — |  | victory-gpu: split the pipeline library into shards so a save writes only wha… |
-| #1652 | `43ca24cd5b91` | not yet reviewed | — |  | Add native GTA VI launcher and D3D12 rendering updates |
+| #1653 | `1e79f148f66d` | not yet reviewed | — |  | victory-gpu: split the pipeline library into shards so a save writes only wha… |
+| #1652 | `d43c8558abb3` | not yet reviewed | — |  | Add native GTA VI launcher and D3D12 rendering updates |
 | #1651 | `955905163ecb` | not yet reviewed | — |  | GPU: save only changed host pipeline-library shards |
 | #1650 | `6b12a361be06` | not yet reviewed | — |  | translate: identify unsupported ACCC/FSPX shader containers |
 | #1649 | `36682459e8d1` | not yet reviewed | — |  | shader: lower s_cmov_b32, s_cmov_b64, and s_cmovk_i32 |
-| #1648 | `9bfe0671c088` | not yet reviewed | — |  | GPU: mesh shaders emulated as compute + unpack vertex on SM 6.6 cards without… |
+| #1648 | `c6ec4ad3bf29` | not yet reviewed | — |  | GPU: mesh shaders emulated as compute + unpack vertex on SM 6.6 cards without… |
 | #1647 | `9cd8d23ea821` | not yet reviewed | — |  | shader: lower v_mul_hi_i32_i24 and v_mul_hi_u32_u24 without INT64 |
 | #1646 | `64a703844408` | not yet reviewed | — |  | Shaders: fold constant bin/cmp/select/cast ops and identity ops at emit time |
-| #1644 | `8d17181a5727` | not yet reviewed | — |  | [BUNDLE] Unknown-stride buffers: #704 on #193, stacked on #1511 |
+| #1644 | `8bf13c49dfd2` | not yet reviewed | — |  | [BUNDLE] Unknown-stride buffers: #704 on #193, stacked on #1511 |
 | #1643 | `c79f4c891254` | not yet reviewed | — |  | GPU: register pipeline demand after asynchronous compilation timeout |
 | #1642 | `f876a822b059` | not yet reviewed | — |  | Shaders: preserve signaling NaNs in typed buffer loads |
 | #1641 | `3271c00e8c9b` | not yet reviewed | — |  | GameInput: answer IUnknown and own-IID queries on the COM objects |
 | #1640 | `b916a9c0d419` | not yet reviewed | — |  | GPU: constant buffer views of at most 64 KiB |
 | #1639 | `0b7a13c68dfb` | not yet reviewed | — |  | PE: map header RVAs and read TLS data from the headers |
-| #1638 | `0be02a18e7f2` | not yet reviewed | — |  | [BUNDLE] NVIDIA stack: Impre-visible's tree (wave64 #189 + the world-run list… |
+| #1638 | `ab4a6e645b1e` | not yet reviewed | — |  | [BUNDLE] NVIDIA stack: Impre-visible's tree (wave64 #189 + the world-run list… |
 | #1636 | `40f30be0b52f` | not yet reviewed | — |  | Shaders: GFX10 FLAT offsets ignore bit 11 |
 | #1635 | `6dcf40a4c8b4` | not yet reviewed | — |  | victory-gpu: drop an indirect call before its clamp, not after (1 400-1 750 a… |
-| #1632 | `c3a1790d2195` | not yet reviewed | — |  | [BUNDLE] World-run stack from Impre-visible's report: 12 PRs (#1077 #1175 #52… |
+| #1632 | `8de76a242c98` | not yet reviewed | — |  | [BUNDLE] World-run stack from Impre-visible's report: 12 PRs (#1077 #1175 #52… |
 | #1631 | `e98c81a870db` | not yet reviewed | — |  | Tests: support VICTORY_HLE_PROBE_DLL and GNU delayload in hle-probe |
-| #1630 | `f15a9f9dbc75` | not yet reviewed | — |  | GPU: adapter choice and logging, presenter backoff, a texture-description lad… |
+| #1630 | `d91d8084750f` | not yet reviewed | — |  | GPU: adapter choice and logging, presenter backoff, a texture-description lad… |
 | #1629 | `111b77360b82` | not yet reviewed | — |  | GPU: zero 256-byte CBV scratch padding and bind null CBVs for empty/invalid v… |
 | #1628 | `f016efe502f5` | not yet reviewed | — |  | GPU: log initial states and clear format when texture creation fails |
 | #1626 | `f0967745efca` | not yet reviewed | — |  | GPU: throttle failed swap-chain creation and resize |
 | #1625 | `1460a851c4b6` | not yet reviewed | — |  | CLI: compare runtime shader failures with offline coverage |
 | #1623 | `e9254f23d3fe` | not yet reviewed | — |  | gfx10: keep an instruction's words inline instead of in a heap vector (decode… |
-| #1621 | `19b082b58feb` | not yet reviewed | — |  | bound the bytes one part's native blobs unpack to and hand out |
+| #1621 | `53cf4ceed964` | not yet reviewed | — |  | bound the bytes one part's native blobs unpack to and hand out |
 | #1619 | `1f47ee79d0a3` | not yet reviewed | — |  | Shader tests: pin IR reachability and PHI invariants |
 | #1618 | `e62dd007815a` | not yet reviewed | — |  | victory menu: speak Portuguese where Windows does (stacked on #1609) |
 | #1617 | `0d79788520a7` | not yet reviewed | — |  | [BUNDLE] #1296 (texture mip drop) resolved onto the GPU bundles by antikohza,… |
-| #1614 | `c3372c1a6e6d` | not yet reviewed | — |  | Shader tests: a cross-device VALU fuzzer (hardware adapters vs WARP) |
-| #1613 | `f82c960373b0` | not yet reviewed | — |  | GPU: no render-target view, barrier or clear for a texture without the render… |
+| #1614 | `50cbc893b057` | not yet reviewed | — |  | Shader tests: a cross-device VALU fuzzer (hardware adapters vs WARP) |
+| #1613 | `e3d76bdaaf93` | not yet reviewed | — |  | GPU: no render-target view, barrier or clear for a texture without the render… |
 | #1611 | `e9cb14ad3ea2` | not yet reviewed | — |  | run: stop with a clear message when the title's own DLLs are missing |
 | #1610 | `47a43871e562` | not yet reviewed | — |  | [BUNDLE] Eight more fixes carried from contributors' forks: #745 #776 #787 #8… |
 | #1609 | `1b9aad255916` | not yet reviewed | — |  | victory doctor: name the known problems a run shows, in plain words (stacked … |
@@ -146,50 +172,48 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1603 | `9ec15138f66e` | not yet reviewed | — |  | [BUNDLE] Four fixes carried from Peppacodes' fork: #762 #764 #765 #832 |
 | #1602 | `94a2e994f9d2` | not yet reviewed | — |  | Shader tests: f32/int conversions saturate, take NaN as 0, round to even |
 | #1601 | `8a5515516d8c` | not yet reviewed | — |  | Shader tests: special values of v_rcp/v_rsq/v_sqrt/v_log/v_exp_f32 |
-| #1599 | `faccfbc73a4b` | not yet reviewed | — |  | Shaders: 64-bit integer compares on their dwords (AMD orders a shared-dword i… |
+| #1599 | `1f6b392ca8bf` | not yet reviewed | — |  | Shaders: 64-bit integer compares on their dwords (AMD orders a shared-dword i… |
 | #1598 | `07b5ecd09bd6` | not yet reviewed | — |  | Shaders: lower v_mad_f16 and v_mac_f16 with unfused binary16 product rounding |
 | #1597 | `f4e166a84199` | not yet reviewed | — |  | Shaders: hidden descriptor words joined with data are an undefined path (+494… |
 | #1594 | `3f6910ac3201` | not yet reviewed | — |  | CLI: preserve the title entry point exit status |
-| #1593 | `45ecf30a22a4` | not yet reviewed | — |  | [BUNDLE] Shader translation speed: 6 PRs, #139 #288 #369 #947 #1033 #1180, st… |
-| #1592 | `6d174aeeeb93` | not yet reviewed | — |  | CLI: list shaders that complete emission |
+| #1593 | `5996b8740156` | not yet reviewed | — |  | [BUNDLE] Shader translation speed: 6 PRs, #139 #288 #369 #947 #1033 #1180, st… |
+| #1592 | `6d174aeeeb93` | integrated | — |  | CLI: list shaders that complete emission |
 | #1590 | `44e0c31d149b` | not yet reviewed | — |  | XMA tests: count frames only in the selected stream |
-| #1589 | `d83d4f803704` | not yet reviewed | — |  | [BUNDLE] Wave64 compute on 32-lane hosts: #189 merged onto the shader stack, … |
-| #1588 | `5f4ff7e96d67` | not yet reviewed | — |  | Shaders: single-round v_fma_mix*_f16 and unfused v_mad_f16/v_mac_f16 |
-| #1587 | `ba565a852145` | not yet reviewed | — |  | Shaders: ballot divergent-loop masks at reconverged reads (#1498) |
+| #1589 | `60fa5d7ee343` | not yet reviewed | — |  | [BUNDLE] Wave64 compute on 32-lane hosts: #189 merged onto the shader stack, … |
+| #1588 | `c36a25b8b780` | not yet reviewed | — |  | Shaders: single-round v_fma_mix*_f16 and unfused v_mad_f16/v_mac_f16 |
+| #1587 | `4c8eb158d226` | not yet reviewed | — |  | Shaders: ballot divergent-loop masks at reconverged reads (#1498) |
 | #1585 | `e25b88b16a94` | not yet reviewed | — |  | GPU diagnostics: report slots only inside recorded heap ranges |
 | #1584 | `56387d3f69d7` | not yet reviewed | — |  | GPU: add opt-in idle shader cache trimming |
-| #1583 | `917458a1d1a4` | not yet reviewed | — |  | GPU: texture read-back into a title buffer (CopyTextureRegion to a placed foo… |
+| #1583 | `c1c89516fb06` | not yet reviewed | — |  | GPU: texture read-back into a title buffer (CopyTextureRegion to a placed foo… |
 | #1582 | `ab416b2d727e` | not yet reviewed | — |  | Shaders: enforce inactive-lane EXEC rules for DPP16, DPP8 and ds_swizzle_b32 |
 | #1578 | `8631598388c2` | not yet reviewed | — |  | GPU: the "shader does not translate" warning names where its value was made |
 | #1577 | `30ccd2307b7d` | not yet reviewed | — |  | Shaders: expand 64-bit inline constants as signed ints and binary64 floats |
-| #1576 | `d0aa934275ce` | not yet reviewed | — |  | HLE: implement IUnknown queries for COM objects |
+| #1576 | `f32980a80aac` | not yet reviewed | — |  | HLE: implement IUnknown queries for COM objects |
 | #1575 | `856f0ce0b1ec` | not yet reviewed | — |  | Shaders: sweep typed buffer formats and f16 ALU against exact references |
 | #1574 | `ff5f46996635` | not yet reviewed | — |  | GPU descriptor: write null CBV when create_cbv description is null |
 | #1572 | `0c1666198205` | not yet reviewed | — |  | Shaders: MUBUF sub-dword loads (buffer_load_ubyte, sbyte, ushort, sshort and … |
 | #1571 | `9bfd43936615` | not yet reviewed | — |  | GPU: add diagnostics for shader dependency wait times |
 | #1570 | `2f8898332c27` | not yet reviewed | — |  | Shaders: govern pixel discard by last exp VM (Valid Mask) and guard pixel MRT… |
-| #1569 | `70ccb5932ad1` | not yet reviewed | — |  | Shaders: lower v_swaprel_b32 |
+| #1569 | `c55866929e05` | not yet reviewed | — |  | Shaders: lower v_swaprel_b32 |
 | #1568 | `dde4577abe4e` | not yet reviewed | — |  | Shaders: model 64-bit carry sums and f16 reductions in whole-wave sections |
 | #1566 | `f76393984981` | not yet reviewed | — |  | GPU: SetStablePowerState is accepted and ignored |
 | #1565 | `883941b75287` | not yet reviewed | — |  | GPU: Evict succeeds, as the console's memory is never evicted |
 | #1564 | `c6eb3fddffb8` | not yet reviewed | — |  | GPU: MakeResident succeeds, as the console's memory is always resident |
-| #1563 | `4df3d0eda312` | not yet reviewed | — |  | Shaders: link mesh and pixel programs whose mesh outputs pass 32 KiB |
+| #1563 | `93f718d7a94b` | not yet reviewed | — |  | Shaders: link mesh and pixel programs whose mesh outputs pass 32 KiB |
 | #1562 | `bbdc3ca72499` | not yet reviewed | — |  | GPU: fences answer for ID3D12Fence1 as documented |
 | #1560 | `db470df5325d` | not yet reviewed | — |  | PE: refuse an import address table inside the headers |
 | #1559 | `acce0c03e468` | not yet reviewed | — |  | Shaders: a float inline constant in a 64-bit operand is the f64 value |
 | #1558 | `6cc4929e7c93` | not yet reviewed | — |  | HLE: export constrained app notifications |
 | #1557 | `1504ec9aa446` | not yet reviewed | — |  | Validate BC7 control-word subset counts |
-| #1556 | `af0aead89a38` | not yet reviewed | — |  | victory-gpu: look a submission's refreshes up by pointer, not by scanning (4-… |
-| #1555 | `bfffb01dd6b8` | not yet reviewed | — |  | GPU: coalesce nearby shadow-buffer refreshes without spanning huge heap gaps |
-| #1554 | `cbb9d2b59796` | not yet reviewed | — |  | Shaders: flush subnormals in f32 MAD and MAC |
+| #1555 | `9fb81e1c17e4` | not yet reviewed | — |  | GPU: coalesce nearby shadow-buffer refreshes without spanning huge heap gaps |
+| #1554 | `dce05bcc9508` | not yet reviewed | — |  | Shaders: flush subnormals in f32 MAD and MAC |
 | #1551 | `2fc9b94e9780` | not yet reviewed | — |  | GPU: prioritize repeat-demanded pipelines with non-mesh tie-breaking and anti… |
 | #1550 | `6c9e0ec115fd` | not yet reviewed | — |  | Shaders: a deep block's reach no longer hides a waterfall's proof |
 | #1549 | `f078008b1123` | not yet reviewed | — |  | Formats: test texture layouts against addrlib's own sizes and addresses |
-| #1548 | `4002dd7444a9` | not yet reviewed | — |  | GPU: preserve full DYNAMIC descriptor range when host view heap is capped at … |
-| #1547 | `9e37d65f7448` | not yet reviewed | — |  | GPU: invalidate HOST_WRITTEN textures when title memory is written |
+| #1548 | `2d6a0b1af382` | not yet reviewed | — |  | GPU: preserve full DYNAMIC descriptor range when host view heap is capped at … |
+| #1547 | `bdf870eb4728` | not yet reviewed | — |  | GPU: invalidate HOST_WRITTEN textures when title memory is written |
 | #1546 | `4a77d59f8365` | not yet reviewed | — |  | GPU: route indirect dispatch_mesh_x through State::execute_indirect |
-| #1545 | `f3d0ab99a260` | not yet reviewed | — |  | Shaders: honor modifiers in f16 conversions |
-| #1544 | `78fd9905bb38` | not yet reviewed | — |  | GPU: refresh and transition ResourceDescriptorHeap views before draws |
+| #1544 | `bf1c45b64bf5` | not yet reviewed | — |  | GPU: refresh and transition ResourceDescriptorHeap views before draws |
 | #1543 | `e77f6331cecd` | not yet reviewed | — |  | GPU: avoid shift and arithmetic overflow panics in subresource and copyable_f… |
 | #1542 | `b9301c6c330c` | not yet reviewed | — |  | [BUNDLE] GPU fixes 4: 10 PRs, #346 #431 #493 #967 #1082 #1143 #1165 #1173 #12… |
 | #1541 | `85845466bd8e` | not yet reviewed | — |  | CLI: list-diff compares two translate listings program by program |
@@ -198,32 +222,30 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1538 | `73f0f7d68f77` | not yet reviewed | — |  | GPU: check subobject size against remaining stream bytes in create_st… |
 | #1537 | `9ad1f21b64be` | not yet reviewed | — |  | HLE: update shared XMA context words atomically |
 | #1536 | `50cbdd08d4f9` | not yet reviewed | — |  | Shaders: assemble dword-straddling global_load_ushort and global_load_sshort |
-| #1534 | `acd09ccb096c` | not yet reviewed | — |  | Shaders: flush negative zero after output modifiers |
-| #1529 | `1e1c2b2fce46` | not yet reviewed | — |  | Input: keyboard and mouse played like a PC game (rebindable [controls]) |
-| #1526 | `60bfbb9af935` | not yet reviewed | — |  | GPU: make host textures on first use instead of at resource creation |
+| #1529 | `460d0c1ed845` | not yet reviewed | — |  | Input: keyboard and mouse played like a PC game (rebindable [controls]) |
 | #1525 | `bbe3b411766c` | not yet reviewed | — |  | Reuse fenced GPU upload scratch across command lists |
 | #1524 | `8e14d23547c3` | not yet reviewed | — |  | Shaders: every DXIL loop gets one latch, and every block one back edge |
-| #1523 | `385dad27e617` | not yet reviewed | — |  | GPU: size a capped view heap to the host's limit |
 | #1521 | `780e6175f45b` | not yet reviewed | — |  | [BUNDLE] Bridge for #1368 and #1386: one storage test changes when both land,… |
 | #1520 | `2190efeae1f3` | not yet reviewed | — |  | Draft: reproduce RTX 5080 world-transition GPU hang on combined renderer patc… |
-| #1519 | `55bf86fc6fd9` | not yet reviewed | — |  | Shaders: unpack 16-bit vertex inputs into the low half |
+| #1519 | `cb8dd75743eb` | not yet reviewed | — |  | Shaders: unpack 16-bit vertex inputs into the low half |
 | #1517 | `c72555dbdc84` | not yet reviewed | — |  | Input: add Windows DualSense / DualSense Edge support |
 | #1516 | `63be4e04826a` | not yet reviewed | — |  | Shaders: zero missing typed-buffer components |
 | #1515 | `9ccb83c00a9b` | not yet reviewed | — |  | HLE: guard dialog commands before initialization |
 | #1514 | `1288c632bb8f` | not yet reviewed | — |  | Add opt-in GPU memory synchronization tracing |
-| #1511 | `ca601f02823e` | not yet reviewed | — |  | [BUNDLE] DXIL emission and container robustness: 5 PRs, #1145 #343 #1042 #130… |
+| #1511 | `4ac9e91c399f` | not yet reviewed | — |  | [BUNDLE] DXIL emission and container robustness: 5 PRs, #1145 #343 #1042 #130… |
 | #1510 | `4ab20fc863c1` | not yet reviewed | — |  | GPU: the indirect budget is charged in record order and no longer wraps |
 | #1506 | `42b7d5fe3bb7` | not yet reviewed | — |  | HLE: avoid following links during storage quota scans |
-| #1505 | `ade80d28a758` | not yet reviewed | — |  | GPU: pipeline workers at the title's priority, not below it |
-| #1504 | `1d418919f57a` | not yet reviewed | — |  | [BUNDLE] Computed barycentrics: #453 merged with #176 and #1293, stacked on #… |
+| #1505 | `ade80d28a758` | integrated | — |  | GPU: pipeline workers at the title's priority, not below it |
+| #1504 | `56f7da33a064` | not yet reviewed | — |  | [BUNDLE] Computed barycentrics: #453 merged with #176 and #1293, stacked on #… |
 | #1503 | `5a25850411e0` | not yet reviewed | — |  | GPU: fail fast when the host D3D12 runtime is unusable |
 | #1502 | `3f204cd60fd9` | not yet reviewed | — |  | fix(gpu): transition shadow buffers before VB/IB binding |
+| #1501 | `5b390eff2c04` | not yet reviewed | — |  | Shaders: DS ops in a program without LDS read 0 and drop writes |
 | #1501 | `5b390eff2c04` | not yet reviewed | — |  | Shaders: DS ops in a program without LDS read 0 and drop writes |
 | #1500 | `23400033753a` | not yet reviewed | — |  | GPU: copy title textures to the host once per change, and check them on sever… |
 | #1497 | `39aa84849ab4` | not yet reviewed | — |  | HLE: fix DirectStorage file sharing and error capture |
 | #1494 | `929e35b394ac` | not yet reviewed | — |  | formats: bound thick 3D mip tail by depth |
 | #1493 | `cc0f47a4f4e5` | not yet reviewed | — |  | Shaders: key immediate samplers by comparison mode |
-| #1492 | `5bbc09850df7` | not yet reviewed | — |  | [BUNDLE] Shader instruction lowering: 21 PRs, #98 #156 #162 #168 #169 #368 #3… |
+| #1492 | `ea33d12b3f70` | not yet reviewed | — |  | [BUNDLE] Shader instruction lowering: 21 PRs, #98 #156 #162 #168 #169 #368 #3… |
 | #1491 | `28c91b91b015` | not yet reviewed | — |  | Shaders: the lane-condition search keeps the condition sets no lane meets |
 | #1490 | `7f01c33c966c` | not yet reviewed | — |  | HLE: recycle freed XMem page numbers |
 | #1489 | `e0a052c2bc07` | not yet reviewed | — |  | Shaders: lower image_gather4_c_lz and image_gather4_c_lz_o (MIMG 0x4f, 0x5f) |
@@ -238,20 +260,19 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1477 | `2286e038cc60` | not yet reviewed | — |  | Shaders: key immediate sampler slots by descriptor and comparison mode |
 | #1476 | `711d651ccab7` | not yet reviewed | — |  | Shaders: precompute MD5 round constants and avoid per-block Vec in md… |
 | #1475 | `d8897b763962` | not yet reviewed | — |  | HLE: clear blocked DNS lookup results |
-| #1474 | `1e923ad46234` | not yet reviewed | — |  | Shaders: set WAVE_OPS feature flag when lane_bit emits waveGetLaneIndex |
+| #1474 | `1e923ad46234` | integrated | — |  | Shaders: set WAVE_OPS feature flag when lane_bit emits waveGetLaneIndex |
 | #1473 | `826a97fe403d` | not yet reviewed | — |  | Shaders: track per-lane export state across mixed pixel-shader joins |
 | #1472 | `c00db2cb3833` | not yet reviewed | — |  | GPU: flush only overlapping shadow refreshes before Step::GpuWrite |
 | #1471 | `be3202de393b` | not yet reviewed | — |  | Shaders: fold empty loop latches containing only dead phis |
 | #1469 | `ed9f8c6bdf6b` | not yet reviewed | — |  | Shaders: lower binary64 class comparisons |
-| #1467 | `4d4834db500d` | not yet reviewed | — |  | Shaders: 64-bit image atomics as DXIL's 64-bit typed atomics |
 | #1466 | `3ee8820bb5e3` | not yet reviewed | — |  | GPU: avoid faulting when zero-filling protected title memory |
 | #1463 | `68f23d9e41f9` | not yet reviewed | — |  | GPU: cap command lists per submission (VICTORY_SUBMIT_MAX_RUNS) |
 | #1462 | `9bab357ac855` | not yet reviewed | — |  | CLI: report emitted shader wave sizes in translate |
 | #1461 | `f9822de8b349` | not yet reviewed | — |  | GPU: handle DXGI Present failures and occlusion |
-| #1460 | `667de6e10608` | not yet reviewed | — |  | Shaders: keep distinct critical-edge blocks for duplicate branch targets |
+| #1460 | `3e3a71a874c8` | not yet reviewed | — |  | Shaders: keep distinct critical-edge blocks for duplicate branch targets |
 | #1459 | `a88abe80190b` | not yet reviewed | — |  | [BUNDLE] CLI and census: 11 PRs, #115 #151 #238 #353 #378 #476 #482 #535 #649… |
 | #1457 | `ff3b10e753a3` | not yet reviewed | — |  | DirectStorage: keep raw reads running while staging drains |
-| #1456 | `b99cbde8e7f7` | not yet reviewed | — |  | [BUNDLE] Loader, PE reader and config: 20 PRs, #188 #213 #214 #219 #221 #311 … |
+| #1456 | `f86fd7601fe4` | not yet reviewed | — |  | [BUNDLE] Loader, PE reader and config: 20 PRs, #188 #213 #214 #219 #221 #311 … |
 | #1455 | `a7636dd7b1a4` | not yet reviewed | — |  | HLE: allow an explicit maximum title window size |
 | #1454 | `e49b332b075b` | not yet reviewed | — |  | [BUNDLE] Docs: README and docs additions, 10 PRs, #280 #323 #354 #424 #532 #6… |
 | #1453 | `6f36cdf98252` | not yet reviewed | — |  | GPU: interpolate normalized rectangle vertex attributes |
@@ -284,7 +305,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1423 | `55f0dc4eb480` | not yet reviewed | — |  | victory-shader: lazily lower non-active console lane-mask SOPs bitwise |
 | #1422 | `b70f51afaeb2` | not yet reviewed | — |  | GPU: ignore clear values on non-target textures and avoid caching failed host… |
 | #1421 | `f371228a3101` | not yet reviewed | — |  | hle: parse prefixed title ids in manifests |
-| #1420 | `7b7d5fdb588e` | not yet reviewed | — |  | Shaders: a mask built up in a loop every lane runs the same way (stacked on #… |
+| #1420 | `9f57d9c0110d` | not yet reviewed | — |  | Shaders: a mask built up in a loop every lane runs the same way (stacked on #… |
 | #1419 | `c8b7a3d59b1d` | not yet reviewed | — |  | HLE: pass non-code LoadLibraryEx mappings outside HostPolicy to the host |
 | #1418 | `39d044fa6509` | not yet reviewed | — |  | [BUNDLE] GPU fixes (write watch, textures, device, DXGI, objects, primitives,… |
 | #1417 | `329600213704` | not yet reviewed | — |  | Shaders: lower SV_RenderTargetArrayIndex and SV_ViewportArrayIndex exports |
@@ -295,13 +316,13 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1411 | `2b13ae419202` | not yet reviewed | — |  | HLE clears the result of blocked address lookups |
 | #1409 | `de109f1d3d5f` | not yet reviewed | — |  | Shaders: read heap-loaded s_buffer_load raw; SampleLevel outside pixel shaders |
 | #1408 | `a69e32405731` | not yet reviewed | — |  | Shaders: lower float wave prefix sums via lane reads |
-| #1407 | `a8557570a869` | not yet reviewed | — |  | Shaders: lane masks holding lanes elsewhere, and mask joins, read as numbers |
+| #1407 | `e19347488050` | not yet reviewed | — |  | Shaders: lane masks holding lanes elsewhere, and mask joins, read as numbers |
 | #1406 | `87b42ecd18c9` | not yet reviewed | — |  | GPU: fix NULL/UNKNOWN SRV/UAVs on promoted-typeless textures and MSAA/array/3… |
 | #1405 | `ad2025a433c9` | not yet reviewed | — |  | GPU: a view's own copy that shaders feed reads its buffer's copy on the GPU (… |
 | #1404 | `6f0badc834c3` | not yet reviewed | — |  | Shaders: test raw VCC on s_cbranch_vccz and vccnz without EXEC masking |
 | #1403 | `567e1345fb77` | not yet reviewed | — |  | CLI: report shader worker initialization failures |
-| #1402 | `119b7630d71f` | not yet reviewed | — |  | [BUNDLE] High-yield shader PRs (+295/+520/+153/+117 programs in #1247): #1067… |
-| #1400 | `cbb3502ff7ef` | not yet reviewed | — |  | GPU: split duplicate HostList entries into separate ExecuteCommandLists batch… |
+| #1402 | `7e7c5be2db4f` | not yet reviewed | — |  | [BUNDLE] High-yield shader PRs (+295/+520/+153/+117 programs in #1247): #1067… |
+| #1400 | `f2491a58f6c9` | not yet reviewed | — |  | GPU: split duplicate HostList entries into separate ExecuteCommandLists batch… |
 | #1399 | `d01f9a6aeb8d` | not yet reviewed | — |  | Shader & GPU: support merged ES+GS geometry stages (vs_6_6 / gs_6_6) |
 | #1398 | `38ddebf95426` | not yet reviewed | — |  | Shaders: honor clamp on unsigned VOP3 add and subtract |
 | #1397 | `a78fc2cb8f3a` | not yet reviewed | — |  | Shader: propagate float values across selects/phis and cache bools across dom… |
@@ -316,10 +337,11 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1388 | `9d84135faadd` | not yet reviewed | — |  | GPU: honor command-list 64-bit memory waits without blocking submissions (#70… |
 | #1387 | `c77b2533559d` | not yet reviewed | — |  | Round v_fma_f16 once in DXIL lowering |
 | #1386 | `bea3c810ef8b` | not yet reviewed | — |  | [BUNDLE] HLE host side (files, paths, host DLLs, display, xmem, net, speech):… |
-| #1385 | `9e77b5cc03b1` | not yet reviewed | — |  | Shaders: narrow mesh output bounds from GS_ALLOC_REQ M0 analysis (#201) |
+| #1385 | `3e630d357c13` | not yet reviewed | — |  | Shaders: narrow mesh output bounds from GS_ALLOC_REQ M0 analysis (#201) |
 | #1384 | `3215e71e9c0d` | not yet reviewed | — |  | Shaders: hardware test for the three-operand integer ops |
 | #1383 | `a613b9e81b1d` | not yet reviewed | — |  | Preserve Win32 errors from DirectStorage OpenFile |
-| #1382 | `2fd066db7bf2` | not yet reviewed | — |  | GPU: batch resource barriers, reuse draw scratch buffers, range-lock copy_sim… |
+| #1383 | `a613b9e81b1d` | not yet reviewed | — |  | Preserve Win32 errors from DirectStorage OpenFile |
+| #1382 | `bf8a9b23ec9c` | not yet reviewed | — |  | GPU: batch resource barriers, reuse draw scratch buffers, range-lock copy_sim… |
 | #1381 | `f025d5d83c2a` | not yet reviewed | — |  | Shaders: hardware test for v_not, v_bfrev and the vector bit-scan ops |
 | #1380 | `2f300c4cf173` | not yet reviewed | — |  | Net: allow local machine hostname in resolvable and loopback_name |
 | #1379 | `d6c7078aebcc` | not yet reviewed | — |  | Shaders: hardware test for v_alignbit/alignbyte, v_bfi, v_bfm and v_bcnt |
@@ -347,7 +369,6 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1356 | `080456154250` | not yet reviewed | — |  | GPU: use RwLock for read-mostly tables and add per-HostList VA/view caches |
 | #1355 | `2e602026c13a` | not yet reviewed | — |  | HLE & Formats: replace miniz_oxide with SIMD-accelerated zlib-rs |
 | #1354 | `cd9699f6b2d0` | not yet reviewed | — |  | Shaders: infer heap UAVs program-wide and emit IsGloballyCoherent on glc UAVs |
-| #1353 | `e62bcc1fbeeb` | not yet reviewed | — |  | GPU: recover typeless view formats, avoid caching failed placed textures, and… |
 | #1352 | `a695f884d660` | not yet reviewed | — |  | GPU: implement resource-backed texture UAV clears (#771) |
 | #1351 | `5a44d97d1ceb` | not yet reviewed | — |  | GPU: deduplicate per-submission write-watch askings over nested buffers (#776) |
 | #1350 | `2f27ea1e9eb8` | not yet reviewed | — |  | GPU: scan virtual regions on copy_mapped and write_mapped fallback (#783) |
@@ -397,7 +418,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1291 | `94dbc0a35496` | not yet reviewed | — |  | victory-shader: emit zero for padding halves in f16 pixel input interpolation |
 | #1290 | `100de0e97a23` | not yet reviewed | — |  | Shader tests: a skipped device says why it was skipped |
 | #1289 | `003944a950dd` | not yet reviewed | — |  | Shader tests: v_pk_mul_lo_u16 keeps each half to 16 bits |
-| #1288 | `112cbdfa4c9a` | not yet reviewed | — |  | Shaders: a typed fetch inside a dword reads the aligned pair |
+| #1288 | `0d0f5f91f9b0` | not yet reviewed | — |  | Shaders: a typed fetch inside a dword reads the aligned pair |
 | #1287 | `7566b6d42689` | not yet reviewed | — |  | Add experimental AMD frame generation test path |
 | #1285 | `ac1a6e2a5181` | not yet reviewed | — |  | Shaders: fix 16-bit VALU SDWA placement/sext and inline float constants |
 | #1284 | `bea3a581e6ec` | not yet reviewed | — |  | Add experimental PC FSR upscaling |
@@ -442,11 +463,11 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1241 | `f02c70246c43` | not yet reviewed | — |  | CI: build and test the host-independent crates on Linux |
 | #1238 | `591932ac8ce4` | not yet reviewed | — |  | Grow DirectStorage BCPack intermediates as zlib inflates |
 | #1237 | `a3346f97d6f4` | not yet reviewed | — |  | Shaders: implicit-level samples in compute take their gradients from the quad |
-| #1236 | `ec836909edd4` | not yet reviewed | — |  | GPU diagnostics: stop inferring descriptor slots from fault addresses |
+| #1236 | `ec836909edd4` | integrated | — |  | GPU diagnostics: stop inferring descriptor slots from fault addresses |
 | #1233 | `312ff569264b` | not yet reviewed | — |  | Report bound descriptor tables accurately in DRED breadcrumbs |
 | #1231 | `8996aeb8cc4e` | not yet reviewed | — |  | Shaders: uniform phis (loop counters) under v_readfirstlane addresses (stacke… |
 | #1230 | `6f77efdb0c3f` | not yet reviewed | — |  | Shaders: path-sensitive reachability for missing values across phi joins (#73… |
-| #1229 | `f55ba49fd09d` | not yet reviewed | — |  | Shaders: handle redundant partial descriptor writes and lane-preserving VGPR … |
+| #1229 | `da253596bce8` | not yet reviewed | — |  | Shaders: handle redundant partial descriptor writes and lane-preserving VGPR … |
 | #1228 | `63e6c9eca4d8` | not yet reviewed | — |  | GPU: order shader writes on command list pipeline syncs (#732) |
 | #1227 | `c3beb4a2628b` | not yet reviewed | — |  | Improve shader mask handling and GPU diagnostics |
 | #1225 | `b00573d87932` | not yet reviewed | — |  | Shaders: trace a code-table address read from the first lane of a uniform val… |
@@ -473,7 +494,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1201 | `98b761bd1f18` | not yet reviewed | — |  | Loader: fix 4 bounds and cleanup bugs in windows.rs with unit tests |
 | #1200 | `f4c4bd47daf9` | not yet reviewed | — |  | GPU: fix 3 encoding, fallback, and slice-panic bugs in shader_cache.rs with u… |
 | #1199 | `8466edd7bb1f` | not yet reviewed | — |  | HLE: reject null out in QueryApiImpl before lookup and add xgameruntime unit … |
-| #1198 | `476760337485` | not yet reviewed | — |  | Shaders, GPU: emulate the BVH intersection instructions, and reach title memo… |
+| #1198 | `1bbae65b8036` | not yet reviewed | — |  | Shaders, GPU: emulate the BVH intersection instructions, and reach title memo… |
 | #1197 | `89670357c408` | not yet reviewed | — |  | Shaders: lower v_sad_u8, v_msad_u8, v_sad_u16, and v_sad_u32 |
 | #1196 | `a4a94d720299` | not yet reviewed | — |  | HLE: fix self-closing XML element body parsing in runtime.rs and add unit tes… |
 | #1195 | `ed1d9c75e4e4` | not yet reviewed | — |  | Shaders: expand synthetic unit tests for emit/sampler.rs |
@@ -486,14 +507,14 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1188 | `6765a7bdbb4a` | not yet reviewed | — |  | GPU: guard non-positive frames and add unit tests for copystat.rs |
 | #1187 | `bcfd293095ca` | not yet reviewed | — |  | Keep unstaged DirectStorage reads moving under staging pressure |
 | #1186 | `ce94115ef8aa` | not yet reviewed | — |  | GPU: fix 8 overflow, lookup, and snapshot bugs in shadow.rs with regression t… |
-| #1185 | `f56f478f41f1` | not yet reviewed | — |  | Stream shader archive scans in bounded batches |
-| #1183 | `d035f4d08823` | not yet reviewed | — |  | Keep shader metadata variants in the offline translation census |
+| #1185 | `4d9b271a868f` | not yet reviewed | — |  | Stream shader archive scans in bounded batches |
+| #1183 | `15cba99a4ca6` | not yet reviewed | — |  | Keep shader metadata variants in the offline translation census |
 | #1182 | `8c94b5c317dc` | not yet reviewed | — |  | Shaders: keep prior per-lane descriptor word across redundant masked moves (f… |
 | #1181 | `715293e3e458` | not yet reviewed | — |  | HLE: keep DirectStorage file references alive for queued reads |
-| #1180 | `9e5c1304ee02` | not yet reviewed | — |  | gfx10: resolve the opcode name once, at decode time (translation -4..-8%) |
+| #1180 | `9e5c1304ee02` | integrated | — |  | gfx10: resolve the opcode name once, at decode time (translation -4..-8%) |
 | #1179 | `f60fb419cbff` | not yet reviewed | — |  | Input: choose the loose controls diagram by active gamepad (stacked on #312) |
 | #1178 | `9b8949f4ad71` | not yet reviewed | — |  | Diagnostics: trace a DirectStorage request from submission to decoder outcome |
-| #1177 | `142ec8dd4563` | not yet reviewed | — |  | Deduplicate image paths in victory census |
+| #1177 | `142ec8dd4563` | integrated | — |  | Deduplicate image paths in victory census |
 | #1176 | `4c2d610bc4f3` | not yet reviewed | — |  | Shaders: reads of uninitialized pixel SGPRs read as zero |
 | #1175 | `bfe5d2dab276` | not yet reviewed | — |  | Shaders: verify compute writes through a spilled root UAV |
 | #1174 | `299bc17db983` | not yet reviewed | — |  | HLE: implement IUnknown::QueryInterface and unit tests for xgame objects |
@@ -508,7 +529,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1164 | `9a173fc8f3bd` | not yet reviewed | — |  | Shaders: add hardware tests for v_cmp_class_f32, integer min3/max3/med3, and … |
 | #1163 | `8a0ac650fdc8` | not yet reviewed | — |  | Core: normalize trailing .. and Windows verbatim paths in policy::resolve |
 | #1162 | `12e9c6a3a52b` | not yet reviewed | — |  | GPU: implement ClearUnorderedAccessViewUint/Float for buffers and textures |
-| #1161 | `aaacc2dcfe09` | not yet reviewed | — |  | docs(architecture): list BCPack as implemented in victory-formats |
+| #1161 | `aaacc2dcfe09` | integrated | — |  | docs(architecture): list BCPack as implemented in victory-formats |
 | #1160 | `9782f640bf51` | not yet reviewed | — |  | gpu(indirect): support constant-prefixed multi-argument ExecuteIndirect signa… |
 | #1159 | `121412bec21b` | not yet reviewed | — |  | loader(crash): verify unwind against known caller frames when RtlCaptureStack… |
 | #1158 | `abefa49204d5` | not yet reviewed | — |  | GPU: guard zero/overflowing stride in expand_rects and add primitive.rs unit … |
@@ -518,7 +539,8 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1152 | `e8fd20f85c83` | not yet reviewed | — |  | GPU: no blending on integer render targets in host pipelines (fixes #806) |
 | #1149 | `4e35c96234d0` | not yet reviewed | — |  | Shaders: lower v_div_fixup_f32 and v_div_fixup_f16 |
 | #1148 | `1661a3e0cfb3` | not yet reviewed | — |  | Shaders: lower image_atomic_inc, _dec, _fcmpswap, _fmin and _fmax |
-| #1146 | `47c00d5ea6ef` | not yet reviewed | — |  | GPU diagnostics: create missing capture output directories |
+| #1146 | `47c00d5ea6ef` | integrated | — |  | GPU diagnostics: create missing capture output directories |
+| #1146 | `47c00d5ea6ef` | integrated | — |  | GPU diagnostics: create missing capture output directories |
 | #1145 | `ea633e723d3c` | not yet reviewed | — |  | Shaders: fix duplicate latch folding, unreachable phi edges, and replace_cons… |
 | #1144 | `48781527f53f` | not yet reviewed | — |  | Tests: show when shader differential checks are skipped |
 | #1143 | `69a49fa21205` | not yet reviewed | — |  | GPU tests: verify a synthetic frame through PresentX |
@@ -571,7 +593,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1065 | `37f838d01548` | not yet reviewed | — |  | Shaders: use validator 1.8 for compute derivatives |
 | #1064 | `dc134c34c905` | not yet reviewed | — |  | Docs: the GPU path, diagnosing GPU problems, and testing |
 | #1059 | `3530ba983ede` | not yet reviewed | — |  | Loader: VICTORY_PATCH writes bytes into a loaded module after relocation |
-| #1058 | `8770e1905c55` | not yet reviewed | — |  | CI: serialize Windows workspace tests |
+| #1058 | `8770e1905c55` | integrated | — |  | CI: serialize Windows workspace tests |
 | #1056 | `417f4e30d22f` | not yet reviewed | — |  | Shaders: scalar loads from a root view's address read its memory |
 | #1055 | `21d1b4682735` | not yet reviewed | — |  | Shaders: scalar buffer loads from a UAV read it raw |
 | #1053 | `393320dfa8cd` | integrated | `ecd3e625` | in the branch | Shaders: hardware test for v_cmp_class_f32 |
@@ -584,16 +606,15 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1042 | `ad330155a5a0` | not yet reviewed | — |  | Shaders: emit canonical system-value semantic names in ISG1/OSG1 signature pa… |
 | #1041 | `4111946bb8c9` | not yet reviewed | — |  | GPU: zero graphics/mesh PSO padding bytes and deduplicate pipeline library st… |
 | #1040 | `08e4c89757d3` | not yet reviewed | — |  | GPU: drop unsupported UAV/RT flags on typed host textures and guard RTV creat… |
-| #1033 | `94cc038ee41c` | not yet reviewed | — |  | victory-shader: build the per-instruction read/write lists once (ir::build -1… |
+| #1033 | `266f6719266a` | not yet reviewed | — |  | victory-shader: build the per-instruction read/write lists once (ir::build -1… |
 | #1032 | `b38a3c9fa1a6` | not yet reviewed | — |  | GPU: cap oversized sampler heaps |
 | #1031 | `19b4cc43cc84` | not yet reviewed | — |  | cli: forward and display title_args in victory run |
-| #1030 | `b187f7552d09` | not yet reviewed | — |  | VIctory emulator patches for GTA VI (Xbox Series X Scarlett build 1.0… |
+| #1030 | `b187f7552d09` | rejected | — | adds a zip of game-derived data the asset policy forbids; body describes features absent from the diff | VIctory emulator patches for GTA VI (Xbox Series X Scarlett build 1.0… |
 | #1025 | `ece73bb54d17` | not yet reviewed | — |  | GPU, HLE: an announced kernel read stays open until it lands |
 | #1024 | `67125b3a891a` | not yet reviewed | — |  | GPU: copy-back writes only the GPU's bytes and marks only unchanged pages cur… |
 | #1023 | `836490b9690c` | not yet reviewed | — |  | gpu: implement ordered 32-bit and 64-bit command-list memory waits |
 | #1022 | `57e2cdeed86b` | integrated | `ab442f01` | in the branch | Shaders: signature rows of one register in the validator's order |
 | #1021 | `3d71ad1a6547` | integrated | `b04607ca` | in the branch | Shaders: s_atc_probe's immediate is not a register |
-| #1020 | `39e056afa921` | not yet reviewed | — |  | GPU: rectangle lists placed by vertex number get a geometry stage |
 | #1019 | `461d12adaaf4` | not yet reviewed | — |  | GPU: buffer views off their host copy's elements use a copy of just their byt… |
 | #1017 | `b0933f503856` | not yet reviewed | — |  | Fix the Linux build and clippy gates |
 | #1016 | `03a6f22906b4` | integrated | `efc14e0a` | in the branch | XMA: gather frame payloads one byte at a time |
@@ -608,7 +629,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1007 | `9f2177cce6b2` | not yet reviewed | — |  | Apple Silicon: unified experimental GPU and runtime integration |
 | #1005 | `72b9709675e5` | not yet reviewed | — |  | Fix 12 verified regressions in shader translation, runtime, caching and textu… |
 | #1004 | `cbc8c33dc679` | not yet reviewed | — |  | Shaders: lower image_get_lod on cube textures |
-| #1002 | `15229212e116` | not yet reviewed | — |  | victory-shader: hash the lowering tables with Fx instead of SipHash (lowering… |
+| #1002 | `b6db98554243` | not yet reviewed | — |  | victory-shader: hash the lowering tables with Fx instead of SipHash (lowering… |
 | #1000 | `f821cb9d7550` | not yet reviewed | — |  | GPU: pipelines of different names load from the library at the same time |
 | #999 | `3ca94561506c` | not yet reviewed | — |  | Shaders: search lane conditions once and redo a lowering once |
 | #997 | `7d1a0a585b18` | rejected | — | closes the caller WinHTTP handle where the API keeps it | HLE: prevent automatic WinHTTP redirects |
@@ -620,7 +641,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #990 | `8d67fa5b00eb` | not yet reviewed | — |  | Shaders: hardware test for v_cvt_f16_u16 and v_cvt_f16_i16 |
 | #988 | `089bd768d5f1` | not yet reviewed | — |  | GPU: say when a fault lies past the end of its title memory copy |
 | #986 | `d8d7c2c0e19b` | rejected | — | reads title memory at submit, missing an earlier same-list UAV write | GPU: copy unaligned buffer SRVs into element-aligned scratch memory |
-| #985 | `38942cc2fd41` | not yet reviewed | — |  | GPU frame test: tolerate a late wake-up instead of requiring consecutive flips |
+| #985 | `60cf1d69616c` | not yet reviewed | — |  | GPU frame test: tolerate a late wake-up instead of requiring consecutive flips |
 | #984 | `501164509d22` | not yet reviewed | — |  | Shaders: split flat byte-offset accesses to structured buffers |
 | #983 | `486b54eda05f` | not yet reviewed | — |  | GPU: the early pipeline list keeps the most recently used keys |
 | #982 | `b4abe5db60f1` | not yet reviewed | — |  | GPU: pool upload buffers across command list resets |
@@ -639,7 +660,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #960 | `8c12a98be191` | not yet reviewed | — |  | Game picker |
 | #959 | `6614cc26b7e4` | held | — | names the GPU from adapter 0 but reads capabilities from the default device | victory: a menu when opened from Explorer, instead of help that closes at once |
 | #958 | `7d0302b2d85e` | not yet reviewed | — |  | GPU: unit tests for the OPTIONS, ARCHITECTURE and MULTISAMPLE feature queries |
-| #957 | `246ecea9631a` | not yet reviewed | — |  | HLE: test that XGSuggestSwizzleMode picks linear for a 1D texture |
+| #957 | `246ecea9631a` | duplicate | — | upstream xg.rs:697 already asserts the TEXTURE_1D swizzle | HLE: test that XGSuggestSwizzleMode picks linear for a 1D texture |
 | #956 | `db86e1e387a6` | not yet reviewed | — |  | GPU: support multi-argument ExecuteIndirect signatures with root constants |
 | #955 | `05c681c1b833` | not yet reviewed | — |  | Shaders, GPU: clamp descriptor heap indices to bound host heap guard slot |
 | #953 | `c42cbb0737d4` | integrated | `07f604ce` | in the branch | Shaders: handle s_buffer_load SMEM uses in descriptor_data (#798) |
@@ -655,9 +676,9 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #934 | `95cefdaca5f4` | integrated | `e28ee842` | in the branch | GPU tests: isolate write-watch fixture from reused addresses |
 | #933 | `9914ea4be88a` | not yet reviewed | — |  | GPU: report allocated mips from GetDesc |
 | #929 | `2b8756d301c4` | not yet reviewed | — |  | Audio: a silent playback endpoint when the host has no render device |
-| #928 | `033598be34e7` | not yet reviewed | — |  | GPU: GetDeviceRemovedReason reports the host device's state instead of E_NOTI… |
+| #928 | `13185f50ac09` | not yet reviewed | — |  | GPU: GetDeviceRemovedReason reports the host device's state instead of E_NOTI… |
 | #927 | `4ce99c162413` | not yet reviewed | — |  | GameInput: held keys are reported in the order they were pressed, as document… |
-| #926 | `e477c4bb64cb` | not yet reviewed | — |  | Shaders: 16-bit compares read the low halves whatever op_sel says, as RDNA2 d… |
+| #926 | `3cdbc0cabbe9` | not yet reviewed | — |  | Shaders: 16-bit compares read the low halves whatever op_sel says, as RDNA2 d… |
 | #925 | `0d2bcd66fcbf` | not yet reviewed | — |  | contribute: depth bounds + waterfall queries + XNetworking (#849 #853 #851) |
 | #922 | `f7bce85fcce3` | integrated | `846fcdee` | in the branch | Pipeline: delimit converter id in cache keys |
 | #710 | `a5a40bc40675` | not yet reviewed | — |  | Shaders, GPU: read through addresses passed in two root constants (stacked on… |
@@ -686,7 +707,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #677 | `0284037e045c` | integrated | `de6e76fc` | in the branch | Build: thin LTO for release and diag builds |
 | #674 | `b9e5f2e9ff3d` | integrated | `d28b71de` | in the branch | HLE (xg): validate null tiling output, slice bounds, and checked copy spans |
 | #673 | `3ba3f79c1952` | integrated | `9a6bc8e0` | in the branch | Make translate failure examples stable across workers |
-| #672 | `ad434b4c037b` | integrated | `b746d051` | in the branch | CLI: report all varying descriptor-word opcodes in translation refusals |
+| #672 | `3a2631333edf` | integrated | `b746d051` | in the branch | CLI: report all varying descriptor-word opcodes in translation refusals |
 | #670 | `44bbd6a5e988` | not yet reviewed | — |  | loader: use checked offsets and sizes in image preparation |
 | #669 | `52d528ba0c02` | integrated | `f6aa6695` | in the branch | GPU: find a list in the DRED breadcrumbs by its name, not only its pointer |
 | #668 | `5e9d60d134e2` | integrated | `3ad7f8ef` | in the branch | Shaders: support f16 omod and saturate/apply source modifiers in v_cvt_{u16,i… |
@@ -707,15 +728,12 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #649 | `43e2ca9de29f` | integrated | `d0952126` | in the branch | Show on-disk file size in victory inspect |
 | #648 | `241b08f49439` | integrated | `d0462736` | in the branch | HLE: implement XUser maximum-users slot 0x30 (#348, #622) |
 | #646 | `12eba495039d` | integrated | `42f24d56` | in the branch | Shaders: fix whole-wave EXEC inline constant sign-extension and prefix lane v… |
-| #645 | `499bd9860a32` | deferred | — | collides with the SSA sum cache across 18 hunks (GAP-002) | Shaders: trace multi-term, scaled, masked, and phi-joined addresses in resour… |
-| #644 | `6fa53a51c06f` | integrated | `b33b0fed` | in the branch | GPU: spill oversized host root signatures' user data to root CBVs |
-| #643 | `e7b2182e539a` | integrated | `d1ba3944` | in the branch | GPU: share live host textures across aliased addresses and canonicalize view … |
-| #642 | `6b987062d20a` | integrated | `f5f97470` | in the branch | GPU: translate enhanced texture barriers in ID3D12GraphicsCommandList7::Barri… |
-| #641 | `f887f6a3f7bc` | integrated | `15907832` | in the branch | GPU: upload partially-resident streamed textures |
+| #644 | `4eb145be7089` | integrated | `b33b0fed` | in the branch | GPU: spill oversized host root signatures' user data to root CBVs |
+| #642 | `bdef690c7054` | integrated | `f5f97470` | in the branch | GPU: translate enhanced texture barriers in ID3D12GraphicsCommandList7::Barri… |
+| #641 | `f96c56fb693b` | integrated | `15907832` | in the branch | GPU: upload partially-resident streamed textures |
 | #640 | `446fef929c85` | integrated | `842ed08b` | in the branch | Retry failed pipeline cache saves |
-| #638 | `79a1ecada3a5` | not yet reviewed | — |  | GPU diagnostics: find what the world hang waits for, and look under a black f… |
+| #638 | `16d1aad4d1a9` | not yet reviewed | — |  | GPU diagnostics: find what the world hang waits for, and look under a black f… |
 | #636 | `7216ab711311` | integrated | `3412fd91` | in the branch | HLE: implement the RPC runtime's GUID calls |
-| #635 | `62f3e9b51eae` | not yet reviewed | — |  | GPU: buffer views past the end of their host copy are null, views running pas… |
 | #633 | `90bc07545837` | not yet reviewed | — |  | HLE: GetModuleFileNameA answers in the ANSI code page |
 | #632 | `3bd823210d3e` | not yet reviewed | — |  | Shaders: LDS reads and writes of a byte or half |
 | #631 | `e009e13aa479` | integrated | `a157f3fe` | in the branch | Add unit tests for console.rs |
@@ -737,11 +755,11 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #606 | `95b58c1351de` | not yet reviewed | — |  | Shaders: ds_swizzle_b32 offsets from 0xC000 are the rotate and FFT modes |
 | #605 | `e7f5738163df` | not yet reviewed | — |  | Shaders: v_cvt_rpi_i32_f32 rounds the exact sum; v_cvt_flr/rpi_i32_f32 satura… |
 | #603 | `705a2f634d1c` | integrated | `dae0a292` | in the branch | Formats: inline repeated micro-tile copies when detiling textures |
-| #602 | `4367d6c70a58` | not yet reviewed | — |  | GPU diagnostics: report retained copy memory |
+| #602 | `380dab26ccbc` | not yet reviewed | — |  | GPU diagnostics: report retained copy memory |
 | #601 | `30b962565ff2` | not yet reviewed | — |  | GPU: bound texture upload and capture slices to the allocated buffer |
 | #599 | `38234626c7c1` | not yet reviewed | — |  | Shaders: lane-indexed ops on a wide host wave use the own console wave |
 | #596 | `be92188eee0a` | not yet reviewed | — |  | Shaders: lower v_cvt_pknorm_{i16,u16}_{f32,f16} with exact rounding |
-| #595 | `746503006def` | not yet reviewed | — |  | GPU: run submissions asynchronously on a host fence timeline |
+| #595 | `dfac3b46f19b` | not yet reviewed | — |  | GPU: run submissions asynchronously on a host fence timeline |
 | #594 | `c3f1d7443d5f` | not yet reviewed | — |  | GPU: track texture subresource states |
 | #592 | `35bf1530542f` | not yet reviewed | — |  | Shaders: second rows of packed 16-bit pixel inputs |
 | #590 | `52ceb8f7173d` | not yet reviewed | — |  | HLE: reject duplicate blob changes in one save update |
@@ -766,7 +784,6 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #571 | `8ad9d9f75ec8` | not yet reviewed | — |  | Shaders: LDS byte and half accesses |
 | #570 | `906ebe7b27e8` | not yet reviewed | — |  | HLE: reject saves whose committed container lacks a manifest |
 | #569 | `aed9637927e7` | integrated | `0860ed7a` | in the branch | Shaders: biased samples with 16-bit coordinates |
-| #568 | `b2a6bd271781` | not yet reviewed | — |  | GPU: give table slots without a view a null descriptor of the kind the shader… |
 | #563 | `10ac6ceac928` | integrated | `f90c170e` | in the branch | Shaders: cube samples with gradients, and image_sample_d_cl |
 | #562 | `9ca05334eded` | not yet reviewed | — |  | GPU: reuse immutable descriptor tables across command lists |
 | #561 | `3c02d8cf8947` | not yet reviewed | — |  | xmem: commit physical pages in pieces, and report the real count |
@@ -776,7 +793,6 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #555 | `d0dd9fc5c01c` | not yet reviewed | — |  | PE: keep every name for a shared export ordinal |
 | #553 | `b796c8b8b80c` | integrated | `5f095aad` | in the branch | GPU: clear DXGI outputs on out-of-range enumeration |
 | #551 | `967051859c6a` | not yet reviewed | — |  | Shaders: lower compute group info, wave id in workgroup, and sample coverage |
-| #550 | `8560817ada41` | rejected | — | unproven fix for #71 | GPU: never give a shader a table offset past the host heap |
 | #549 | `acc78da3c11c` | not yet reviewed | — |  | CI: add Dependabot configuration for GitHub Actions and Cargo |
 | #547 | `19cf287d0d9c` | integrated | `a8b8e88d` | in the branch | QA: add rustfmt.toml to standardize workspace formatting |
 | #546 | `a8bf0d3aa6ce` | not yet reviewed | — |  | GPU: prioritize pipeline work requested by draws |
@@ -806,10 +822,10 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #517 | `bab15db5c7a1` | not yet reviewed | — |  | CLI: report incomplete shader directory scans |
 | #515 | `d9cb9085689f` | rejected | — | new tests reuse probe addresses against a process-global journal | GPU: ask for written pages allocation by allocation when a range spans several |
 | #514 | `8540a0ec3423` | not yet reviewed | — |  | fix(gpu): recheck uncommitted blocks before skipping writes |
-| #513 | `13aac0844da2` | not yet reviewed | — |  | App: forward title command-line arguments to run command |
+| #513 | `13aac0844da2` | obsolete | — | run::run() no longer takes title_args; the target block does not exist | App: forward title command-line arguments to run command |
 | #512 | `829f774722a6` | not yet reviewed | — |  | HLE: resolve ordinals on pseudo-module handles |
 | #511 | `ff96ffe9644c` | not yet reviewed | — |  | Shaders: coalesce aligned constant-buffer loads |
-| #509 | `9c1c691b8c43` | not yet reviewed | — |  | GPU: add an opt-in execution performance census |
+| #509 | `bfc60cfab5fb` | not yet reviewed | — |  | GPU: add an opt-in execution performance census |
 | #506 | `e80778cffa94` | not yet reviewed | — |  | CLI: reject zero shader translation workers |
 | #505 | `d4c8abf932a1` | integrated | `b9f70206` | in the branch | Tests: add synthetic Xbox runtime conformance under Wine |
 | #504 | `b95632012574` | rejected | — | reports a D24S8 depth plane as R32_TYPELESS | GPU: handle depth/stencil copy footprints |
@@ -843,7 +859,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #472 | `f200a2a101e2` | not yet reviewed | — |  | GPU: grow the write snapshot in place, and cap idle pool memory |
 | #470 | `e9f870735ad8` | not yet reviewed | — |  | shader: lower wave prefixes of min and max |
 | #469 | `c47c963c4202` | not yet reviewed | — |  | GPU: give depth targets their unordered access through a twin texture |
-| #465 | `2b0d00bfd924` | not yet reviewed | — |  | Shaders: lower v_dot2_f32_f16 and v_dot2c_f32_f16 |
+| #465 | `bdced0f38f92` | not yet reviewed | — |  | Shaders: lower v_dot2_f32_f16 and v_dot2c_f32_f16 |
 | #464 | `9dd1507872c6` | not yet reviewed | — |  | GPU: remember unmapped guarded view blocks instead of re-copying them every s… |
 | #463 | `f47a36e83f86` | not yet reviewed | — |  | GPU: load an app-local D3D12 Agility SDK runtime when present |
 | #461 | `020a79008b23` | not yet reviewed | — |  | GPU: keep the initial pipeline of new command lists |
@@ -895,7 +911,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #389 | `c84e0e60bfc1` | not yet reviewed | — |  | Shader cache: a cache that cannot write still translates |
 | #388 | `e54b6756f5b2` | not yet reviewed | — |  | GPU: refresh unwatched textures without a region query; detile into cached me… |
 | #387 | `0899b7d7fd97` | not yet reviewed | — |  | GPU: preserve execution ordering for buffer copies |
-| #385 | `a34512768a10` | not yet reviewed | — |  | Shaders: track every incoming edge of a lane-mask phi |
+| #385 | `ec086dca9069` | not yet reviewed | — |  | Shaders: track every incoming edge of a lane-mask phi |
 | #383 | `b6af8b177e46` | not yet reviewed | — |  | Shader: LDS bytes and halves, constant sample offsets, descriptor-data reasons |
 | #379 | `5ecb6abe769d` | not yet reviewed | — |  | Shaders: lower v_div_fixup_f16 |
 | #378 | `2392dfd79a19` | integrated | `9a68bad9` | in the branch | CLI: include runtime shader hashes in the translation listing |
@@ -916,7 +932,6 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #352 | `f77bd28c6f4f` | not yet reviewed | — |  | GPU: mesh pipelines load from the pipeline library (name their topology) |
 | #351 | `93a24b7cdaeb` | integrated | `e4b302b1` | in the branch | Formats: reject overlapping texture depth slices |
 | #347 | `197c7acf1fb0` | not yet reviewed | — |  | GPU: ask for an empty pipeline library with a null blob |
-| #346 | `8ef6bfea1682` | not yet reviewed | — |  | GPU: expand indirect rectangle-list draws on the GPU |
 | #345 | `e16140174dda` | integrated | `90a5dd2d` | in the branch | docs: add Brazilian Portuguese translation |
 | #343 | `9459c12d2e3a` | integrated | `fd228fb5` | in the branch | Shaders: reject overlapping DXBC container parts |
 | #342 | `4950d6171111` | not yet reviewed | — |  | Shaders: lower partial-channel typed buffer stores |
@@ -970,7 +985,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #259 | `e232d3d7a210` | not yet reviewed | — |  | Shaders: query a descriptor's level count only when word 3 is read |
 | #256 | `4c57d95c6c15` | not yet reviewed | — |  | fix(hle): skip unavailable host exports in net test |
 | #254 | `b19ad9451e63` | not yet reviewed | — |  | Pipeline & CLI: stable shader cache key, in-flight dedup, and AOT warm-up |
-| #250 | `6fa50e2abdf6` | not yet reviewed | — |  | GPU & CLI: configurable/uncapped FPS limit, high-res pacing, high-refresh mod… |
+| #250 | `6c2c14146c9e` | not yet reviewed | — |  | GPU & CLI: configurable/uncapped FPS limit, high-res pacing, high-refresh mod… |
 | #247 | `5cff0007a525` | integrated | `2685c9ed` | in the branch | XAsync: a new block where a result was left behind begins a call |
 | #246 | `0d6cf21506d1` | not yet reviewed | — |  | Policy and hooks: staged type changes, pinned exception, executable pre-commit |
 | #244 | `7f95b87ea945` | integrated | `45a4455e` | in the branch | Shaders: share and serialize WARP host operations across threads |
@@ -1023,7 +1038,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #175 | `19aec59ba293` | not yet reviewed | — |  | Windows 10: load the D3D12 Agility SDK runtime for shader model 6.6 |
 | #174 | `882664e13cfa` | not yet reviewed | — |  | GPU: a frame wait takes its tick before it sleeps |
 | #172 | `4eb0898b3cbd` | integrated | `5ba70891` | in the branch | XMA: cache IMDCT rotation tables per subframe size |
-| #171 | `9dc6a7e30834` | not yet reviewed | — |  | Shaders: lower v_mad_u64_u32 and v_mad_i64_i32 |
+| #171 | `8f19f0dc169e` | not yet reviewed | — |  | Shaders: lower v_mad_u64_u32 and v_mad_i64_i32 |
 | #169 | `645391bcce95` | not yet reviewed | — |  | Shaders: tbuffer_load_format_d16 loads pack two 16-bit channels per VGPR |
 | #168 | `9483b1a96261` | not yet reviewed | — |  | Shaders: SCC of s_min, s_max and s_lshl1-4_add_u32 as the ISA sets it |
 | #166 | `b81071c2fc6d` | not yet reviewed | — |  | Shaders: lower s_bitset{0,1}_b64, s_brev_b64 and s_bitreplicate_b64_b32 |
@@ -1076,7 +1091,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #73 | `7cc244530270` | not yet reviewed | — |  | Shaders: support image_sample_b with a16 and _cl LOD-clamp variants |
 | #72 | `521ceccd781e` | not yet reviewed | — |  | GPU: retry pipeline cache saves after write failures |
 | #69 | `18f3937ed135` | not yet reviewed | — |  | Translate compute selects with numeric lane masks |
-| #67 | `b5c38fa9c25c` | not yet reviewed | — |  | GPU: implement CopyTextureRegion texture-to-buffer readbacks |
+| #67 | `9ea5068e6075` | not yet reviewed | — |  | GPU: implement CopyTextureRegion texture-to-buffer readbacks |
 | #55 | `56f1d413873d` | not yet reviewed | — |  | GPU: create host textures without the uses the host refuses |
 | #52 | `628b95da5e73` | not yet reviewed | — |  | GPU: hold SHADER_HEAPS across descriptor mirror and check query offsets |
 | #32 | `9c5328d4ef91` | not yet reviewed | — |  | GPU: fence waits, direct memory-write wakes, queue timeline and host list pool |
