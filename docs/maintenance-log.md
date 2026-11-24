@@ -861,3 +861,88 @@ cited to it; the census and the repo's own opcode tables replaced it.
 Gate at `4b5fe162`: fmt 0 differing, both Clippy commands exit 0, workspace 670
 passed / 14 ignored / 0 failed, policy ok. Four commits landed after that gate,
 so it is explicitly stale and is re-run on the final tip.
+
+### Wave 6 continued: the fork, and a disposition for every PR: 2026-11-25
+
+Two things the user asked for that the earlier ledger did not provide.
+
+**A disposition for every open PR, not just the integrated ones.**
+`docs/pr-disposition.md` now lists all 1,024 open PRs at the 21:04 UTC
+snapshot with a state, a local commit where one exists, and a reason where
+one was reviewed. The number that matters is in it: **818 have no reviewed
+disposition**. They are listed as unreviewed rather than omitted, because a
+table that only shows successes reads as if the rest were handled.
+
+**A third-party fork: `github.com/fxceless/victory-fork`.** Ten commits on
+top of the same upstream base (`ffe310e`). GitHub does not report it as a fork
+of Marvisak/VIctory, and it is not a later upstream: it is a *sibling* tree
+built on a different translator architecture. A three-way merge of its first
+commit reports **33 conflicted files**, including every shader-core file.
+
+Taken from it:
+
+- **`spill.rs` (spilled user-data tables)** — `c56c7b86`. A compute program
+  whose root signature needs more user-data dwords than `COMPUTE_PGM_RSRC2`
+  grants keeps none of its parameters in registers: dwords 0 and 1 hold a
+  pointer to a table, and parameter N (16 and above) is at byte 4*(N-16) of
+  it, read with `s_load_dword*`. This tree had no notion of that. It matters
+  because it is exactly the shape that yields "an address whose base is no
+  declared parameter", which is the top refusal in the world-load run (31 of
+  74, all compute). Only the new module and its single call site were taken,
+  not the other 60 files of that commit.
+- **`004bf69a`, stencil-plane and shader-view diagnostics** — `7180c20e`.
+- **`16849898`, the bitcode optimiser — HELD, not merged.** It is on by
+  default (`emit/shader.rs`), so every emitted shader changes and the title's
+  whole shader cache is invalidated. Its LOADS pass reuses a memory read on an
+  explicit bet that the title cannot observe an unsynchronised store between
+  two reads, and its `FIRST` pass changes lowering on a wave64-as-two-waves
+  architecture this tree does not have. Its tests are structural plus an
+  in-process interpreter; no device values. The fork's own README at
+  `004bf69a` records device loss in 4 of 4 runs on its newest commits. That is
+  not a safe default; it needs an off-by-default port and a title A/B.
+
+Not taken, with reasons: the wave64-on-32-lane exchange stack (thousands of
+lines replacing this tree's wave model — and it exists for a 32-lane host,
+which the diagnostic machine is not), the ray-tracing stack (off by default
+and unlit on the fork's own machine), and the fork's `Cargo.toml` (it lacks
+our thin LTO; it does *not* carry the lint disables an early report claimed —
+checked, `git diff HEAD 578d459c -- Cargo.toml` is 15 lines about LTO).
+
+Also in this wave:
+
+| Local commit | From | Subject |
+| --- | --- | --- |
+| `e08c93e0` | #1656 | GPU: copy back only the span shaders changed, on several threads |
+| `c56c7b86` | fork `578d459c` | Shaders: a compute program's spilled user-data table is read as parameters |
+| `c21cee43` | #1695 | Shader tests: require a device readback in every waterfall test |
+| `9e91c1d2` | #1680 | GPU: pipeline library loads take a lock for their name |
+| `f9fe0e37` | #1710 | GPU: keep dropped draws in the full frame reporting interval |
+| `a18c2683` | #1690 | GPU: zero the padding of the descriptions the library compares |
+| `67be115d` | #1690 | GPU: stop keeping a kind of pipeline the library refuses to load |
+| `7180c20e` | fork `004bf69a` | Test fix, stencil diagnostics, stability warning |
+
+Corrections made during this wave:
+
+- **#1656's threaded copy-back absorbed panics.** `join().unwrap_or(0)` turned
+  a panicking copy-back thread into a *partial* write-back that the frame then
+  continued past. It now resumes the panic. The PR's own comment claiming the
+  ranges are "disjoint ranges of one buffer" was also false — nothing enforces
+  disjointness — and now says what actually happens.
+- **The offline census did not build the program the runtime builds.** It
+  called `ir::build` directly while the emitter goes through `spill::build`,
+  so a spilled-table shader was rewritten by one path and not the other. That
+  is a concrete explanation for why the world-load refusals never reproduced
+  offline, and it is fixed (`2e55c8ef`). Evidence that it changes nothing:
+  the census over 26,084 programs is byte-identical before and after, which is
+  consistent with the fork's claim that only the BVH builder's programs are
+  spilled — inference, not measurement.
+- **A worker claimed the fork's `Cargo.toml` disables lints.** It does not;
+  the only difference is our thin-LTO setting. Checked, not assumed.
+
+### Off-peak rule: recorded
+
+The user made off-peak-only work a standing hard rule. Peak is 01:00-04:00
+and 06:00-10:00 UTC, Monday-Friday, excluding Chinese public holidays;
+everything else is off-peak. Each pass records the UTC time it started
+against that window. The wave-6 continuation ran 21:17-22:00 UTC on a
+Tuesday, off-peak; the next peak opens 2026-11-25 01:00 UTC.
