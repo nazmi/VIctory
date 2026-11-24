@@ -12,14 +12,14 @@ happened to each open PR". Per-worker accounting is in
 
 | Disposition | Count |
 | --- | --- |
-| integrated | 229 |
-| rejected | 20 |
+| integrated | 233 |
+| rejected | 21 |
 | deferred | 8 |
-| held | 5 |
-| duplicate | 17 |
-| obsolete | 1 |
+| held | 6 |
+| duplicate | 20 |
+| obsolete | 2 |
 | already-present | 1 |
-| not yet reviewed | 776 |
+| not yet reviewed | 766 |
 | total open | 1057 |
 
 A further 18 PRs are in the branch and no longer open upstream;
@@ -27,7 +27,7 @@ they are in [pr-integration-ledger.md](pr-integration-ledger.md).
 
 ## Read this before trusting a row
 
-**776 of 1057 have no reviewed disposition.** They are
+**766 of 1057 have no reviewed disposition.** They are
 listed rather than omitted so that silence is never read as approval.
 
 `integrated` means the change is in **this branch**, reviewed and tested when
@@ -255,7 +255,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1485 | `b77b148c629d` | not yet reviewed | — |  | Shaders: honor DPP16/DPP8 fi and source-lane EXEC activity |
 | #1484 | `2b8b4d746fbe` | not yet reviewed | — |  | Shaders: prune unreachable blocks before SSA construction |
 | #1483 | `0daabccbdec4` | not yet reviewed | — |  | Pick the discrete GPU on laptops; fix driver-dependent and wrong shader lower… |
-| #1480 | `b32a5d593d46` | not yet reviewed | — |  | Shaders: unpack a16 image coordinates and gradients after whole 32-bi… |
+| #1480 | `b32a5d593d46` | integrated | — |  | Shaders: unpack a16 image coordinates and gradients after whole 32-bi… |
 | #1478 | `19052138d065` | not yet reviewed | — |  | Shaders: lower VOP3 integer clamp saturation for add/sub ops |
 | #1477 | `2286e038cc60` | not yet reviewed | — |  | Shaders: key immediate sampler slots by descriptor and comparison mode |
 | #1476 | `711d651ccab7` | integrated | — |  | Shaders: precompute MD5 round constants and avoid per-block Vec in md… |
@@ -319,7 +319,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1407 | `e19347488050` | not yet reviewed | — |  | Shaders: lane masks holding lanes elsewhere, and mask joins, read as numbers |
 | #1406 | `87b42ecd18c9` | not yet reviewed | — |  | GPU: fix NULL/UNKNOWN SRV/UAVs on promoted-typeless textures and MSAA/array/3… |
 | #1405 | `ad2025a433c9` | not yet reviewed | — |  | GPU: a view's own copy that shaders feed reads its buffer's copy on the GPU (… |
-| #1404 | `6f0badc834c3` | not yet reviewed | — |  | Shaders: test raw VCC on s_cbranch_vccz and vccnz without EXEC masking |
+| #1404 | `6f0badc834c3` | obsolete | — | the test it patched no longer exists upstream | Shaders: test raw VCC on s_cbranch_vccz and vccnz without EXEC masking |
 | #1403 | `567e1345fb77` | not yet reviewed | — |  | CLI: report shader worker initialization failures |
 | #1402 | `7e7c5be2db4f` | not yet reviewed | — |  | [BUNDLE] High-yield shader PRs (+295/+520/+153/+117 programs in #1247): #1067… |
 | #1400 | `f2491a58f6c9` | not yet reviewed | — |  | GPU: split duplicate HostList entries into separate ExecuteCommandLists batch… |
@@ -330,7 +330,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1395 | `a91e9adde213` | not yet reviewed | — |  | Shaders: lower s_bfe_u64, s_bfe_i64 and s_bfm_b64 |
 | #1394 | `71798281f998` | integrated | — |  | HLE: make XUserCompare antisymmetric |
 | #1393 | `7a780a0ad707` | not yet reviewed | — |  | Shaders: vectorize wide s_buffer_load and global_load rawBufferLoad calls |
-| #1392 | `9687a19581ca` | not yet reviewed | — |  | gpu: emit UAV barrier after a dropped compute dispatch |
+| #1392 | `9687a19581ca` | rejected | — | stale context; targets a drop path where nothing was bound; a hazard barrier cannot repair the missing ensure_state it blames | gpu: emit UAV barrier after a dropped compute dispatch |
 | #1391 | `78c12677e54f` | not yet reviewed | — |  | Shaders: lower v_cvt_off_f32_i4 |
 | #1390 | `97c8783f4a26` | integrated | — |  | GPU: keep A8_UNORM out of the R8 typeless family |
 | #1389 | `9b39340bff50` | not yet reviewed | — |  | [BUNDLE] HLE audio and input (XMA, APU, WASAPI capture, GameInput): #194 #528… |
@@ -363,7 +363,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1362 | `c98c50f9c66e` | integrated | — |  | Shaders: hardware test for s_lshl1..4_add_u32 |
 | #1361 | `8d6d06c342ef` | not yet reviewed | — |  | Shaders: hardware test for the scalar bit-scan, reverse and abs ops |
 | #1360 | `0e24b79ae220` | integrated | — |  | Shaders: hardware test for s_min_i32/u32 and s_max_i32/u32 |
-| #1359 | `f2782f3d6319` | not yet reviewed | — |  | Shaders coalesce conditional branches to their fallthrough |
+| #1359 | `f2782f3d6319` | integrated | — |  | Shaders coalesce conditional branches to their fallthrough |
 | #1358 | `144b6203c05a` | not yet reviewed | — |  | [BUNDLE] XGameSave hardening: #228 #399 #570 #590 #1006 #1110 #1123 |
 | #1357 | `cdec26e9dd45` | not yet reviewed | — |  | HLE: native 4-motor Xbox impulse trigger haptics via Windows.Gaming.Input wit… |
 | #1356 | `080456154250` | not yet reviewed | — |  | GPU: use RwLock for read-mostly tables and add per-HostList VA/view caches |
@@ -595,7 +595,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1059 | `3530ba983ede` | not yet reviewed | — |  | Loader: VICTORY_PATCH writes bytes into a loaded module after relocation |
 | #1058 | `8770e1905c55` | integrated | — |  | CI: serialize Windows workspace tests |
 | #1056 | `417f4e30d22f` | not yet reviewed | — |  | Shaders: scalar loads from a root view's address read its memory |
-| #1055 | `21d1b4682735` | not yet reviewed | — |  | Shaders: scalar buffer loads from a UAV read it raw |
+| #1055 | `21d1b4682735` | integrated | — |  | Shaders: scalar buffer loads from a UAV read it raw |
 | #1053 | `393320dfa8cd` | integrated | `ecd3e625` | in the branch | Shaders: hardware test for v_cmp_class_f32 |
 | #1052 | `41b2472e134c` | not yet reviewed | — |  | Shaders: hardware test for the integer v_min3/v_max3/v_med3 |
 | #1050 | `259ba31e28ca` | integrated | `e3622af7` | in the branch | Shaders: negative-zero ordering test for the f16 min/max forms |
@@ -648,7 +648,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #978 | `8d9e4f1205c6` | not yet reviewed | — |  | victory-shader: lower v_cvt_f32_f64 and image_sample_d_cl |
 | #976 | `ad22f1fa46fb` | not yet reviewed | — |  | GPU: add check_feature_support unit tests for features 0, 1, 3, 4 (fixes #869) |
 | #975 | `78e2d19505bb` | integrated | `22e61383` | in the branch | HLE: add XGSuggestSwizzleMode TEXTURE_1D branch validation (fixes #868) |
-| #974 | `c1be75f7b799` | not yet reviewed | — |  | GPU: extend HostHeap wraparound search range to cursor bounds (fixes #871) |
+| #974 | `c1be75f7b799` | integrated | — |  | GPU: extend HostHeap wraparound search range to cursor bounds (fixes #871) |
 | #973 | `58ee9ad9e864` | not yet reviewed | — |  | Core: fix policy resolve trailing and verbatim dotdot folding (fixes #793) |
 | #972 | `886a867661bc` | duplicate | — | already present: xsystem.rs:6 imports E_NOT_SUFFICIENT_BUFFER and :70 guards 16 bytes, with a test | HLE: enforce XSystemXboxLiveSandboxId minimum buffer size (fixes #862) |
 | #970 | `60222b335719` | not yet reviewed | — |  | GPU: aspect-aware concrete format resolution for typeless views (fixes #882, … |
@@ -778,11 +778,11 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #577 | `40816378b598` | integrated | `e532ec98` | in the branch | dstorage: retain queued file references and validate null out pointers |
 | #576 | `fde38b399f96` | not yet reviewed | — |  | shader: lower v_permlane16_b32 |
 | #575 | `69e44f59cd9c` | rejected | — | does not compile: Mutex<Vec<ID3D12Resource>> is not Send | GPU: release resources the CPU is done with behind the queue |
-| #574 | `253b9db4a8f3` | not yet reviewed | — |  | HLE: write at-rest gamepad state for non-pad readings |
+| #574 | `253b9db4a8f3` | duplicate | — | already at gameinput.rs:1121 | HLE: write at-rest gamepad state for non-pad readings |
 | #573 | `1d09f19b2102` | not yet reviewed | — |  | Shaders: lower ds_bpermute_b32 |
 | #572 | `0a1a702bb440` | integrated | `34370fce` | in the branch | Docs: add a PowerShell quickstart for running VIctory |
 | #571 | `8ad9d9f75ec8` | not yet reviewed | — |  | Shaders: LDS byte and half accesses |
-| #570 | `906ebe7b27e8` | not yet reviewed | — |  | HLE: reject saves whose committed container lacks a manifest |
+| #570 | `906ebe7b27e8` | duplicate | — | already integrated | HLE: reject saves whose committed container lacks a manifest |
 | #569 | `aed9637927e7` | integrated | `0860ed7a` | in the branch | Shaders: biased samples with 16-bit coordinates |
 | #563 | `10ac6ceac928` | integrated | `f90c170e` | in the branch | Shaders: cube samples with gradients, and image_sample_d_cl |
 | #562 | `9ca05334eded` | not yet reviewed | — |  | GPU: reuse immutable descriptor tables across command lists |
@@ -793,7 +793,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #555 | `d0dd9fc5c01c` | not yet reviewed | — |  | PE: keep every name for a shared export ordinal |
 | #553 | `b796c8b8b80c` | integrated | `5f095aad` | in the branch | GPU: clear DXGI outputs on out-of-range enumeration |
 | #551 | `967051859c6a` | not yet reviewed | — |  | Shaders: lower compute group info, wave id in workgroup, and sample coverage |
-| #549 | `acc78da3c11c` | not yet reviewed | — |  | CI: add Dependabot configuration for GitHub Actions and Cargo |
+| #549 | `acc78da3c11c` | held | — | dependabot: security-only, no PR noise; infra file, needs a deliberate decision not a cherry-pick | CI: add Dependabot configuration for GitHub Actions and Cargo |
 | #547 | `19cf287d0d9c` | integrated | `a8b8e88d` | in the branch | QA: add rustfmt.toml to standardize workspace formatting |
 | #546 | `a8bf0d3aa6ce` | not yet reviewed | — |  | GPU: prioritize pipeline work requested by draws |
 | #545 | `d4c0e846b731` | rejected | — | a second divergent lint gate on stable | xtask: add qa command to run policy, rustfmt, and clippy checks |
@@ -806,7 +806,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #538 | `65062e133c75` | integrated | `4efb34b6` | in the branch | xmem: report allocations the host refuses |
 | #537 | `2021e0f26970` | integrated | `67f5d656` | in the branch | GPU: name the switch when a removal has no device-removed data |
 | #536 | `7a5d85e6a286` | not yet reviewed | — |  | Audio: an XMA write block past the ring's end wraps before the first write |
-| #535 | `f6585cc0b392` | not yet reviewed | — |  | App: enforce asset policy check in default_paths |
+| #535 | `f6585cc0b392` | duplicate | — | already at main.rs:248 with its test | App: enforce asset policy check in default_paths |
 | #534 | `29046af7f589` | not yet reviewed | — |  | CLI: report shader scan input failures |
 | #532 | `aa50c7d6481e` | integrated | `f4d0697a` | in the branch | Document the Arch MSVC build and Proton rendering on an RTX 4080 |
 | #531 | `26912a953541` | duplicate | — | already local as 2902ad00 | HLE: check null and invalid handle in display deferral |
