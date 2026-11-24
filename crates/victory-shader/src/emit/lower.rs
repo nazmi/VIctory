@@ -6274,6 +6274,70 @@ impl<'a> Lower<'a> {
                 let m = self.s.m.bin(c, Bin::Mul, a, b);
                 self.s.m.bin(c, Bin::Add, m, d)
             }
+            "v_mad_u32_u16" | "v_mad_i32_i16" => {
+                let (a, b, d) = (s(self, 0)?, s(self, 1)?, s(self, 2)?);
+                let (sh, shift) = (
+                    k(self, 16),
+                    if name == "v_mad_i32_i16" {
+                        Bin::AShr
+                    } else {
+                        Bin::LShr
+                    },
+                );
+                let extract16 = |l: &mut Self, x: V, high: bool| {
+                    let x = if high {
+                        x
+                    } else {
+                        l.s.m.bin(c, Bin::Shl, x, sh)
+                    };
+                    l.s.m.bin(c, shift, x, sh)
+                };
+                let opsel = match &inst.fields {
+                    Fields::Valu(v) => v.opsel,
+                    _ => 0,
+                };
+                let a = extract16(self, a, opsel & 1 != 0);
+                let b = extract16(self, b, opsel & 2 != 0);
+                let m = self.s.m.bin(c, Bin::Mul, a, b);
+                self.s.m.bin(c, Bin::Add, m, d)
+            }
+            "v_lerp_u8" => {
+                // Packed 4x8-bit unsigned average with per-byte rounding bit in src2:
+                // dst.u8[i] = (src0.u8[i] + src1.u8[i] + (src2.u8[i] & 1)) >> 1.
+                let (a, b, d) = (s(self, 0)?, s(self, 1)?, s(self, 2)?);
+                let (mff, m1) = (k(self, 0xFF), k(self, 1));
+                let mut out = k(self, 0);
+                for i in 0..4 {
+                    let (ai, bi, di) = if i == 0 {
+                        (a, b, d)
+                    } else {
+                        let sh = k(self, i * 8);
+                        (
+                            self.s.m.bin(c, Bin::LShr, a, sh),
+                            self.s.m.bin(c, Bin::LShr, b, sh),
+                            self.s.m.bin(c, Bin::LShr, d, sh),
+                        )
+                    };
+                    let ai = self.s.m.bin(c, Bin::And, ai, mff);
+                    let bi = self.s.m.bin(c, Bin::And, bi, mff);
+                    let di = self.s.m.bin(c, Bin::And, di, m1);
+                    let sum = self.s.m.bin(c, Bin::Add, ai, bi);
+                    let sum = self.s.m.bin(c, Bin::Add, sum, di);
+                    let avg = self.s.m.bin(c, Bin::LShr, sum, m1);
+                    let byte = if i == 0 {
+                        avg
+                    } else {
+                        let sh = k(self, i * 8);
+                        self.s.m.bin(c, Bin::Shl, avg, sh)
+                    };
+                    out = if i == 0 {
+                        byte
+                    } else {
+                        self.s.m.bin(c, Bin::Or, out, byte)
+                    };
+                }
+                out
+            }
             "v_min3_i32" | "v_max3_i32" | "v_min3_u32" | "v_max3_u32" | "v_med3_i32"
             | "v_med3_u32" => {
                 let (a, b, d) = (s(self, 0)?, s(self, 1)?, s(self, 2)?);
@@ -9987,5 +10051,94 @@ mod tests {
             "the atomic's annotation: {:x?}",
             lowered.annotations
         );
+    }
+
+    #[cfg(windows)]
+    fn validate(dxil: &[u8]) {
+        use super::super::validator::Validator;
+        let Ok(mut v) = Validator::load(Validator::default_path().as_deref()) else {
+            eprintln!("no dxil.dll; skipped");
+            return;
+        };
+        let mut copy = dxil.to_vec();
+        v.validate(&mut copy).unwrap();
+        assert_eq!(copy[4..20], dxil[4..20], "container hash");
+    }
+
+    #[cfg(not(windows))]
+    fn validate(_: &[u8]) {}
+
+    #[test]
+    fn mad_32_16_and_lerp_u8_lower_and_validate() {
+        let vop3 = |op: u32, opsel: u32, vdst: u32, s0: u32, s1: u32, s2: u32| -> [u32; 2] {
+            [
+                (0x35 << 26) | ((op & 0x3FF) << 16) | ((opsel & 0xF) << 11) | (vdst & 0xFF),
+                (s0 & 0x1FF) | ((s1 & 0x1FF) << 9) | ((s2 & 0x1FF) << 18),
+            ]
+        };
+        // v0, v1, v2 are VGPRs 256..=258; result used in a pixel export so none are DCE'd.
+        let m0 = vop3(0x373, 0, 0, 256, 257, 258); // v_mad_u32_u16 v0, v0, v1, v2
+        let m1 = vop3(0x373, 3, 0, 256, 257, 256); // v_mad_u32_u16 v0, v0, v1, v0 (opsel hi)
+        let m2 = vop3(0x375, 0, 0, 256, 257, 258); // v_mad_i32_i16 v0, v0, v1, v2
+        let l0 = vop3(0x14D, 0, 0, 256, 257, 258); // v_lerp_u8 v0, v0, v1, v2
+        let words = [
+            0x7E00_0283, // v_mov_b32 v0, 3
+            0x7E02_0285, // v_mov_b32 v1, 5
+            0x7E04_0287, // v_mov_b32 v2, 7
+            m0[0],
+            m0[1],
+            m1[0],
+            m1[1],
+            m2[0],
+            m2[1],
+            l0[0],
+            l0[1],
+            0xF800_180F,
+            0x0000_0000, // exp mrt0 v0, v0, v0, v0 done vm
+            S_ENDPGM,
+        ];
+        let native = NativeProgram {
+            stage: HwStage::Ps,
+            wave64: false,
+            vgprs: 4,
+            layout: vec![],
+            used: vec![],
+            io: StageIo::Ps {
+                inputs: vec![],
+                input_addr: 0,
+                db_shader_control: 0,
+                patches: vec![],
+            },
+            code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        };
+        let p = ir::build(&native.code, native.wave64, native.vgprs).unwrap();
+        let st = structure::structure(&p).unwrap();
+        let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+        let io = io::raise(&p, &native).unwrap();
+        let target = super::SigElement {
+            name: "SV_Target".into(),
+            index: 0,
+            kind: 16,
+            comp: 9,
+            interp: 0,
+            row: Some(0),
+            col: 0,
+            cols: 4,
+            usage: 0,
+            half: false,
+        };
+        let l = lower(&Parts {
+            native: &native,
+            p: &p,
+            st: &st,
+            io: &io,
+            res: &res,
+            inputs: vec![],
+            outputs: vec![target],
+            prims: vec![],
+            mesh_stride: 0,
+        })
+        .unwrap();
+        validate(&l.dxil);
     }
 }
