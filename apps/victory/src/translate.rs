@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Result;
 use victory_shader::emit::host::{self, Host};
 use victory_shader::emit::{self, validator::Validator};
+use victory_shader::spill;
 use victory_shader::structure::{self, Atom, LaneExit};
 use victory_shader::{
     Container, FourCC, HwStage, NativeProgram, RootType, ShaderError, ir, native_programs,
@@ -397,7 +398,10 @@ fn translate(
     };
     for p in programs {
         t.programs += 1;
-        match ir::build(&p.patched_code(), p.wave64, p.vgprs) {
+        // Through `spill`, exactly as the emitter builds it: a compute program
+        // may keep its root parameters in a spilled user-data table, and the
+        // census must see the same program the runtime does.
+        match spill::build(&p) {
             Ok(program) => {
                 t.translated += 1;
                 t.instructions += program.blocks.iter().map(|b| b.insts.len()).sum::<usize>();
