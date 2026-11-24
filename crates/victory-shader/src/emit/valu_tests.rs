@@ -782,6 +782,37 @@ fn s_min_and_s_max_compare_signed_and_unsigned() {
 }
 
 #[test]
+fn s_lshl_add_shifts_the_first_operand_then_adds() {
+    // s_lshl{1,2,3,4}_add_u32 s6, s0, s1 (SOP2 0x2e..0x31): (s0 << n) + s1.
+    let values = [
+        0u32,
+        1,
+        3,
+        0x1000_0001,
+        0x7FFF_FFFF,
+        0x8000_0000,
+        0xFFFF_FFFF,
+    ];
+    let mut cases = Vec::new();
+    for a in values {
+        for b in values {
+            cases.push([a, b, 0, 0]);
+        }
+    }
+    for n in 1..=4u32 {
+        let shader = build_valu_cs(&[sop2(0x2d + n as u8, 6, 0, 1), vop1(0x001, 0, sgpr(6))]);
+        run_cases(&shader, &cases, |backend, _, inp, got| {
+            let want = (inp[0] << n).wrapping_add(inp[1]);
+            assert_eq!(
+                got, want,
+                "{backend}: s_lshl{n}_add_u32({:#010x}, {:#010x}) = {got:#010x}, want {want:#010x}",
+                inp[0], inp[1],
+            );
+        });
+    }
+}
+
+#[test]
 fn v_sin_and_v_cos_f16_reduce_large_turns() {
     let sin_shader = build_valu_cs(&[vop1(0x060, 0, vgpr(1))]);
     let cos_shader = build_valu_cs(&[vop1(0x061, 0, vgpr(1))]);
