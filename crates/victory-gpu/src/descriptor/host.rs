@@ -57,6 +57,18 @@ pub(crate) struct HostHeap {
 /// tiers 1 and 2; tier 3 hardware may take more.
 const PORTABLE_VIEWS: u32 = 1_000_000;
 
+/// The D3D12 limit for shader-visible sampler heaps, on every binding tier.
+const PORTABLE_SAMPLERS: u32 = 2_048;
+
+/// Slots a sampler heap gets for a title request: the host's 2048 limit at
+/// most. Translated shaders clamp their sampler indices below
+/// `HEAP_SAMPLERS`, which is the same number, so a capped heap loses no slot
+/// a shader can name — while an uncapped request for more would fail heap
+/// creation and lose every sampler binding at once.
+fn sampler_slots(requested: u32) -> u32 {
+    requested.min(PORTABLE_SAMPLERS)
+}
+
 /// Slots past the title's in a view heap, for tables a draw needs made
 /// afresh (constant buffers copied per draw). A list holds the slots it
 /// took until it is reset (its submissions have run) or released.
@@ -103,9 +115,23 @@ impl HostHeap {
             victory_shader::emit::HEAP_VIEWS,
             victory_shader::emit::HEAP_SAMPLERS,
         );
+        let requested = count;
         let (heap, count, extra) = if sampler {
-            match make(count.max(samplers)) {
-                Ok(heap) => (heap, count, 0),
+            // D3D12 caps shader-visible sampler heaps at 2048 on every binding
+            // tier; translated shaders already clamp their sampler indices
+            // below `HEAP_SAMPLERS` (the same 2048), so capping the host heap
+            // costs nothing a shader can reach and avoids losing the heap
+            // entirely when the title asks for more.
+            let supported = sampler_slots(count);
+            if supported < count {
+                tracing::warn!(
+                    requested = count,
+                    supported,
+                    "host sampler heap capped; higher sampler slots are unavailable"
+                );
+            }
+            match make(supported.max(samplers)) {
+                Ok(heap) => (heap, supported, 0),
                 Err(e) => {
                     tracing::warn!(error = %e, count, sampler, "no host descriptor heap");
                     return None;
@@ -141,7 +167,7 @@ impl HostHeap {
                 host.device.GetDescriptorHandleIncrementSize(kind),
             )
         };
-        tracing::debug!(count, sampler, "host descriptor heap");
+        tracing::debug!(requested, count, sampler, "host descriptor heap");
         // DRED identifies matching allocations by name. Descriptor handles
         // have their own increment and cannot locate a faulting GPU VA.
         crate::host::name(&heap, || {
@@ -1843,5 +1869,17 @@ mod tests {
         let last = first + heap.dynamic - 1;
         heap.release(last, 1);
         assert_eq!(heap.dynamic(2), None);
+    }
+    #[test]
+    fn a_sampler_heap_request_is_capped_at_the_host_limit() {
+        use super::{PORTABLE_SAMPLERS, sampler_slots};
+        assert_eq!(sampler_slots(16), 16);
+        assert_eq!(sampler_slots(2048), 2048);
+        // Past the D3D12 limit the heap is capped rather than refused: the
+        // shaders cannot name a slot above 2048 anyway.
+        assert_eq!(sampler_slots(4096), PORTABLE_SAMPLERS);
+        assert_eq!(sampler_slots(u32::MAX), PORTABLE_SAMPLERS);
+        // And the cap equals what translated shaders clamp to.
+        assert_eq!(PORTABLE_SAMPLERS, victory_shader::emit::HEAP_SAMPLERS);
     }
 }
