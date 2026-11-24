@@ -751,6 +751,37 @@ fn v_cvt_u16_and_i16_f16_saturate() {
 }
 
 #[test]
+fn s_min_and_s_max_compare_signed_and_unsigned() {
+    // s_{min,max}_{i32,u32} s6, s0, s1 (SOP2 0x06..0x09); v_mov_b32 v0, s6.
+    type Pick = fn(u32, u32) -> u32;
+    let ops: [(&str, u8, Pick); 4] = [
+        ("s_min_i32", 0x06, |a, b| (a as i32).min(b as i32) as u32),
+        ("s_min_u32", 0x07, u32::min),
+        ("s_max_i32", 0x08, |a, b| (a as i32).max(b as i32) as u32),
+        ("s_max_u32", 0x09, u32::max),
+    ];
+    // The sign bit set on some values, so the signed and unsigned answers differ.
+    let values = [0u32, 1, 5, 0x7FFF_FFFF, 0x8000_0000, 0xFFFF_FFFF];
+    let mut cases = Vec::new();
+    for a in values {
+        for b in values {
+            cases.push([a, b, 0, 0]);
+        }
+    }
+    for (name, op, pick) in ops {
+        let shader = build_valu_cs(&[sop2(op, 6, 0, 1), vop1(0x001, 0, sgpr(6))]);
+        run_cases(&shader, &cases, |backend, _, inp, got| {
+            let want = pick(inp[0], inp[1]);
+            assert_eq!(
+                got, want,
+                "{backend}: {name}({:#010x}, {:#010x}) = {got:#010x}, want {want:#010x}",
+                inp[0], inp[1],
+            );
+        });
+    }
+}
+
+#[test]
 fn v_sin_and_v_cos_f16_reduce_large_turns() {
     let sin_shader = build_valu_cs(&[vop1(0x060, 0, vgpr(1))]);
     let cos_shader = build_valu_cs(&[vop1(0x061, 0, vgpr(1))]);
