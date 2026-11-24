@@ -228,6 +228,47 @@ SHA do not validate later code changes.
   Workflow now requires one Cargo target per worktree. A final fresh-target
   integration gate will replace any ambiguous shared-target evidence.
 
+### Wave 4 integrations: 2026-11-24 (28 PRs + 2 lint fixes)
+
+Gate at `2b7cbae1`: both Clippy commands exit 0; workspace 638 passed,
+14 ignored, 0 failed; policy 193 files; `cargo fmt --check` 0 differing files.
+
+Held or rejected in this wave, with the reason:
+- #959 names the GPU from adapter 0 but reads capabilities from the default
+  device, so a report can describe two different adapters; it also needs a
+  `Win32_Foundation` feature it does not declare.
+- #997 closes the caller's WinHTTP handle when `WinHttpSetOption` fails, where
+  the real API just returns 12018 and keeps it.
+- #986's copy path reads title memory at submit, so an earlier same-list UAV
+  write is not seen.
+- #575 does not compile (`Mutex<Vec<ID3D12Resource>>` is not `Send`);
+  #608 does not compile and deletes two existing tests; #550 ships an unproven
+  fix for #71; #481 deletes `ci.yml` and the `--all-features` clippy run;
+  #540/#545 add a second, divergent lint gate on `stable` rather than the
+  pinned toolchain.
+
+Corrections made while integrating (each would have been a silent defect):
+- #169 expected 16_16_UNORM `0xFFFF` to load as f16 `1.0`; the hardware here
+  returns `0x3BFF` (0.99951). The case now uses `0x8000` (0.5), which is exact.
+- #319's early return handed out a missed tick without recording it, letting
+  two waits share one tick. It now takes the tick with `fetch_max`.
+- #92's test hunks collided structurally with five merged test modules; only
+  its production hunks are taken, with the coverage re-expressed as two
+  GPU-run tests.
+- #963's nested `if` collapsed (`size == 0` folded into the pattern).
+- #1010's doc comment described only the kernel path; the file now has two.
+
+### ISA gaps closed: 2026-11-24
+
+- `v_add_nc_i32`, `v_sub_nc_i32`, `v_mul_lo_i32` (VOP3 0x37f/0x376/0x16b) and
+  the signed 16-bit add/sub now lower. PR #92's production hunks; verified on
+  the host GPU with signed-overflow cases (`0x7FFF_FFFF + 1`, the all-ones
+  add) rather than left to the author's word.
+- The full ISA sweep (all 1,232 opcode names against every mnemonic in
+  `emit/`) found that most remaining gaps already have queued PRs upstream, so
+  the cheaper path is reviewing those heads rather than writing new patches.
+  Recorded as GAP-003.
+
 ### Wave 3 integrations: 2026-11-24 (overnight session)
 
 Inventory refreshed mid-session: 501 open PRs (61 new since the first snapshot,
@@ -355,6 +396,7 @@ Gate at `312dd157`: both Clippy commands exit 0; workspace 596 passed,
 | ID | Evidence/location | Impact/priority | Dependencies | Acceptance criteria | Status |
 | --- | --- | --- | --- | --- | --- |
 | GAP-001 | `ir.rs:725` refuses `s_movrel*`; ISA 46/47/48/49/73 | Low: uniform code with a dynamic SGPR index | None | Either a select chain over the candidate SGPRs, or a documented decision to keep refusing | open |
+| GAP-003 | ISA sweep: 942 of 1,232 opcode names are never mentioned in `emit/`, and the analyst found queued PRs covering most simple ALU gaps | Medium: translation coverage | Those PR heads | Each is either integrated or refused with a stated ISA reason | open |
 | GAP-002 | PR #645's tests (`root_srv_two_term_v_add_co_and_v_lshl_add`, `root_srv_loop_carried_pointer_induction_phi`) do not exist at HEAD | Medium: two-term and loop-carried-phi descriptor addresses refused | Its branch conflicts with the SSA-sum cache from #139 across 18 hunks | Both shaders lower and produce correct descriptor handles | open |
 
 ### Wave 2 integrations: 2026-11-24 (21 PRs)
