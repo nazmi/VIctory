@@ -1005,3 +1005,60 @@ operand-width over, so taking it would have re-introduced it.
 
 Gate at `67ff16d4`: fmt 0 differing, both Clippy commands exit 0. Census runs
 recorded above; the workspace test suite is re-run before any handoff claim.
+
+### Wave 7 batch two: the 1,043-PR snapshot: 2026-11-25
+
+Inventory refreshed to **1,043** open PRs (21 new since the 1,024 snapshot;
+#1672 and #1634 closed, #1689 merged upstream — and we already had #1689, so
+its closure cost nothing). Three workers ran in isolated worktrees against
+disjoint crates, each with its own target directory, each told to review the
+whole diff and to report a skipped test as skipped.
+
+**HLE: four in, one refused.**
+
+| Local commit | PR | Subject |
+| --- | --- | --- |
+| `a067e991` | #1717 | HLE: the retail console ID has the documented dotted form |
+| `da106558` | #1719 | DirectStorage: clear the factory out pointer on failure |
+| `df16f7d2` | #1720 | report APU heap allocations that fail |
+| `df359c78` | #1726 | DirectStorage: read a page list naming page 0 again before failing |
+
+Refused: **#1729**. It rejects `v0` as a version folder, which breaks the
+integrated `a_folder_named_like_a_version_does_not_remove_the_save`, and it
+returns the newest *readable* version where HEAD deliberately returns
+`InvalidData` for a malformed newest one — that is a silent rollback to an
+older save replacing a clean refusal. A policy change, so it needs the two
+HEAD tests rewritten deliberately, not a cherry-pick. Its "stray folder"
+behaviour is already present at HEAD (`v01`, `v+1` rejected).
+
+Checked by hand rather than taken on trust: `#1720` keeps the commit-limit
+message byte-identical (`"VIctory: Windows commit limit reached while
+committing {len} bytes of {what}: {error}.\n"`), because a worker could
+plausibly have dropped the caller's `what`.
+
+**Shader: two in as a pair, two duplicates, one held.**
+
+| Local commit | PR | Subject |
+| --- | --- | --- |
+| `08c99ea0` | #1712 | Shaders: support line-topology mesh shaders |
+| `574c7310` | #1718 | Shaders: mask mesh primitive vertex indices to 9 bits |
+
+`#1712` must travel with `#1718`: alone, an edge-flagged corner yields a host
+vertex index of 512 or more while `max_vertices` is at most 256. Both are in,
+in that order.
+
+Duplicates, each verified rather than assumed: `#1732` (f32_to_half NaN and
+nearest-even) is `67b24154` locally, and the PR's test bodies run clean against
+the tree's function; `#1733` (helper lane reads its own value) is `694c4944`,
+and the select is at `lower.rs:5387-5396`. A previous worker claimed a
+duplicate wrongly (#1685), so both were re-checked in the source.
+
+Held: **#1716**, the bitcode optimiser. It is called unconditionally from
+`Shader::finish`, and on a probe branch it fails two of 233 tests — dxil.dll
+rejects one module with "Flags must match usage", and another already-working
+shader's emitted IR changes. That is a shader that validated becoming one the
+validator refuses; it stays out. The probe branch `scratch/1716-probe` is
+evidence only.
+
+Gate at `98e720e0`: fmt 0 differing, both Clippy commands exit 0, workspace
+**709 passed / 16 ignored / 0 failed**, policy 200 files.
