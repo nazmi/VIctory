@@ -10,7 +10,7 @@ Inventory membership and preliminary workflow labels do not imply completed revi
 |---|---|---|---|---|
 | [#710](https://github.com/Marvisak/VIctory/pull/710) | Shaders, GPU: read through addresses passed in two root constants (stacked on #489) | `a5a40bc40675c3fe63d808c3726f0eff54d71f4c` | false | queued-unreviewed |
 | [#709](https://github.com/Marvisak/VIctory/pull/709) | Shaders: structured access through a root SRV or UAV uses its raw view (stacked on #294) | `e50ed36cd9e20ded929b3bb23a53a8b54b9a21bb` | false | queued-unreviewed |
-| [#708](https://github.com/Marvisak/VIctory/pull/708) | fix(config): keep the data directory out of the cache root | `a9698e7488ab2a7d1bdbf0e6b736ab689b6b2ca2` | false | review-passed-tests-pending |
+| [#708](https://github.com/Marvisak/VIctory/pull/708) | fix(config): keep the data directory out of the cache root | `a9698e7488ab2a7d1bdbf0e6b736ab689b6b2ca2` | false | integrated-local |
 | [#707](https://github.com/Marvisak/VIctory/pull/707) | Shaders: lower tbuffer_store_format_* that need no conversion | `7ca777e555435962d724766dfc5f267c9bc44dde` | false | queued-unreviewed |
 | [#705](https://github.com/Marvisak/VIctory/pull/705) | Fix/typed image atomic int64 | `4efabc45ca5d29a260833c502c96030d08e4956c` | false | queued-unreviewed |
 | [#704](https://github.com/Marvisak/VIctory/pull/704) | Shaders, GPU: unknown-stride buffers are read through a raw view of the same bytes (stacked on #193) | `7f77ccad8a95c13cd9d7e86a418bdf1ce9bbea53` | false | queued-unreviewed |

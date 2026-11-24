@@ -79,6 +79,7 @@ Rows below record completed decisions; unreviewed items remain queued.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | [#689](https://github.com/Marvisak/VIctory/pull/689) | e1c3557bdc67f31e13d04a00d2d9ad1ebc65c7e3 | Standalone test correction | Coordinator and economical worker: 1/1 file reviewed, no skips/findings; clock permits skipped ticks | 5 targeted repeats; both Clippy gates; full workspace 342 passes, 6 ignored; policy, all exit 0 | integrated-local; reproduced baseline failure fixed without changing production code | f137b30 | 2026-11-24 |
 | [#699](https://github.com/Marvisak/VIctory/pull/699) | db0257e2c133ccdcb4605f0a90bcf03cb1847cad | Superseded by merged #612 | Compared tip algorithm and synthetic two-join test to upstream; 3dd467c is ancestor of ffe310e, and same regression exists at lower.rs:7301 | Existing regression included in passing 342-test workspace run | already-present; no import of mixed branch or duplicate fix | Upstream 3dd467c | 2026-11-24 |
+| [#708](https://github.com/Marvisak/VIctory/pull/708) | a9698e7488ab2a7d1bdbf0e6b736ab689b6b2ca2 | Narrow save/cache default fix; differs from JMAN's broader config rewrite | Coordinator plus medium worker, 1/1 file reviewed, no skips/blockers | Source core 15 passes and Clippy; integrated both Clippy gates, workspace 346 passes/6 ignored, policy all exit 0 | integrated-local; no automatic migration of old XDG saves; VICTORY_DATA_DIR retains old data location with this change | 79381585 | 2026-11-24 |
 
 ## Issue outcomes
 
@@ -149,3 +150,66 @@ SHA do not validate later code changes.
 - Known pre-existing formatting drift remains; no unrelated reformatting.
 - Full local logs are outside the repository under the maintenance-data
   `candidate-689` directory. Source head rechecked before integration.
+
+### PR #708 integration validation: 2026-11-24
+
+- Accepted code SHA: `79381585d7c5ec37409cb76aa6b1ae72eed6a35e`.
+- Source reviewed/tested at `a9698e7`; original author and source attribution
+  retained. Exact current source head rechecked before fast-forwarding.
+- Both required workspace Clippy commands: exit 0.
+- `cargo test --workspace --locked`: exit 0; 346 harness passes, 6 ignored.
+- `cargo xtask policy`: exit 0; 159 files accepted in candidate scope.
+- Same unavailable compiler/reference coverage as the preceding validation.
+- External full logs: maintenance-data `candidate-708` directory.
+
+### JMAN730 cleanup-fork assessment: 2026-11-24
+
+- User requested duplicate checking and conditional integration only after
+  verification. Pinned source: `JMAN730/victory` main at
+  `179d34e2ba0de1357d040a8e996e6787148a1b04`.
+- Compared with upstream `ffe310e`: 275 additional commits, 184 changed
+  files, 34,578 insertions and 2,414 deletions. This is a broad behavioral
+  integration, not just formatting cleanup.
+- Full historical patch analysis of all 445 inventoried PRs: 103 fully
+  represented in nonmerge patch history, 20 partially represented, 320 with
+  no matching individual patch, 2 with changed heads. These are duplication
+  leads, not acceptance or resulting-behavior proof. See
+  [maintenance-jman-duplicates.md](maintenance-jman-duplicates.md).
+- Source #449 and #480 have exact patch-history matches in the fork; #363's
+  empty-config handling and #406's incomplete-relocation handling are also
+  recognizable by inspection. #708 overlaps but its fallback paths differ.
+  #396's optional-header bounds check is absent. Do not mark all of these
+  PRs integrated just because they occur in the fork's history.
+- Economical worker tested clean exact fork source on MSVC with a fresh
+  external target: default Clippy, all-features Clippy, workspace tests,
+  policy, formatting, and release build all exit 0. Workspace reported
+  794 harness passes and 18 ignored; four compiler-dependent differential
+  tests returned early. No live title execution or playability claim.
+- Additional conditional build check FAILED: with a zero-byte synthetic
+  D3D12Core.dll placeholder in a separate outside target's debug/D3D12,
+  `cargo test -p victory-shader --test resource_tracking --no-run --locked`
+  exits 101 with LNK2001 for D3D12SDKPath and D3D12SDKVersion, then LNK1120.
+  No placeholder DLL or probe executable was run. The build script exports
+  symbols for external tests that the library defines only under cfg(test).
+- Review also identifies capped sampler-table remapping using view-sized
+  (32-byte) offsets instead of sampler-sized (16-byte) offsets, plus a
+  changed XDG cache root/legacy-save compatibility concern and title-specific
+  watchdog behavior placed in the generic loader. Details and reproduction
+  status belong in the assessment report.
+- Core/PE/loader review covered 24/24 assigned files, including excluded
+  tests. GPU/shader review found blockers but does not establish a completed
+  184-file review. Other fork changes remain unaccepted.
+- Disposition: defer wholesale fork integration; preserve existing tested
+  integrations and continue with bounded, independently verified changes.
+  No JMAN source commit has been merged into the user's integration branch.
+- Follow-up WARP regression reproduced the capped sampler error through
+  real State::tables: 1 executed test fails, exit 101; actual remap 57344,
+  expected 28672. Host initialization succeeded; no title inputs or command
+  list submissions. Test exists only in a separate scratch worktree.
+- Full assessment, both reproduced blockers, normal check results, coverage,
+  and acceptance conditions: [maintenance-jman-review.md](maintenance-jman-review.md).
+- Review tracking models: inventory/patch mapping and all verification used
+  economical gpt-6.1-sol at low reasoning; focused core/loader review used
+  that model at medium reasoning. Complex GPU/shader review was escalated
+  to gpt-6.2-sol at high reasoning. Coordinator independently checked the
+  relevant code paths and directed deterministic reproductions.
