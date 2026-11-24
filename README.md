@@ -147,10 +147,16 @@ victory census [paths...] [--missing] [--strict]
 victory lib-exports <import.lib> [--list]
 victory shader-info [paths...] [--verbose] [--disasm]
 victory translate [paths...] [--validate] [--pipelines] [--list] [--jobs N]
+victory translate [paths...] --descriptor-failures [--jobs N]
 victory run <exe> [--execute] [--unimplemented trap|zero] [--strict]
             [--console series-x|series-s] [-- <title arguments>]
 victory config
 ```
+
+Use `--descriptor-failures` to count programs that resource tracking refuses because
+a first-lane descriptor comes from a computed VGPR. Each row groups the defining
+opcode of the first varying word, the opcode or source class of every varying
+word in descriptor order, and the source classes of all descriptor words.
 
 Logging: `VICTORY_LOG=victory_loader=trace,info` (a release build logs
 info and above).

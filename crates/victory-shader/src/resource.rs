@@ -150,7 +150,40 @@ pub fn track(
     stage: HwStage,
     lanes: Option<&Structured>,
 ) -> Result<Resources, ShaderError> {
+    track_impl(p, layout, stage, lanes, None)
+}
+
+/// Opcode and source categories at a computed per-lane descriptor refusal.
+/// The categories contain no code bytes, registers, or addresses.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DescriptorFailure {
+    pub opcode: &'static str,
+    pub varying_opcodes: Vec<&'static str>,
+    pub sources: Vec<&'static str>,
+}
+
+/// Track resources and collect the first computed descriptor refusal, if any.
+pub fn track_with_descriptor_failure(
+    p: &Program,
+    layout: &[RootParam],
+    stage: HwStage,
+    lanes: Option<&Structured>,
+) -> (Result<Resources, ShaderError>, Option<DescriptorFailure>) {
+    let failure = std::cell::Cell::new(None);
+    let result = track_impl(p, layout, stage, lanes, Some(&failure));
+    (result, failure.into_inner())
+}
+
+fn track_impl(
+    p: &Program,
+    layout: &[RootParam],
+    stage: HwStage,
+    lanes: Option<&Structured>,
+    failure: Option<&std::cell::Cell<Option<DescriptorFailure>>>,
+) -> Result<Resources, ShaderError> {
     let mut t = Tracer::new(p, layout, stage, lanes)?;
+    t.failure = failure;
+
     let mut out = Resources {
         params: p
             .inputs
@@ -309,6 +342,8 @@ struct Tracer<'a> {
     rpo: Vec<usize>,
     /// Address sums already traced, indexed by SSA value.
     sums: Vec<Option<Sum>>,
+    failure: Option<&'a std::cell::Cell<Option<DescriptorFailure>>>,
+
 }
 
 /// What lanes are known to satisfy: each [`Bool`] where its flag is set,
@@ -371,6 +406,8 @@ impl<'a> Tracer<'a> {
             lanes,
             rpo,
             sums: Vec::new(),
+            failure: None,
+
         };
         t.origin = t.propagate_copies(n)?;
         Ok(t)
@@ -1200,7 +1237,30 @@ impl<'a> Tracer<'a> {
             Some(n) if n.starts_with("global_load") || n.starts_with("flat_load") => {
                 "a descriptor read from the first lane of a partial or mixed load"
             }
-            Some(_) => "a descriptor read from the first lane of computed VGPRs",
+            Some(opcode) => {
+                if let Some(failure) = self.failure {
+                    let sources = words
+                        .iter()
+                        .map(|&word| self.descriptor_word_source(word))
+                        .collect();
+                    let varying_opcodes = words
+                        .iter()
+                        .filter_map(|&word| match word {
+                            Term::Value(v) if self.varies(word) => Some(self.def(v).map_or_else(
+                                || self.descriptor_word_source(word),
+                                |inst| inst.name(),
+                            )),
+                            _ => None,
+                        })
+                        .collect();
+                    failure.set(Some(DescriptorFailure {
+                        opcode,
+                        varying_opcodes,
+                        sources,
+                    }));
+                }
+                "a descriptor read from the first lane of computed VGPRs"
+            }
         })
     }
 
@@ -1217,6 +1277,31 @@ impl<'a> Tracer<'a> {
             return Err("a global load");
         };
         self.flat_address(inst, addr.as_ref(), saddr.as_ref(), *offset)
+    }
+
+    fn descriptor_word_source(&self, word: Term) -> &'static str {
+        let Term::Value(v) = word else {
+            return "constant";
+        };
+        if self.inputs[v.0 as usize].is_some() {
+            return "input";
+        }
+        let Some(inst) = self.def(v) else {
+            return "phi";
+        };
+        let name = inst.name();
+        if name.starts_with("s_load") {
+            "scalar-load"
+        } else if name.starts_with("global_load") || name.starts_with("flat_load") {
+            "global-load"
+        } else if name.starts_with("buffer_load") {
+            "buffer-load"
+        } else if name.starts_with("ds_read") {
+            "lds-read"
+        } else {
+            "computed"
+        }
+
     }
 
     /// Dwords of `global_load_dword*` that line up: `first..` of one load,
@@ -1571,7 +1656,8 @@ impl<'a> Tracer<'a> {
                 } else {
                     continue;
                 };
-                let Some(matched) = mask(inst.write(Reg::S(code)), inst.write(Reg::S(code + 1))) else {
+                let Some(matched) = mask(inst.write(Reg::S(code)), inst.write(Reg::S(code + 1)))
+                else {
                     continue;
                 };
                 if meet(&[reach, (selected, true), (matched, false)]) {
@@ -2581,6 +2667,57 @@ pub(crate) mod tests {
         let p = crate::ir::build(&code, wave64, 256).unwrap();
         let layout = [param(Table, 0, 1), param(Table, 1, 1)];
         track(&p, &layout, HwStage::Cs, lanes(&p).as_ref())
+    }
+
+    #[test]
+    fn computed_descriptor_failure_reports_only_opcode_and_word_sources() {
+        let build = |words: &[u32]| {
+            let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            crate::ir::build(&code, false, 256).unwrap()
+        };
+        let layout = [param(Table, 0, 1), param(Table, 1, 1)];
+        let control = build(WATERFALL_FETCHED_WAVE32);
+        let (result, info) =
+            track_with_descriptor_failure(&control, &layout, HwStage::Cs, lanes(&control).as_ref());
+        assert!(result.is_ok());
+        assert_eq!(info, None);
+
+        let mut words = WATERFALL_FETCHED_WAVE32.to_vec();
+        let first_read = words.iter().position(|&w| w == 0x7E18_0504).unwrap();
+        // An OR with zero preserves the descriptor bits but introduces
+        // a defining arithmetic instruction for its first word.
+        words[first_read] = 0x7E18_0510; // v_readfirstlane_b32 s12, v16
+        words.insert(first_read - 1, 0x3820_0880); // v_or_b32 v16, 0, v4
+        let second_read = words.iter().position(|&w| w == 0x7E1A_0505).unwrap();
+        words[second_read] = 0x7E1A_0511; // v_readfirstlane_b32 s13, v17
+        words.insert(first_read - 1, 0x3A22_0A80); // v_xor_b32 v17, 0, v5
+        let p = build(&words);
+        let lanes = lanes(&p);
+        let (result, info) =
+            track_with_descriptor_failure(&p, &layout, HwStage::Cs, lanes.as_ref());
+        let plain = track(&p, &layout, HwStage::Cs, lanes.as_ref()).unwrap_err();
+        assert_eq!(result.unwrap_err(), plain);
+        assert!(matches!(
+            plain,
+            ShaderError::Unsupported {
+                what: "a descriptor read from the first lane of computed VGPRs",
+                ..
+            }
+        ));
+        assert_eq!(
+            info,
+            Some(DescriptorFailure {
+                opcode: "v_or_b32",
+                varying_opcodes: ["v_or_b32", "v_xor_b32"]
+                    .into_iter()
+                    .chain(["global_load_dwordx4"; 6])
+                    .collect(),
+                sources: ["computed"; 2]
+                    .into_iter()
+                    .chain(["global-load"; 6])
+                    .collect(),
+            })
+        );
     }
 
     #[test]

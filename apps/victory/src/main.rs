@@ -81,6 +81,9 @@ enum Command {
         /// Print one line per program and outcome.
         #[arg(long)]
         list: bool,
+        /// Report only aggregate computed descriptor failure categories.
+        #[arg(long, conflicts_with_all = ["validate", "pipelines", "list"])]
+        descriptor_failures: bool,
         /// Worker threads (default: every logical core).
         #[arg(long)]
         jobs: Option<usize>,
@@ -151,8 +154,9 @@ fn main() -> Result<()> {
             validate,
             pipelines,
             list,
+            descriptor_failures,
             jobs,
-        } => translate::run(paths, validate, pipelines, list, jobs),
+        } => translate::run(paths, validate, pipelines, list, descriptor_failures, jobs),
         Command::Run {
             exe,
             unimplemented,
