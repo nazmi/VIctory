@@ -150,7 +150,7 @@ pub fn track(
     stage: HwStage,
     lanes: Option<&Structured>,
 ) -> Result<Resources, ShaderError> {
-    let t = Tracer::new(p, layout, stage, lanes)?;
+    let mut t = Tracer::new(p, layout, stage, lanes)?;
     let mut out = Resources {
         params: p
             .inputs
@@ -279,6 +279,7 @@ enum Term {
 
 /// A 32-bit sum: optional root parameter (as its first dword), constant,
 /// optional computed term.
+#[derive(Clone, Copy)]
 struct Sum {
     base: Option<Value>,
     offset: u32,
@@ -299,6 +300,8 @@ struct Tracer<'a> {
     lanes: Option<&'a Structured>,
     /// Reverse-postorder index per block.
     rpo: Vec<usize>,
+    /// Address sums already traced, indexed by SSA value.
+    sums: Vec<Option<Sum>>,
 }
 
 /// What lanes are known to satisfy: each [`Bool`] where its flag is set,
@@ -360,6 +363,7 @@ impl<'a> Tracer<'a> {
             origin: Vec::new(),
             lanes,
             rpo,
+            sums: Vec::new(),
         };
         t.origin = t.propagate_copies(n)?;
         Ok(t)
@@ -471,7 +475,7 @@ impl<'a> Tracer<'a> {
         ))
     }
 
-    fn sum(&self, t: Term) -> Sum {
+    fn sum(&mut self, t: Term) -> Sum {
         let v = match t {
             Term::Const(c) => {
                 return Sum {
@@ -482,12 +486,16 @@ impl<'a> Tracer<'a> {
             }
             Term::Value(v) => v,
         };
+        let index = v.0 as usize;
+        if let Some(&Some(sum)) = self.sums.get(index) {
+            return sum;
+        }
         let dynamic = Sum {
             base: None,
             offset: 0,
             dynamic: Some(v),
         };
-        if let Some(reg) = self.inputs[v.0 as usize] {
+        if let Some(reg) = self.inputs[index] {
             return match self.param_of(reg) {
                 Some((_, 0)) => Sum {
                     base: Some(v),
@@ -512,14 +520,23 @@ impl<'a> Tracer<'a> {
             return dynamic;
         };
         let (x, y) = (self.sum(a), self.sum(b));
-        if x.base.is_some() && y.base.is_some() || x.dynamic.is_some() && y.dynamic.is_some() {
-            return dynamic;
+        let sum =
+            if x.base.is_some() && y.base.is_some() || x.dynamic.is_some() && y.dynamic.is_some() {
+                dynamic
+            } else {
+                Sum {
+                    base: x.base.or(y.base),
+                    offset: x.offset.wrapping_add(y.offset),
+                    dynamic: x.dynamic.or(y.dynamic),
+                }
+            };
+        // The operands' origins are settled before tracing starts. Every
+        // use of this value can reuse its sum, including an opaque result.
+        if index >= self.sums.len() {
+            self.sums.resize(index + 1, None);
         }
-        Sum {
-            base: x.base.or(y.base),
-            offset: x.offset.wrapping_add(y.offset),
-            dynamic: x.dynamic.or(y.dynamic),
-        }
+        self.sums[index] = Some(sum);
+        sum
     }
 
     /// The `s_getpc_b64` writing `lo` as its low dword.
@@ -582,7 +599,7 @@ impl<'a> Tracer<'a> {
     /// A global memory address: an SGPR pair plus a VGPR offset, or a VGPR
     /// pair.
     fn flat_address(
-        &self,
+        &mut self,
         inst: &Inst,
         addr: Option<&Operand>,
         saddr: Option<&Operand>,
@@ -626,7 +643,7 @@ impl<'a> Tracer<'a> {
 
     /// The address `lo` and `hi` hold, plus `extra` (an instruction's
     /// immediate and offset register).
-    fn address(&self, lo: Term, hi: Term, extra: Sum) -> Result<Address, &'static str> {
+    fn address(&mut self, lo: Term, hi: Term, extra: Sum) -> Result<Address, &'static str> {
         let s = self.sum(lo);
         if s.dynamic.is_some() && extra.dynamic.is_some() {
             return Err("an address with two computed terms");
@@ -737,7 +754,7 @@ impl<'a> Tracer<'a> {
     }
 
     fn smem_address(
-        &self,
+        &mut self,
         inst: &Inst,
         base: &Operand,
         offset: i32,
@@ -762,7 +779,7 @@ impl<'a> Tracer<'a> {
     }
 
     /// The source of the descriptor operand `op` of `inst`, in block `at`.
-    fn descriptor(&self, inst: &Inst, op: &Operand, at: usize) -> Result<Source, &'static str> {
+    fn descriptor(&mut self, inst: &Inst, op: &Operand, at: usize) -> Result<Source, &'static str> {
         let Operand::Scalar { code, dwords } = *op else {
             return Err("a descriptor not in SGPRs");
         };
@@ -778,7 +795,7 @@ impl<'a> Tracer<'a> {
     /// The source of a descriptor's words; `joins` are the phi blocks
     /// being resolved, `known` holds in every lane that reads them.
     fn classify(
-        &self,
+        &mut self,
         words: &[Term],
         joins: &mut Vec<usize>,
         known: &mut Known,
@@ -851,19 +868,19 @@ impl<'a> Tracer<'a> {
     /// Words that phis of one block join, traced per predecessor (words
     /// defined before the join hold on every edge).
     fn phi(
-        &self,
+        &mut self,
         words: &[Term],
         joins: &mut Vec<usize>,
         known: &mut Known,
     ) -> Result<Option<Source>, &'static str> {
-        let phi_of = |w: &Term| match *w {
-            Term::Value(v) => self.phis[v.0 as usize],
-            Term::Const(_) => None,
-        };
-        let Some((block, _)) = words.iter().find_map(phi_of) else {
+        let Some((block, _)) = words.iter().find_map(|&w| self.phi_site(w)) else {
             return Ok(None);
         };
-        if words.iter().filter_map(phi_of).any(|(b, _)| b != block) {
+        if words
+            .iter()
+            .filter_map(|&w| self.phi_site(w))
+            .any(|(b, _)| b != block)
+        {
             return Err("a descriptor joined in several blocks");
         }
         if joins.contains(&block) {
@@ -879,9 +896,9 @@ impl<'a> Tracer<'a> {
             .map(|j| {
                 let edge: Vec<Term> = words
                     .iter()
-                    .map(|w| match phi_of(w) {
+                    .map(|&w| match self.phi_site(w) {
                         Some((_, i)) => self.origin(phis[i].args[j]),
-                        None => *w,
+                        None => w,
                     })
                     .collect();
                 self.classify(&edge, joins, known)
@@ -894,7 +911,7 @@ impl<'a> Tracer<'a> {
     /// Words that `s_cselect` (or `s_cmov`) picks by one SCC value, traced
     /// per outcome (other words are the same for both).
     fn select(
-        &self,
+        &mut self,
         words: &[Term],
         joins: &mut Vec<usize>,
         known: &mut Known,
@@ -980,6 +997,13 @@ impl<'a> Tracer<'a> {
             dword(src.get(1)?)?
         };
         Some((inst.read(Reg::Scc)?, set, clear))
+    }
+
+    fn phi_site(&self, word: Term) -> Option<Site> {
+        match word {
+            Term::Value(v) => self.phis[v.0 as usize],
+            Term::Const(_) => None,
+        }
     }
 
     /// `v` as some other dword with constant bits set.
@@ -1131,7 +1155,7 @@ impl<'a> Tracer<'a> {
     /// picked per lane between such sources, by a lane mask or by the path
     /// the lane took. `known` holds in every lane that accesses them.
     fn per_lane(
-        &self,
+        &mut self,
         words: &[Term],
         joins: &mut Vec<usize>,
         known: &mut Known,
@@ -1173,10 +1197,25 @@ impl<'a> Tracer<'a> {
         })
     }
 
+    /// The address of the `global_load_*` at `site`.
+    fn load_address(&mut self, site: Site) -> Result<Address, &'static str> {
+        let inst = self.inst(site);
+        let Fields::Flat {
+            addr,
+            saddr,
+            offset,
+            ..
+        } = &inst.fields
+        else {
+            return Err("a global load");
+        };
+        self.flat_address(inst, addr.as_ref(), saddr.as_ref(), *offset)
+    }
+
     /// Dwords of `global_load_dword*` that line up: `first..` of one load,
     /// then the bytes that follow (an image descriptor takes two
     /// `global_load_dwordx4`).
-    fn fetched(&self, words: &[Term], known: &Known) -> Result<Option<Source>, &'static str> {
+    fn fetched(&mut self, words: &[Term], known: &Known) -> Result<Option<Source>, &'static str> {
         let at = |w: &Term| -> Option<(Site, usize)> {
             let Term::Value(v) = *w else { return None };
             let site = self.defs[v.0 as usize]?;
@@ -1194,24 +1233,11 @@ impl<'a> Tracer<'a> {
         let Some(sites) = words.iter().map(at).collect::<Option<Vec<_>>>() else {
             return Ok(None);
         };
-        let address = |site: Site| {
-            let inst = self.inst(site);
-            let Fields::Flat {
-                addr,
-                saddr,
-                offset,
-                ..
-            } = &inst.fields
-            else {
-                return Err("a global load");
-            };
-            self.flat_address(inst, addr.as_ref(), saddr.as_ref(), *offset)
-        };
         let (load, first) = sites[0];
-        let a0 = address(load)?;
+        let a0 = self.load_address(load)?;
         for (k, &(site, dword)) in sites.iter().enumerate() {
             self.runs(site, known)?;
-            let a = address(site)?;
+            let a = self.load_address(site)?;
             let want = a0.offset.wrapping_add(4 * (first + k) as u32);
             if (a.param, a.dynamic) != (a0.param, a0.dynamic)
                 || a.offset.wrapping_add(4 * dword as u32) != want
@@ -1228,7 +1254,7 @@ impl<'a> Tracer<'a> {
     /// Words that `v_cndmask_b32` picks by one lane mask, traced per outcome
     /// (other words are the same for both).
     fn lane_select(
-        &self,
+        &mut self,
         words: &[Term],
         joins: &mut Vec<usize>,
         known: &mut Known,
@@ -1326,19 +1352,19 @@ impl<'a> Tracer<'a> {
     /// block's phi joins an arm's dwords with what lanes that skipped the
     /// arm held before, which only they read).
     fn lane_phi(
-        &self,
+        &mut self,
         words: &[Term],
         joins: &mut Vec<usize>,
         known: &mut Known,
     ) -> Result<Option<Source>, &'static str> {
-        let phi_of = |w: &Term| match *w {
-            Term::Value(v) => self.phis[v.0 as usize],
-            Term::Const(_) => None,
-        };
-        let Some((block, _)) = words.iter().find_map(phi_of) else {
+        let Some((block, _)) = words.iter().find_map(|&w| self.phi_site(w)) else {
             return Ok(None);
         };
-        if words.iter().filter_map(phi_of).any(|(b, _)| b != block) {
+        if words
+            .iter()
+            .filter_map(|&w| self.phi_site(w))
+            .any(|(b, _)| b != block)
+        {
             return Err("a descriptor joined in several blocks");
         }
         if joins.contains(&block) {
@@ -1357,7 +1383,7 @@ impl<'a> Tracer<'a> {
         // one the join does not reach.
         for w in words {
             if let Term::Value(v) = *w
-                && phi_of(w).is_none()
+                && self.phi_site(*w).is_none()
                 && let Some((d, _)) = self.defs[v.0 as usize]
                 && (d == block || self.reaches(block, d))
             {
@@ -1385,9 +1411,9 @@ impl<'a> Tracer<'a> {
             let arg = if lanes.bools.meet(known) {
                 let edge: Vec<Term> = words
                     .iter()
-                    .map(|w| match phi_of(w) {
+                    .map(|&w| match self.phi_site(w) {
                         Some((_, i)) => Term::Value(phis[i].args[j]),
-                        None => *w,
+                        None => w,
                     })
                     .collect();
                 self.per_lane(&edge, joins, known).map(Some)
