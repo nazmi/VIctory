@@ -228,6 +228,135 @@ SHA do not validate later code changes.
   Workflow now requires one Cargo target per worktree. A final fresh-target
   integration gate will replace any ambiguous shared-target evidence.
 
+### Wave 3 integrations: 2026-11-24 (overnight session)
+
+Inventory refreshed mid-session: 501 open PRs (61 new since the first snapshot,
+4 closed/merged upstream). Integrating a moving target, so each candidate's
+head is re-read before use.
+
+Notable dispositions this wave:
+- **Duplicates resolved by choosing one.** #939 and #972 add the same sandbox-id
+  minimum to the same function; #939 landed (earlier, and its test also proves
+  the buffer and `used` survive a refusal). #957 is a strict subset of #975's
+  swizzle assertions; #975 landed.
+- **#17 (fmt CI gate) needed #692 (workspace fmt) first.** The gate is red on
+  an unformatted tree, so the two landed together, in that order.
+- **#190 removes the Direct3D/Fxc binding** because its clamp shader is now
+  emitted directly, but the depth-bounds test helper (added after that branch
+  forked) compiles synthetic HLSL with D3DCompile. The binding stays for tests
+  only, with a comment saying why.
+- **#415 fixed a real bug and required a cache migration**: the shader cache's
+  root-type codes had drifted from `RootType::from_raw`, so codes above 6
+  decoded into the wrong variant. MAGIC went VSH1 -> VSH2 so stale entries are
+  not reused, and a test pins that a VSH1 entry is rejected.
+- **#644 (hard merge, 8 conflict hunks)** — see its own section below.
+- **Rejected/held with evidence**: #481 deletes ci.yml and drops the
+  `--all-features` clippy run; #474 admits negative LOD bounds D3D12 forbids;
+  #493 drops draws when no view heap is bound, with no test; #504 reports a
+  D24S8 depth plane as R32_TYPELESS; #515's new tests reuse probe addresses
+  against a process-global journal; #486 emits an export when its copy failed;
+  #489 assumes spill dword 0 is user SGPR 16 without checking; #232 replaces CI
+  with 1,149 unverifiable lines; #454 patches code with no bounds check; #505
+  is an unowned Wine harness CI never runs.
+
+Fixes made to the tree during this wave (each caught by the gate or by a test):
+- two missing `SAFETY` comments and a collapsible `if` from integrated PRs;
+- a `#[cfg(test)]` lost in a hand merge, which also left the scan tests racing
+  the one test that sets `VICTORY_EMIT_DUMP` (now serialised by a module lock);
+- a duplicated `[dev-dependencies]` table from the same merge;
+- the `dstorage` lane-count flake, serialised on the shared scheduler.
+
+Gate at `312dd157`: both Clippy commands exit 0; workspace 596 passed,
+12 ignored, 0 failed; policy 184 files; `cargo fmt --check` 0 differing files.
+
+| Local commit | Subject |
+| --- | --- |
+| `65c02b0e` | HLE: report the host's commit headroom before the title starts |
+| `b8e51047` | XAsync: a canceled pending call's work touches neither freed state nor the next call |
+| `49d9f393` | CLI: add AVX2 pre-flight CPU check before executing titles |
+| `ee4a9ae6` | GPU: copy-back puts back only what shaders wrote, in two more cases |
+| `0739961f` | GPU: every object answers for IUnknown |
+| `99eb9327` | feat(gpu): answer format-info and virtual-address feature queries |
+| `4d566336` | docs: say rumble is unverified in a live title |
+| `6d897c25` | Policy: resolve cache paths inside Windows AppContainer |
+| `db44521f` | Link victory.exe with a 16 MiB default thread stack |
+| `c051b5da` | GPU: seek directly to private data on final release |
+| `9a6d9e67` | GPU: the depth bounds test reaches the host |
+| `65e35978` | GPU: keep the frame wait's tick for the diagnostics log |
+| `ae526377` | GPU: skip unmapped regions after a failed bulk read into host memory |
+| `d819400b` | Run indirect mesh dispatches through indirect execution |
+| `e420fd36` | GPU: skip texture-to-buffer readback when host texel size differs |
+| `b0d2e84f` | Census: report directory traversal failures |
+| `4502afa1` | Query allocation type directly when guarding mapped memory |
+| `a4023b67` | GPU: build the indirect-argument clamp with our own writer |
+| `4148054b` | style: run cargo fmt across the workspace; fix clippy field-reassign-with-default |
+| `7ea49a89` | CI: check the formatting with cargo fmt |
+| `d6d02744` | CI: check the formatting with cargo fmt |
+| `e28ee842` | Isolate the write-watch fixture from reused virtual addresses |
+| `4a8b49ec` | HLE: XSystemGetXboxLiveSandboxId refuses a buffer under 16 bytes |
+| `22e61383` | HLE: exercise XGSuggestSwizzleMode TEXTURE_1D swizzle branch |
+| `5541a92b` | Shaders: keep the v_cvt_f16_u16/i16 test to integers f16 holds exactly |
+| `e9aecbd8` | GPU: use native root type codes in the shader cache |
+| `56252f48` | policy: fail when staged content cannot be read |
+| `9a68bad9` | CLI: show runtime hashes in shader listing |
+| `69c467b7` | GPU: name the user-data kind `root`, not `kind`, in op_text |
+| `66a3c2c1` | Metal: add native Apple Silicon GPU conformance harness |
+| `abfa4d3f` | Census: deduplicate PE imports without hint |
+| `42c80756` | App: reject wrapping RVAs in VICTORY_WATCH |
+| `9b703856` | diagnostics: preserve page fault baseline on query failure |
+| `a5ccbffd` | GPU diagnostics: pick capture frames by draw count |
+| `2f0a1740` | GPU diagnostics: show one of the title's render targets in the window |
+| `56961c3b` | App: enforce ensure_outside_repo on configured paths while exempting CLI paths |
+| `b1bafdaa` | lint: satisfy the gate after the wave's integrations |
+| `b9dd41c8` | fix(cli): move scan test modules after production items |
+| `b33b0fed` | GPU: spill oversized host root signatures' user data to root CBVs |
+| `312dd157` | Shaders: v_swap_b32 with a non-VGPR source is a move into the destination |
+
+### PR #644 hard merge: 2026-11-24
+
+- PR: "GPU: spill oversized host root signatures' user data to root CBVs"
+  (nathanbzrr), head `6fa53a51`, 989 insertions across two files.
+- It introduces a `UserDataBind` enum (32-bit constants vs a spilled root CBV),
+  `fit_root_signature`/`root_signature_cost`, per-draw scratch memory, and four
+  tests including a host dispatch that reads two distinct spilled values.
+- HEAD had since gained: the `table_failed` draw-drop guard with its
+  power-of-two warning, root CBV/SRV view lists, and the diagnostics `op_text`
+  naming user data as table/const. All of these survive; each symbol was
+  compared before/after by occurrence count, none decreased.
+- Eight conflict hunks were resolved semantically. The PR's test modules were
+  folded into the existing ones (a second `mod tests` in a file does not
+  compile — the same defect already fixed upstream in #129 and seen again in
+  #616), `test_shader` moved to file scope under `cfg(test)`, and three
+  merge-cut braces/semicolons were restored.
+- Verified: the PR's four new tests pass on this host's GPU; workspace 596
+  passed, 12 ignored, 0 failed; both Clippy commands, fmt, policy all clean.
+
+### Shader ISA work: 2026-11-24
+
+- Read AMD's RDNA 2 ISA (local PDF, `pdftotext -layout`) and enumerated every
+  opcode name the tree's opcode tables carry against the names the lowerer
+  mentions: 942 of 1,232 are never named, concentrated in VOPC (190), DS (146),
+  MIMG (86), SMEM (81) and MUBUF (73). That count overstates the gap — many are
+  handled by family prefixes (`ds_read*`, `buffer_load*`, `image_*`) — so the
+  real gap list is the lowerer's own refusal reasons.
+- `v_swap_b32` was implemented for VGPR/VGPR but refused every other source
+  form, and had no test. Per the ISA (101 V_SWAP_B32: `tmp = D.u; D.u = S0.u;
+  S0.u = tmp`), only a VGPR can be written back, so an SGPR, inline constant or
+  literal source makes it a move into the destination. Implemented, with a
+  host-GPU test covering both registers after a swap and the constant form.
+- Scalar M0-relative moves (`s_movrels_b32`, `s_movreld_b32`, `s_movrelsd_2_b32`)
+  stay refused deliberately: DXIL has no dynamically indexed scalars, so the
+  register number must be a compile-time constant. Lowering them would need a
+  select chain over every candidate SGPR; that is a design decision, not an
+  oversight, and is recorded as GAP-001 below.
+
+### Confirmed gaps
+
+| ID | Evidence/location | Impact/priority | Dependencies | Acceptance criteria | Status |
+| --- | --- | --- | --- | --- | --- |
+| GAP-001 | `ir.rs:725` refuses `s_movrel*`; ISA 46/47/48/49/73 | Low: uniform code with a dynamic SGPR index | None | Either a select chain over the candidate SGPRs, or a documented decision to keep refusing | open |
+| GAP-002 | PR #645's tests (`root_srv_two_term_v_add_co_and_v_lshl_add`, `root_srv_loop_carried_pointer_induction_phi`) do not exist at HEAD | Medium: two-term and loop-carried-phi descriptor addresses refused | Its branch conflicts with the SSA-sum cache from #139 across 18 hunks | Both shaders lower and produce correct descriptor handles | open |
+
 ### Wave 2 integrations: 2026-11-24 (21 PRs)
 
 Same procedure as wave 1. Two integration lessons this wave, both caught by the
