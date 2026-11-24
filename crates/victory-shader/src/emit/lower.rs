@@ -1113,6 +1113,7 @@ impl<'a> Lower<'a> {
             let val = match reg {
                 Reg::S(_) if self.params.contains_key(&v) => continue, // loaded on first use
                 Reg::S(n) => match io_inputs.get(&v) {
+                    Some(Input::GroupInfo) => self.group_info(v),
                     Some(&input) => self.input(input),
                     // Above the SGPRs the hardware initializes, a register
                     // holds what the last wave left, so no program depends
@@ -1135,6 +1136,62 @@ impl<'a> Lower<'a> {
             self.vals.insert(v, val);
         }
         Ok(())
+    }
+
+    /// The thread-group info SGPR (`COMPUTE_PGM_RSRC2.TG_SIZE_EN`): bits 5:0
+    /// hold the waves in the group, bit 31 marks the first wave and bits
+    /// 16:6 an ordered-append term (LLVM AMDGPUUsage, "Initial Kernel
+    /// Execution State"). Only the wave count is derived, so the value is
+    /// given only to programs that read nothing but bits 5:0 of it.
+    fn group_info(&mut self, v: Value) -> Val {
+        let low = |o: &Operand| match *o {
+            Operand::Literal(k) => Some(k),
+            Operand::Const(c @ 128..=192) => Some(u32::from(c) - 128),
+            _ => None,
+        };
+        // The entry value reaches readers through phis and plain copies, so
+        // follow both before looking at who reads it.
+        let mut held = HashSet::from([v]);
+        loop {
+            let n = held.len();
+            for b in &self.x.p.blocks {
+                for p in &b.phis {
+                    if p.args.iter().any(|a| held.contains(a)) {
+                        held.insert(p.value);
+                    }
+                }
+                for i in &b.insts {
+                    if i.name() == "s_mov_b32" && i.reads.iter().any(|r| held.contains(&r.1)) {
+                        held.extend(i.writes.iter().map(|w| w.1));
+                    }
+                }
+            }
+            if held.len() == n {
+                break;
+            }
+        }
+        let only_count = self.x.p.blocks.iter().flat_map(|b| &b.insts).all(|i| {
+            if i.name() == "s_mov_b32" || !i.reads.iter().any(|r| held.contains(&r.1)) {
+                return true;
+            }
+            let Fields::Sop { src, .. } = &i.fields else {
+                return false;
+            };
+            // The mask may come first (as ACO writes it) or second.
+            match i.name() {
+                "s_and_b32" => src.iter().take(2).filter_map(low).any(|m| m & !0x3F == 0),
+                "s_bfe_u32" => src
+                    .get(1)
+                    .and_then(low)
+                    .is_some_and(|k| (k & 31) + (k >> 16 & 0x7F) <= 6),
+                _ => false,
+            }
+        });
+        let Some([x, y, z]) = self.s.threads.filter(|_| only_count) else {
+            return Val::Missing("the thread-group info SGPR above the wave count");
+        };
+        let waves = (x * y * z).div_ceil(self.wave());
+        Val::I32(self.s.m.i32(waves))
     }
 
     fn input(&mut self, input: Input) -> Val {
