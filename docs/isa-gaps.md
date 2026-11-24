@@ -171,3 +171,24 @@ real remaining gaps — and it is not a claim that the BVH builder works yet.
 same refusal table), which is what the fork predicted: only the BVH builder's
 compute programs are spilled. Both halves of that measurement matter.
 
+## Probed: why "structured buffer of unknown stride" fires
+
+`stride < 4 || !stride.is_multiple_of(4)` is the whole check at
+`emit/lower.rs:7803`, `7886` and the load arm. A probe that printed the
+used-resource table for the 171 refusing programs shows the tables mix entries
+whose stride is a real element size (4, 8, 12, 32, 48, 64, 68, 128, 288, 2048)
+with entries whose stride is `0` (every Cbv, and the immediate samplers) or
+`1`.
+
+So the refusal is not a missing field: the stride is parsed and usually
+correct. It fires when the access's descriptor resolves to an entry the
+compiler recorded with stride 0 or 1 — a byte-addressed buffer recorded as 1,
+or a table entry the access matched that is not the one it meant. That is a
+matching question in `used_kind` (`lower.rs:4259`, which picks the table entry
+with the largest `table_offset_dwords` not past the read dword), not a parsing
+one.
+
+Not yet confirmed: which entry the failing access resolved to in each case. The
+probe printed whole tables, not the chosen entry. Making the refusal name the
+chosen entry's stride and table offset would settle it in one run — the same
+approach that turned the top world-load refusal from a guess into a fix.
