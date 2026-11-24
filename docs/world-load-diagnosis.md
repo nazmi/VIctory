@@ -59,6 +59,53 @@ The refusals are therefore not cosmetic. Ranked by how often the run hit them:
 | descriptor read only as data | 2 | 3% |
 | five singletons (see the log) | 5 | 7% |
 
+## A second suspect: system memory, not shaders
+
+The title's own crash report contains numbers worth reading twice:
+
+```
+system.memory.free   26472      (KB)
+system.memory.total  31233028   (KB, ~32 GB)
+memory.load_percent  99
+```
+
+Twenty-six megabytes free of 32 GB, one percent short of nothing. Our own
+check at startup said `commit 12.5 GiB available of 63.5 GiB (first boot asks
+6.1 GiB)` — enough to pass the gate, which only knows about the first boot's
+6.1 GiB mapping, not about the world.
+
+That matters because of how this project presents title memory to the GPU.
+`crates/victory-gpu/src/shadow.rs` states it plainly: *"a buffer a draw uses
+gets a persistent host buffer of its size on first use"*. Every buffer the
+world's draws read therefore exists twice — once as the title's memory, once as
+our host copy. The README already records a measured world peak of about
+**17.7 GB** committed. Double it for the shadows and a 32 GB machine has
+nothing left, which is exactly the state the crash report describes.
+
+So there are two plausible causes and they are not exclusive:
+
+1. compute shaders refused (see below), leaving work half-done; and
+2. the process running out of physical memory while duplicating every drawn
+   buffer, so an allocation fails and the title dereferences what it did not
+   get.
+
+The second would explain a write to address 0 at least as well as the first.
+It is also testable without touching the title: run with a larger page file, or
+close other applications, and see whether the run gets past the loading screen.
+
+### The candidate fix, and why it is not merged yet
+
+PR #693's branch (`gpu/default-vram-shadow-buffers`) moves these copies from
+system memory to default-heap VRAM, with pooled staging — which attacks the
+duplication directly. It is **not** in this branch: the version reviewed left
+uploaded shadows in `COPY_SOURCE` with no transition back to `COMMON`, an
+invalid state for the UAV and vertex binds that follow. Its current head adds
+hardening commits (staging failures, overlapping uploads, watch cleanup) but
+still needs that transition fixed and a run to prove it.
+
+That is the single highest-value change for loading the world, and it needs
+care rather than speed.
+
 ## The shape of the top refusal
 
 Two facts from the log change what the 31 refusals mean:
@@ -104,6 +151,10 @@ assembled into the 2×2 quad or a mip-specific view. Left out on purpose.
 
 ## What to do next, in order
 
+0. **Try the cheap memory experiment first.** Close other applications and give
+   Windows a larger paging file, then run the same command. The crash report
+   says 26 MB free of 32 GB; if a single variable changes the outcome, memory
+   is the cause and the shadow duplication above is the thing to fix.
 1. **Re-run with the new refusal text.** The 31 prologue refusals now say
    which case they are. If they read "an SGPR that is no root parameter", our
    layout is not covering a register the shader uses — a parameter's SGPR span
