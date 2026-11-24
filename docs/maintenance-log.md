@@ -946,3 +946,62 @@ and 06:00-10:00 UTC, Monday-Friday, excluding Chinese public holidays;
 everything else is off-peak. Each pass records the UTC time it started
 against that window. The wave-6 continuation ran 21:17-22:00 UTC on a
 Tuesday, off-peak; the next peak opens 2026-11-25 01:00 UTC.
+
+### Wave 7: the top world-load refusal is fixed, and the count is honest
+
+The goal this session was to determine which of the three cases the 31 compute
+prologue refusals were, and to fix the verified cause. That is done.
+
+**The refusals were located.** They are not in `shaders.rpf` and not in any of
+the six other archives: they are in `xboxbvhbuilder.dll`. `victory translate`
+on that DLL reports 52 compute programs and **52 identical refusals at offset
+0x30** — the runtime's top refusal, reproduced offline on no GPU.
+
+**The cause is spilled user data.** These programs' root signatures need more
+user-data dwords than `COMPUTE_PGM_RSRC2` grants, so the hardware keeps no
+parameters in registers: dwords 0/1 hold a table pointer and parameter N lives
+at byte 4*(N-16) of that table. Our `resource.rs` mapped every parameter to
+user SGPRs, so the register held a pointer — an address whose base is no
+declared parameter. `spill.rs` (taken from the fork, integrated as `c56c7b86`)
+rewrites those loads before tracking.
+
+**Measured, not asserted.** Same machine, same inputs, binaries differing only
+by that module:
+
+| | `xboxbvhbuilder.dll` | `shaders.rpf` |
+| --- | --- | --- |
+| before | 52 × "an address in an SGPR before the first root parameter" | 26,084 programs, refusal table R |
+| after | **0** × that refusal; 22 "an address not from a root parameter", 18 "a root UAV or typed root view", 7 "a select on an untracked mask", 3 "a descriptor read only as data", 1 "a global memory write", 1 "a whole-wave section step" | 26,084 programs, refusal table **R, identical** |
+
+The top refusal is gone and the programs now fail later on real remaining
+gaps. `shaders.rpf` being identical is the other half of the evidence: only the
+BVH builder's programs are spilled, exactly as the fork predicted.
+
+**A process error worth recording.** Every census run earlier in this session
+used `./target/release/victory.exe` while building into `CARGO_TARGET_DIR`, so
+it ran a stale binary — and one conclusion ("the change fires on none of the
+26,084 programs") was drawn from that and had to be withdrawn. The rule now:
+build and run the same path, and check the binary's timestamp when a result
+looks like a no-op.
+
+**A second measurement error, mine.** I wrote that the 31 refused shaders were
+unreachable offline. They were reachable; I had simply never pointed the census
+at the DLL. The doc is corrected rather than quietly amended.
+
+Also integrated this wave, each reviewed and tested in an isolated worktree:
+`9c40c87a` #1687 (image_gather4_c_lz and offset variants), `2ab062db` #1693
+(TFE via CheckAccessFullyMapped), `d2c125d9` #1673 (XTaskQueueTerminate scopes
+to its own tasks), `2b3b64a1` #1676 (census names a mesh-less host),
+`50256643` #1669 (straddling 16-bit loads at offset 3), `ca82cd6e` #1691
+(shadow-buffer states), `a28134d2` #1677 (window stand-in), `d4dc96dd` #1688,
+`ec2aa220` #1689, `8516122d` #1696, `dc2e9231` and `67ff16d4` from the fork,
+`7180c20e` stencil diagnostics.
+
+**Refused with evidence:** #1699. Its `v_mad_*16` reads its third operand with
+`half_src` while src0/src1 use `half_int_src`, so an inline float constant
+there is read as a packed f16 — a probe on this GPU measured 15366 where the
+hardware's low half is 0. That is the same defect class #1668 fixed one
+operand-width over, so taking it would have re-introduced it.
+
+Gate at `67ff16d4`: fmt 0 differing, both Clippy commands exit 0. Census runs
+recorded above; the workspace test suite is re-run before any handoff claim.
