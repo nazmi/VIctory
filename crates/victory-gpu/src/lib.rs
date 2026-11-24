@@ -53,6 +53,8 @@ mod switch;
 #[cfg(windows)]
 mod texture;
 #[cfg(windows)]
+mod title_copy;
+#[cfg(windows)]
 mod watch;
 
 #[cfg(windows)]
