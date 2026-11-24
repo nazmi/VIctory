@@ -5345,6 +5345,18 @@ impl<'a> Lower<'a> {
                     118,
                     &[a],
                 );
+                if !self.s.pixel {
+                    return int(self, r);
+                }
+                // Wave operations leave helper lanes out: in a loop over
+                // the first lane's value (a waterfall loop not proven to
+                // be one), a quad's helper lanes left on their own would
+                // never see their value and spin to the loop limit (#908).
+                // They take their own, as the first lane of their own.
+                let helper = self
+                    .s
+                    .op(c, "isHelperLane.i1", Attr::ReadOnly, self.s.t.i1, 221, &[]);
+                let r = self.s.m.select(c, helper, a, r);
                 int(self, r)
             }
             _ => {
