@@ -97,17 +97,28 @@ pub(crate) fn save(n: u64, width: u32, height: u32, pitch: usize, bgra: bool, ro
     save_as(&format!("frame-{n}"), width, height, pitch, bgra, rows);
 }
 
+/// The source pixel/row for output coordinate `twice / 2`, clamped to the
+/// extent. Zero extents have no source byte; callers skip those frames.
+fn source_coord(twice: usize, extent: u32) -> usize {
+    twice.min(extent.saturating_sub(1) as usize)
+}
+
 /// Saves 8-bit RGBA or BGRA rows as `<name>.png`, at half size.
 fn save_as(name: &str, width: u32, height: u32, pitch: usize, bgra: bool, rows: &[u8]) {
     let Some(folder) = folder() else { return };
+    // A zero-sized present has no pixels to sample; `extent - 1` in the
+    // clamping below would underflow, and the rows can be empty.
+    if width == 0 || height == 0 {
+        return;
+    }
     let (w, h) = ((width / 2).max(1), (height / 2).max(1));
     // Filter byte 0 per row, then RGB of every other pixel of every other row.
     let mut raw = Vec::with_capacity((w as usize * 3 + 1) * h as usize);
     for y in 0..h as usize {
         raw.push(0);
-        let row = &rows[(2 * y).min(height as usize - 1) * pitch..];
+        let row = &rows[source_coord(2 * y, height) * pitch..];
         for x in 0..w as usize {
-            let p = &row[(2 * x).min(width as usize - 1) * 4..][..3];
+            let p = &row[source_coord(2 * x, width) * 4..][..3];
             if bgra {
                 raw.extend([p[2], p[1], p[0]]);
             } else {
@@ -785,5 +796,14 @@ mod tests {
         // Fired at the present of frame 2850: frames 2851 to 2853.
         let picked: Vec<u64> = (2840..2860).filter(|&n| t.picks(n, 2850)).collect();
         assert_eq!(picked, [2851, 2852, 2853]);
+    }
+
+    #[test]
+    fn half_size_capture_handles_zero_extent() {
+        assert_eq!(super::source_coord(0, 0), 0);
+        assert_eq!(super::source_coord(6, 4), 3);
+        assert_eq!(super::source_coord(2, 4), 2);
+        // No pixels, so nothing to read or write, even with empty rows.
+        super::save(1, 0, 0, 0, false, &[]);
     }
 }
