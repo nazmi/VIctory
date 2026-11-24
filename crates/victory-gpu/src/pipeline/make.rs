@@ -262,12 +262,26 @@ static QUEUES: (Mutex<[VecDeque<Arc<Pending>>; 2]>, Condvar) = (
     Condvar::new(),
 );
 
-/// Hands `p` to the workers (half the logical processors, 2 to 8), started
-/// on first use.
+/// Pipeline workers: half the logical processors, 2 to 8, unless
+/// `VICTORY_PIPELINE_WORKERS` names a count (1 to 64). The driver's compile
+/// of the world's largest programs bounds a first run with an empty
+/// pipeline library; on a 20-thread CPU, 16 workers emptied the queue about
+/// four times as fast as the default 8.
+fn worker_count(asked: Option<&str>, processors: usize) -> usize {
+    asked
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map_or((processors / 2).clamp(2, 8), |n| n.clamp(1, 64))
+}
+
+/// Hands `p` to the workers ([`worker_count`]), started on first use.
 fn queue(p: Arc<Pending>, now: bool) {
     static WORKERS: OnceLock<usize> = OnceLock::new();
     let workers = *WORKERS.get_or_init(|| {
-        let n = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(2, 8));
+        let n = worker_count(
+            std::env::var("VICTORY_PIPELINE_WORKERS").ok().as_deref(),
+            std::thread::available_parallelism().map_or(4, |n| n.get()),
+        );
+        tracing::info!(workers = n, "host pipeline workers");
         (0..n)
             .filter(|i| {
                 let spawned = std::thread::Builder::new()
@@ -387,5 +401,17 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(matches!(p.made.get(), Some(None)));
+    }
+    #[test]
+    fn worker_count_takes_the_switch_within_bounds() {
+        use super::worker_count;
+        assert_eq!(worker_count(None, 20), 8);
+        assert_eq!(worker_count(None, 2), 2);
+        assert_eq!(worker_count(Some("16"), 20), 16);
+        assert_eq!(worker_count(Some(" 3 "), 20), 3);
+        // Zero workers would leave the queue with no producer; 64 is the cap.
+        assert_eq!(worker_count(Some("0"), 20), 1);
+        assert_eq!(worker_count(Some("999"), 20), 64);
+        assert_eq!(worker_count(Some("many"), 20), 8);
     }
 }
