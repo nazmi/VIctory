@@ -233,12 +233,6 @@ extern "system" fn node_count(_: This) -> u32 {
     1
 }
 
-/// `GetDeviceRemovedReason`: this device is alive. The host device's own
-/// removal is reported by `host` (every submission is checked).
-extern "system" fn not_removed(_: This) -> HRESULT {
-    S_OK
-}
-
 /// Feature query 2: the highest of the requested feature levels we support.
 #[repr(C)]
 struct FeatureLevels {
@@ -413,7 +407,6 @@ static FUNCTIONS: Table<160> = {
     f[34] = object::ignore as *const (); // 0x110 MakeResident: memory is always resident
     f[35] = object::ignore as *const (); // 0x118 Evict: memory is never evicted
     f[36] = fence::create as *const (); // 0x120
-    f[37] = not_removed as *const (); // 0x128
     f[38] = resource::copyable_footprints as *const (); // 0x130
     f[39] = query::create as *const (); // 0x138
     f[40] = object::ignore as *const (); // 0x140 SetStablePowerState: a profiling setting
@@ -468,13 +461,6 @@ mod tests {
         );
         let missing = slot::<extern "system" fn() -> HRESULT>(device, 0xf0);
         assert_eq!(missing(), E_NOTIMPL);
-    }
-
-    #[test]
-    fn a_live_device_is_not_reported_removed() {
-        let device = super::device();
-        let reason = slot::<extern "system" fn(This) -> HRESULT>(device, 0x128);
-        assert_eq!(reason(device), S_OK);
     }
 
     #[test]
