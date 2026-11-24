@@ -1385,3 +1385,43 @@ failure; a full re-run passed 685/0 and the failing test's name was lost to
 output filtering. It is recorded as unreproduced, not dismissed. The GPU suite
 on this host has a documented intermittent abort, so a one-off is plausible —
 but "plausible" is not proof, and a later sweep should watch for it.
+
+### Wave 12: a lowering, an allocator bug, and two refusals on evidence: 2026-11-25
+
+Pushed at `d3e27170`. Workspace **688 passed / 0 failed** with the 10
+documented GPU skips; fmt and both Clippy gates clean.
+
+**#1480 accepted with one part refused, on hardware evidence.** The a16 image
+address split (whole dwords for offset/bias/compare, two per gradient) matches
+`gfx10/fields.rs`, and the per-direction gradient padding is right. But the
+PR also changed how the bias operand is decoded — and the existing hardware
+test `image_addresses_of_16_bits_and_clamps` fails with it (`0x3c00` reads as
+1.0, the test wants 2.0), because the bias is f16 in the low half, not f32.
+That component was dropped; the rest was taken. This is the pattern worth
+keeping: the PR is right about most of its change and wrong about one operand,
+and only a device test distinguishes them.
+
+**#1359 is a different fold from #1282, and both are now in.** #1282 folds a
+branch whose target is the next instruction; #1359 folds a branch whose two
+successors are the same block. Neither replaces the other.
+
+**#1055's severity was overstated, and #368's comment was too.** A worker noted
+that this tree's own inventory has #725 open — `glc` loads are not globally
+coherent — so a comment claiming "D3D12 already guarantees UAV coherence" is
+not something this project can assert. The claim was narrowed to what is
+actually true: the invalidation is a shortcut, and #725 remains open.
+
+**#974 is a real allocator bug.** The descriptor-slot search window never
+wrapped past its cursor, so a free run crossing the cursor could not be found
+even when one existed. Fixed with a non-wrapping guard and a test that fails
+without it.
+
+**#1392 refused.** Its premise does not hold on this tree: the patch is stale
+(its context no longer exists), it targets the "no host pipeline" drop path
+where nothing was ever bound, a UAV hazard barrier performs no state transition
+so it cannot repair the missing `ensure_state` it blames, and it duplicates
+`indirect.rs::uav_barrier`. Two of the three other drop paths remain
+unbarriered — recorded as a gap, not silently fixed by this PR.
+
+Also confirmed already present: #535, #574, #570, #1404 (obsolete — the test it
+patched no longer exists upstream).
