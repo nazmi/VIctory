@@ -83,12 +83,20 @@ whitespace normalisation:
 
 | Branch | Added lines absent from the integrated branch |
 | --- | --- |
-| `codex/agent-fork-small-1a4ffce1` | 0 |
-| `codex/agent-verify-next-892d57be` | 0 |
-| `codex/agent-verify-hle-457cb189` | 0 |
-| `codex/agent-verify-gpu-c7d011be` | 0 |
 | `codex/agent-fork-mid-c461d326` | 0 |
+| `codex/agent-fork-small-1a4ffce1` | 0 |
+| `codex/agent-verify-gpu-c7d011be` | 0 |
+| `codex/agent-verify-hle-457cb189` | 0 |
+| `codex/agent-verify-next-892d57be` | 0 |
+| `codex/agent-verify-shader-0c8f256a` | 0 |
 | `codex/agent-verify-shadow-0971b878` | 1, justified below |
+| `codex/agent-wave7-gpu-19c5ba52` | 0 |
+| `codex/agent-wave7-hle-1a8d6496` | 0 |
+| `codex/agent-wave7-shader-7a64a47a` | 0 |
+
+All ten worker branches present in this repository were audited, not only the
+six that were in question; the four others (including all three wave-7
+branches) also report 0.
 
 The single flagged line is
 
