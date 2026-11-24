@@ -66,3 +66,23 @@ tried to interleave them is preserved outside the repository at
 compiled in an isolated scratch, but had 40 semantic errors in the combined
 tree, mostly `requested`/`d`/`original` bindings that the two designs name
 differently.
+
+## Documented switches the merge dropped (found 2026-11-25)
+
+Four switches are still listed in `README.md` but no longer exist in the code,
+so setting them silently does nothing. Each was verified by grepping the
+workspace for the variable name and by checking the README row:
+
+| Switch | README | Code | Recovery commit | Cost to re-apply |
+| --- | --- | --- | --- | --- |
+| `VICTORY_MODE=<w>x<h>` | documented | **re-applied here** | `5c61aa48` | small: `dxgi.rs` parse + `mode_size()` |
+| `VICTORY_SKIP_WAVE64` | documented | **absent** | `13008f98` | medium: needs a diagnostics-only `wave64` field on `Shader`, which upstream restructured |
+| `VICTORY_SHOW_TARGET` | documented | **absent** | `98231399`, `fed90c5d`, `49ab3532` | large: three commits over `capture.rs`, which upstream replaced |
+| `VICTORY_CAPTURE_DRAWS` | documented | **absent** | see `git log --all --grep=VICTORY_CAPTURE_DRAWS` | large: same file |
+
+Also lost, not documented but user-visible: `VICTORY_COPY_THREADS` (with the
+threaded copy-back) and the shadow-buffer state tracking.
+
+**Until these are re-applied the README overstates the build.** That is a
+documentation defect, not a code one, and it is recorded here rather than
+quietly deleted from the README so the features are not forgotten.
