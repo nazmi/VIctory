@@ -151,6 +151,9 @@ extern "system" fn create_monitor(
     _queue: *const c_void,
     out: *mut *const c_void,
 ) -> HRESULT {
+    if id.is_null() || out.is_null() {
+        return xasync::E_INVALIDARG;
+    }
     if !is_ours(id) {
         return NO_PACKAGE;
     }
@@ -207,6 +210,9 @@ extern "system" fn find_availability(
     selectors: *const c_void,
     out: *mut u32,
 ) -> HRESULT {
+    if id.is_null() || out.is_null() {
+        return xasync::E_INVALIDARG;
+    }
     if !is_ours(id) {
         return NO_PACKAGE;
     }
@@ -222,6 +228,9 @@ extern "system" fn change_order(
     count: u32,
     selectors: *const c_void,
 ) -> HRESULT {
+    if id.is_null() {
+        return xasync::E_INVALIDARG;
+    }
     if !is_ours(id) {
         return NO_PACKAGE;
     }
@@ -271,6 +280,9 @@ extern "system" fn estimate_download(
     bytes: *mut u64,
     confirm: *mut bool,
 ) -> HRESULT {
+    if id.is_null() || bytes.is_null() {
+        return xasync::E_INVALIDARG;
+    }
     if !is_ours(id) {
         return NO_PACKAGE;
     }
@@ -293,6 +305,9 @@ extern "system" fn uninstall_chunks(
     count: u32,
     selectors: *const c_void,
 ) -> HRESULT {
+    if id.is_null() {
+        return xasync::E_INVALIDARG;
+    }
     if !is_ours(id) {
         return NO_PACKAGE;
     }
@@ -575,6 +590,14 @@ mod tests {
         assert_eq!(
             find(this, c"dlc".as_ptr(), 0, none, &mut availability),
             NO_PACKAGE
+        );
+        assert_eq!(
+            find(this, std::ptr::null(), 0, none, &mut availability),
+            xasync::E_INVALIDARG
+        );
+        assert_eq!(
+            find(this, ours.as_ptr().cast(), 0, none, std::ptr::null_mut()),
+            xasync::E_INVALIDARG
         );
 
         type Progress_ = extern "system" fn(This, *const c_void, *mut Progress);
