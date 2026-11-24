@@ -131,7 +131,7 @@ fn cached(
     (converter.translate)(container)
 }
 
-const MAGIC: &[u8; 4] = b"VSH1";
+const MAGIC: &[u8; 4] = b"VSH2";
 const STAGES: [HwStage; 8] = [
     HwStage::Ls,
     HwStage::Hs,
@@ -143,15 +143,19 @@ const STAGES: [HwStage; 8] = [
     HwStage::Cs,
 ];
 
+/// The raw root type values, as the console shader stores them. Keep these
+/// in step with `RootType::from_raw` in `victory-shader`: a second numbering
+/// here used to overflow for `Other(u32::MAX)` and decoded native values
+/// into the wrong variant.
 fn root_code(r: RootType) -> u32 {
     match r {
         RootType::Constants => 0,
         RootType::Descriptor => 1,
-        RootType::Table => 2,
-        RootType::ImmediateSampler => 3,
-        RootType::ResourceHeap => 4,
-        RootType::SamplerHeap => 5,
-        RootType::Other(x) => 6 + x,
+        RootType::Table => 3,
+        RootType::ImmediateSampler => 4,
+        RootType::ResourceHeap => 5,
+        RootType::SamplerHeap => 6,
+        RootType::Other(x) => x,
     }
 }
 
@@ -159,11 +163,11 @@ fn root_type(code: u32) -> RootType {
     match code {
         0 => RootType::Constants,
         1 => RootType::Descriptor,
-        2 => RootType::Table,
-        3 => RootType::ImmediateSampler,
-        4 => RootType::ResourceHeap,
-        5 => RootType::SamplerHeap,
-        x => RootType::Other(x - 6),
+        3 => RootType::Table,
+        4 => RootType::ImmediateSampler,
+        5 => RootType::ResourceHeap,
+        6 => RootType::SamplerHeap,
+        x => RootType::Other(x),
     }
 }
 
@@ -324,7 +328,7 @@ mod tests {
 
         // A damaged entry is a miss, translated and stored again.
         for e in walk(dir.path()) {
-            std::fs::write(e, b"VSH1 broken").unwrap();
+            std::fs::write(e, b"VSH2!").unwrap();
         }
         assert_eq!(cached(&cache, &build, container, translate), Ok(shader()));
         assert_eq!(runs.load(Ordering::Relaxed), 3);
@@ -334,6 +338,25 @@ mod tests {
         // Failures are not stored.
         let fail = |_: &[u8]| Err::<HostShader, _>("unsupported".to_owned());
         assert!(cached(&cache, &build, b"other", fail).is_err());
+    }
+
+    /// The cache must use the same numbers as the console shader: a second
+    /// numbering lost `Other(2)` and overflowed on large unknown values.
+    #[test]
+    fn root_types_round_trip_native_codes() {
+        for (root, code) in [
+            (RootType::Constants, 0),
+            (RootType::Descriptor, 1),
+            (RootType::Other(2), 2),
+            (RootType::Table, 3),
+            (RootType::ImmediateSampler, 4),
+            (RootType::ResourceHeap, 5),
+            (RootType::SamplerHeap, 6),
+            (RootType::Other(u32::MAX), u32::MAX),
+        ] {
+            assert_eq!(root_code(root), code, "{root:?}");
+            assert_eq!(root_type(code), root, "{code:#x}");
+        }
     }
 
     fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
@@ -355,5 +378,9 @@ mod tests {
         assert_eq!(decode(&bytes[..bytes.len() - 1]), None);
         assert_eq!(decode(&[bytes.as_slice(), &[0]].concat()), None);
         assert_eq!(decode(b"VSH0"), None);
+        // An entry from the previous root-type numbering is not decoded.
+        let mut previous = b"VSH1".to_vec();
+        previous.resize(32, 0);
+        assert_eq!(decode(&previous), None);
     }
 }
