@@ -3066,3 +3066,169 @@ fn image_sample_offset_variants_match_d3d12() {
             .unwrap_or_else(|e| panic!("graphics PSO failed for op {op:#x}: {e}"));
     }
 }
+
+/// MTBUF `tbuffer_load_format_{x,xy}` with `offen = 1`, byte offset in `vaddr`,
+/// destination in `vdata`, descriptor in `s[srsrc:srsrc+3]`, `soffset = 0`.
+const fn tbuffer_load_format_offen(
+    op: u8,
+    format: u8,
+    vdata: u8,
+    vaddr: u8,
+    srsrc: u8,
+) -> [u32; 2] {
+    [
+        0xE800_0000 | (format as u32 & 0x7F) << 19 | (op as u32 & 0x7) << 16 | 1 << 12,
+        0x80 << 24
+            | ((op as u32 >> 3) & 1) << 21
+            | ((srsrc as u32 >> 2) & 0x1F) << 16
+            | (vdata as u32) << 8
+            | vaddr as u32,
+    ]
+}
+
+fn run_cases_with_uav_dwords(
+    shader: &HostShader,
+    uav_dwords: u32,
+    cases: &[[u32; 4]],
+    mut check: impl FnMut(&str, usize, [u32; 4], u32),
+) {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ran = 0;
+    for (label, warp) in [("hardware", false), ("warp", true)] {
+        let Ok(host) = Host::new(warp) else {
+            eprintln!("no SM 6.6 {label} device; skipped");
+            continue;
+        };
+        let (root, pso) = host
+            .compute_pipeline(shader)
+            .unwrap_or_else(|e| panic!("{label}: compute_pipeline failed: {e}"));
+        for (i, &inputs) in cases.iter().enumerate() {
+            let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+            for u in &shader.user_data {
+                ud[u.index as usize] = match (u.root, u.slot) {
+                    (RootType::Constants, 0) => inputs[u.dword as usize],
+                    (RootType::Table, 1) => 0,
+                    other => panic!("unexpected user data {other:?}"),
+                };
+            }
+            let out = host
+                .dispatch(
+                    &root,
+                    &pso,
+                    &Dispatch {
+                        roots: vec![(0, Root::Constants(ud))],
+                        views: &[View::RawUav(uav_dwords)],
+                        samplers: &[],
+                        groups: [1, 1, 1],
+                    },
+                )
+                .unwrap_or_else(|e| panic!("{label}: dispatch failed: {e}"));
+            check(label, i, inputs, out[0][0]);
+        }
+        ran += 1;
+    }
+    assert!(ran > 0, "neither hardware nor WARP SM 6.6 device available");
+}
+
+#[test]
+fn tbuffer_16bit_format_loads_handle_dword_straddling_and_tail_bounds() {
+    // 16_UINT (format 11): write two dwords into an 8-byte raw UAV, then read
+    // a 16-bit element at every valid byte offset 0..=6 (offset 3 straddles
+    // dword 0 -> dword 1; offset 6 sits at buffer_end - 2).
+    let mut body_u16 = Vec::new();
+    body_u16.extend_from_slice(&buffer_store_dword(1, 8, 0));
+    body_u16.extend_from_slice(&buffer_store_dword(2, 8, 4));
+    body_u16.extend_from_slice(&tbuffer_load_format_offen(0, 11, 0, 3, 8));
+    let u16_shader = build_valu_cs(&body_u16);
+
+    let d0 = 0x3422_1100u32; // bytes: 00, 11, 22, 34
+    let d1 = 0x7766_5512u32; // bytes: 12, 55, 66, 77
+    let u16_cases: &[([u32; 4], u32)] = &[
+        ([d0, d1, 0, 0], 0x1100),
+        ([d0, d1, 1, 0], 0x2211),
+        ([d0, d1, 2, 0], 0x3422),
+        ([d0, d1, 3, 0], 0x1234), // dword-straddling: byte 3 of d0 + byte 0 of d1
+        ([d0, d1, 4, 0], 0x5512),
+        ([d0, d1, 5, 0], 0x6655),
+        ([d0, d1, 6, 0], 0x7766), // buffer tail (buffer_end - 2)
+    ];
+    let u16_in: Vec<[u32; 4]> = u16_cases.iter().map(|c| c.0).collect();
+    run_cases_with_uav_dwords(&u16_shader, 2, &u16_in, |backend, i, inp, got| {
+        let want = u16_cases[i].1;
+        assert_eq!(
+            got, want,
+            "{backend}: 16_UINT off={} = {got:#06x}, want {want:#06x}",
+            inp[2],
+        );
+    });
+
+    // Exact 4-byte buffer tail: off = 2 (buffer_end - 2) must not touch dword 1.
+    let mut body_tail = Vec::new();
+    body_tail.extend_from_slice(&buffer_store_dword(1, 8, 0));
+    body_tail.extend_from_slice(&tbuffer_load_format_offen(0, 11, 0, 3, 8));
+    let tail_shader = build_valu_cs(&body_tail);
+    run_cases(
+        &tail_shader,
+        &[[0xabcd_ef01, 0, 2, 0]],
+        |backend, _, _, got| {
+            assert_eq!(got, 0xabcd, "{backend}: 16_UINT 4-byte buffer tail off=2");
+        },
+    );
+
+    // 16_SINT (format 12) at straddling offset 3: [0xFE, 0xFF] -> -2 (0xFFFF_FFFE).
+    let mut body_i16 = Vec::new();
+    body_i16.extend_from_slice(&buffer_store_dword(1, 8, 0));
+    body_i16.extend_from_slice(&buffer_store_dword(2, 8, 4));
+    body_i16.extend_from_slice(&tbuffer_load_format_offen(0, 12, 0, 3, 8));
+    let i16_shader = build_valu_cs(&body_i16);
+    run_cases_with_uav_dwords(
+        &i16_shader,
+        2,
+        &[[0xfe00_0000, 0x0000_00ff, 3, 0]],
+        |backend, _, _, got| {
+            assert_eq!(got, 0xffff_fffe, "{backend}: 16_SINT straddle off=3");
+        },
+    );
+
+    // 16_FLOAT (format 13) at straddling offset 3: [0x00, 0x3C] = +1.0f16 -> +1.0f32.
+    let mut body_f16 = Vec::new();
+    body_f16.extend_from_slice(&buffer_store_dword(1, 8, 0));
+    body_f16.extend_from_slice(&buffer_store_dword(2, 8, 4));
+    body_f16.extend_from_slice(&tbuffer_load_format_offen(0, 13, 0, 3, 8));
+    let f16_shader = build_valu_cs(&body_f16);
+    run_cases_with_uav_dwords(
+        &f16_shader,
+        2,
+        &[[0x00aa_bbcc, 0x1122_333c, 3, 0]],
+        |backend, _, _, got| {
+            assert_eq!(
+                got,
+                1.0f32.to_bits(),
+                "{backend}: 16_FLOAT straddle off=3 = {got:#010x}",
+            );
+        },
+    );
+
+    // 8_8_UINT (format 18, tbuffer_load_format_xy op=1) at straddling offset 3:
+    // loads v5 = byte 3 of d0 (0x34), v6 = byte 0 of d1 (0x12); pack (v6 << 16) | v5.
+    let mut body_8_8 = Vec::new();
+    body_8_8.extend_from_slice(&buffer_store_dword(1, 8, 0));
+    body_8_8.extend_from_slice(&buffer_store_dword(2, 8, 4));
+    body_8_8.extend_from_slice(&tbuffer_load_format_offen(1, 18, 5, 3, 8));
+    // v_lshl_or_b32 v0, v6, 16, v5 (VOP3 0x36f)
+    body_8_8.extend_from_slice(&vop3(0x36f, 0, vgpr(6), 0x80 + 16, vgpr(5)));
+    let u8_8_shader = build_valu_cs(&body_8_8);
+    run_cases_with_uav_dwords(
+        &u8_8_shader,
+        2,
+        &[[d0, d1, 3, 0], [d0, d1, 2, 0]],
+        |backend, i, inp, got| {
+            let want = if i == 0 { 0x0012_0034 } else { 0x0034_0022 };
+            assert_eq!(
+                got, want,
+                "{backend}: 8_8_UINT off={} = {got:#010x}, want {want:#010x}",
+                inp[2],
+            );
+        },
+    );
+}

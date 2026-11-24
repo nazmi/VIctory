@@ -4070,13 +4070,29 @@ impl<'a> Lower<'a> {
                 .collect()
         };
         let words = if total < 32 {
-            // A byte or half inside the dword that holds it.
+            // A byte or half inside the dword that holds it; a 16-bit element
+            // at byte offset 3 straddles into the next dword.
             let (not3, three) = (self.s.m.i32(!3), self.s.m.i32(3));
             let at = self.s.m.bin(c, Bin::And, off, not3);
             let w = load(self, at, 1)[0];
             let byte = self.s.m.bin(c, Bin::And, off, three);
             let sh = self.s.m.bin(c, Bin::Shl, byte, three);
-            vec![self.s.m.bin(c, Bin::LShr, w, sh)]
+            let lo = self.s.m.bin(c, Bin::LShr, w, sh);
+            if total == 16 {
+                // Re-read `at` when not straddling so a tail load at
+                // `buffer_end - 2` never touches past the buffer.
+                let straddles = self.s.m.cmp(c, pred::EQ, byte, three);
+                let four = self.s.m.i32(4);
+                let next = self.s.m.bin(c, Bin::Add, at, four);
+                let at2 = self.s.m.select(c, straddles, next, at);
+                let w2 = load(self, at2, 1)[0];
+                let eight = self.s.m.i32(8);
+                let hi = self.s.m.bin(c, Bin::Shl, w2, eight);
+                let merged = self.s.m.bin(c, Bin::Or, lo, hi);
+                vec![self.s.m.select(c, straddles, merged, lo)]
+            } else {
+                vec![lo]
+            }
         } else {
             load(self, off, total / 32)
         };
