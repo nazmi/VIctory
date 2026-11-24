@@ -123,6 +123,22 @@ assembled into the 2×2 quad or a mip-specific view. Left out on purpose.
    GPU-side fix exists in PR #704, which is large and stacked, but the refusal
    itself is probably a tracking gap that could be closed in the lowerer.
 
+## Secondary observations from the same run
+
+Three GPU-side warnings appear once each, in the world, and none of them is
+explained away:
+
+- `view the host does not allow unordered=true format=53 flags=2` — a UAV view
+  was requested on a format the host refuses to create as unordered.
+- `buffer view not on an element of its host copy offset=20968080 element=32`
+- `unordered buffer view not on an element of its host copy offset=98679456
+  element=20`
+
+The last two say a buffer view's offset does not land on an element boundary of
+its host copy. That is the kind of mismatch that produces wrong data rather
+than a refusal, so it is worth chasing once the refusals are down: a shader can
+happily read shifted structure fields and then take a wild branch.
+
 ## Honest limits
 
 - One run, one machine (Ryzen 9 7940HS, Radeon 780M, Windows 10.0.22631). No
@@ -133,5 +149,11 @@ assembled into the 2×2 quad or a mip-specific view. Left out on purpose.
 - The two "method not implemented" warnings are **console** device vtable slots
   (0x1c8, 0x218) three seconds into startup, far from the crash at 16:13:54.
   They are recorded but not implicated.
+- Two more declared shader gaps were reviewed and **deferred rather than
+  merged**: #1067 (a descriptor read only as data takes its kind from its
+  table) and #1084 (a select or carry-in on an untracked mask) each restructure
+  descriptor inference in the most contested function in the tree. Each closes
+  only two of the 74 refusals, and both conflict there; merging them blind
+  would risk the descriptor path that everything else depends on.
 - Everything above is on the local integration branch; nothing here changes the
   upstream tree.
