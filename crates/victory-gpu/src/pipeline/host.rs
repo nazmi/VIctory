@@ -6,6 +6,7 @@
 //! the immediate samplers, and directly indexed heaps.
 
 use std::ffi::{CStr, CString};
+use std::ops::Range;
 use std::sync::Arc;
 
 use victory_shader::emit::{ROOT_CBV_SPACE, SAMPLER_SPACE, USER_DATA_SPACE};
@@ -54,7 +55,7 @@ impl Default for GraphicsState {
             StencilPassOp: D3D12_STENCIL_OP_KEEP,
             StencilFunc: D3D12_COMPARISON_FUNC_ALWAYS,
         };
-        GraphicsState {
+        let mut state = GraphicsState {
             blend: D3D12_BLEND_DESC {
                 RenderTarget: [target; 8],
                 ..Default::default()
@@ -87,8 +88,45 @@ impl Default for GraphicsState {
                 Count: 1,
                 Quality: 0,
             },
+        };
+        zero_padding(&mut state.blend, &blend_padding());
+        zero_padding(&mut state.depth, &[depth_padding()]);
+        state
+    }
+}
+
+/// Zeroes the bytes of `value` at `padding`, in place: a structure read
+/// from the title's memory carries whatever lay between its fields, and the
+/// host's pipeline library tells descriptions apart by their bytes, padding
+/// included (an entry stored with other padding bytes never loads). The
+/// caller keeps `value` where it is: a move may rewrite its padding.
+fn zero_padding<T>(value: &mut T, padding: &[Range<usize>]) {
+    // SAFETY: `value` is a whole `T`; only bytes no field reads are written.
+    unsafe {
+        let bytes =
+            std::slice::from_raw_parts_mut(std::ptr::from_mut(value).cast::<u8>(), size_of::<T>());
+        for range in padding {
+            bytes[range.clone()].fill(0);
         }
     }
+}
+
+/// Where the padding of a blend description lies: after each target's
+/// write mask, a byte in a four-byte field.
+fn blend_padding() -> [Range<usize>; 8] {
+    std::array::from_fn(|i| {
+        let target = std::mem::offset_of!(D3D12_BLEND_DESC, RenderTarget)
+            + i * size_of::<D3D12_RENDER_TARGET_BLEND_DESC>();
+        target + std::mem::offset_of!(D3D12_RENDER_TARGET_BLEND_DESC, RenderTargetWriteMask) + 1
+            ..target + size_of::<D3D12_RENDER_TARGET_BLEND_DESC>()
+    })
+}
+
+/// Where the padding of a depth-stencil description lies: between the
+/// stencil write mask and the front face's operations.
+fn depth_padding() -> Range<usize> {
+    std::mem::offset_of!(D3D12_DEPTH_STENCIL_DESC, StencilWriteMask) + 1
+        ..std::mem::offset_of!(D3D12_DEPTH_STENCIL_DESC, FrontFace)
 }
 
 impl GraphicsState {
@@ -102,12 +140,16 @@ impl GraphicsState {
         unsafe {
             let data = at.add(4);
             match kind {
-                8 => self.blend = data.cast::<D3D12_BLEND_DESC>().read_unaligned(),
+                8 => {
+                    self.blend = data.cast::<D3D12_BLEND_DESC>().read_unaligned();
+                    zero_padding(&mut self.blend, &blend_padding());
+                }
                 9 => self.sample_mask = data.cast::<u32>().read_unaligned(),
                 10 => self.rasterizer = data.cast::<D3D12_RASTERIZER_DESC>().read_unaligned(),
                 11 => {
                     self.depth = data.cast::<D3D12_DEPTH_STENCIL_DESC>().read_unaligned();
                     self.depth_bounds = false;
+                    zero_padding(&mut self.depth, &[depth_padding()]);
                 }
                 21 => {
                     // As before, read this console subobject with the PC layout.
@@ -123,6 +165,7 @@ impl GraphicsState {
                         FrontFace: d.FrontFace,
                         BackFace: d.BackFace,
                     };
+                    zero_padding(&mut self.depth, &[depth_padding()]);
                 }
                 12 => {
                     let layout = at.add(8).cast::<D3D12_INPUT_LAYOUT_DESC>().read_unaligned();
@@ -220,7 +263,7 @@ impl GraphicsState {
             return None;
         }
         let d = self.depth;
-        Some(D3D12_DEPTH_STENCIL_DESC1 {
+        let mut depth = D3D12_DEPTH_STENCIL_DESC1 {
             DepthEnable: d.DepthEnable,
             DepthWriteMask: d.DepthWriteMask,
             DepthFunc: d.DepthFunc,
@@ -230,7 +273,10 @@ impl GraphicsState {
             FrontFace: d.FrontFace,
             BackFace: d.BackFace,
             DepthBoundsTestEnable: true.into(),
-        })
+        };
+        // The library compares the description's bytes, padding included.
+        depth.clear_padding();
+        Some(depth)
     }
 
     /// The vertex buffer slots the input layout reads.
@@ -678,8 +724,58 @@ struct VertexStream {
     topology: Sub<D3D12_PRIMITIVE_TOPOLOGY_TYPE>,
 }
 
+/// Zeroes the bytes of a stream subobject, or of a description held in one,
+/// that no field reads: the host's pipeline library tells a stored pipeline
+/// from a new one by the bytes of its description, these included, so they
+/// must be the same in every run.
+trait ClearPadding {
+    fn clear_padding(&mut self);
+}
+
+impl<T> ClearPadding for Sub<T> {
+    /// The gap between the type and a description that needs eight-byte
+    /// alignment, then the end of one that needs four.
+    fn clear_padding(&mut self) {
+        let description = std::mem::offset_of!(Sub<T>, 1);
+        zero_padding(
+            self,
+            &[
+                size_of::<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE>()..description,
+                description + size_of::<T>()..size_of::<Sub<T>>(),
+            ],
+        );
+    }
+}
+
+impl ClearPadding for VertexStream {
+    fn clear_padding(&mut self) {
+        self.vs.clear_padding();
+        self.input.clear_padding();
+        self.strip_cut.clear_padding();
+        self.topology.clear_padding();
+    }
+}
+
+impl ClearPadding for D3D12_BLEND_DESC {
+    fn clear_padding(&mut self) {
+        zero_padding(self, &blend_padding());
+    }
+}
+
+impl ClearPadding for D3D12_DEPTH_STENCIL_DESC {
+    fn clear_padding(&mut self) {
+        zero_padding(self, &[depth_padding()]);
+    }
+}
+
+impl ClearPadding for D3D12_DEPTH_STENCIL_DESC1 {
+    fn clear_padding(&mut self) {
+        zero_padding(self, &[depth_padding()]);
+    }
+}
+
 /// The stream form used by mesh pipelines and vertex pipelines with depth bounds.
-fn stream_pipeline<S, D>(
+fn stream_pipeline<S: ClearPadding, D: ClearPadding>(
     device: &ID3D12Device,
     root: &ID3D12RootSignature,
     stages: S,
@@ -727,6 +823,20 @@ fn stream_pipeline<S, D>(
         ),
         samples: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC, g.samples),
     };
+    // Every subobject's own padding, then the descriptions it holds, which
+    // a move into it may have given other padding bytes.
+    stream.root.clear_padding();
+    stream.stages.clear_padding();
+    stream.ps.clear_padding();
+    stream.blend.clear_padding();
+    stream.blend.1.clear_padding();
+    stream.mask.clear_padding();
+    stream.raster.clear_padding();
+    stream.depth.clear_padding();
+    stream.depth.1.clear_padding();
+    stream.targets.clear_padding();
+    stream.dsv.clear_padding();
+    stream.samples.clear_padding();
     let desc = D3D12_PIPELINE_STATE_STREAM_DESC {
         SizeInBytes: size_of_val(&stream),
         pPipelineStateSubobjectStream: (&raw mut stream).cast(),
@@ -1422,5 +1532,102 @@ mod tests {
         fit_root_signature(&mut params, &mut stages);
         assert!(root_signature(&host.device, &params, &[], false).is_ok());
         assert_eq!(host.log_messages(), None);
+    }
+
+    /// The bytes of `value` no field reads (see `zero_padding`).
+    fn padding_of<T>(value: &T, padding: &[Range<usize>]) -> Vec<u8> {
+        // SAFETY: `value` is a whole `T`.
+        unsafe {
+            let bytes =
+                std::slice::from_raw_parts(std::ptr::from_ref(value).cast::<u8>(), size_of::<T>());
+            padding
+                .iter()
+                .flat_map(|r| r.clone().map(|i| bytes[i]))
+                .collect()
+        }
+    }
+
+    /// Descriptions read with other bytes between their fields are the same
+    /// to the host: the title leaves what it likes there.
+    #[test]
+    fn read_states_carry_no_padding() {
+        // 4 bytes of type, then the longest description, the blend's.
+        let junk = vec![0xffu8; 4 + size_of::<D3D12_BLEND_DESC>()];
+        let mut state = GraphicsState::default();
+        for kind in [21, 11, 8] {
+            // SAFETY: 0xff bytes, a whole subobject of each kind.
+            unsafe { state.read(kind, junk.as_ptr()) };
+            assert_eq!(padding_of(&state.depth, &[depth_padding()]), [0, 0]);
+        }
+        assert_eq!(padding_of(&state.blend, &blend_padding()), vec![0; 24]);
+        // The fields themselves are the title's.
+        assert_eq!(state.blend.RenderTarget[7].RenderTargetWriteMask, 0xff);
+        assert_eq!(state.depth.StencilWriteMask, 0xff);
+        assert_eq!(state.depth.FrontFace.StencilFailOp, D3D12_STENCIL_OP(-1));
+        // So does the default state.
+        let state = GraphicsState::default();
+        assert_eq!(padding_of(&state.depth, &[depth_padding()]), [0, 0]);
+        assert_eq!(padding_of(&state.blend, &blend_padding()), vec![0; 24]);
+    }
+
+    /// A stream subobject carries no padding either: a description that
+    /// needs eight-byte alignment leaves four bytes after its type, and a
+    /// four-byte-aligned one leaves up to four at the end. The fields keep
+    /// their values.
+    #[test]
+    fn stream_subobjects_carry_no_padding() {
+        let code = D3D12_SHADER_BYTECODE {
+            pShaderBytecode: std::ptr::without_provenance(0x10),
+            BytecodeLength: 0x20,
+        };
+        let mut vs = Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS, code);
+        let mut input = Sub(
+            D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT,
+            D3D12_INPUT_LAYOUT_DESC {
+                pInputElementDescs: std::ptr::without_provenance(0x30),
+                NumElements: 2,
+            },
+        );
+        let mut topology = Sub(
+            D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY,
+            D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+        );
+        vs.clear_padding();
+        input.clear_padding();
+        topology.clear_padding();
+        // SAFETY: a whole subobject.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(std::ptr::from_ref(&vs).cast::<u8>(), size_of_val(&vs))
+        };
+        assert_eq!(&bytes[4..8], [0; 4]);
+        assert_eq!(vs.1.BytecodeLength, 0x20);
+        // Eight-byte values above, four-byte ones here: the type took the
+        // first four bytes and the description the rest.
+        assert_eq!(input.1.NumElements, 2);
+        assert_eq!(topology.1, D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE);
+    }
+
+    /// A description moved into a stream gets its own padding zeroed again:
+    /// a move need not keep it.
+    #[test]
+    fn descriptions_in_a_stream_carry_no_padding() {
+        let mut blend = D3D12_BLEND_DESC {
+            AlphaToCoverageEnable: true.into(),
+            ..Default::default()
+        };
+        blend.RenderTarget[3].RenderTargetWriteMask = 0x0f;
+        blend.clear_padding();
+        assert_eq!(padding_of(&blend, &blend_padding()), vec![0; 24]);
+        assert_eq!(blend.RenderTarget[3].RenderTargetWriteMask, 0x0f);
+        assert!(blend.AlphaToCoverageEnable.as_bool());
+        let mut depth = D3D12_DEPTH_STENCIL_DESC1 {
+            DepthBoundsTestEnable: true.into(),
+            ..Default::default()
+        };
+        depth.StencilWriteMask = 0x7f;
+        depth.clear_padding();
+        assert_eq!(padding_of(&depth, &[depth_padding()]), [0, 0]);
+        assert_eq!(depth.StencilWriteMask, 0x7f);
+        assert!(depth.DepthBoundsTestEnable.as_bool());
     }
 }
