@@ -148,3 +148,59 @@ the app-local-runtime file; report copy failures rather than ignoring them.
 
 Continue the main maintenance queue with individually reviewed and tested
 changes. Do not treat the 103 historical matches as accepted integrations.
+
+## Portable sampler regression
+
+Insert this synthetic test in the existing depth_tests module in draw.rs of the
+pinned JMAN source, in an isolated checkout. Run with diagnostics and
+VICTORY_D3D12_WARP=1 using the command above. It is expected to fail there;
+it is not an accepted change to our implementation.
+
+```rust
+    #[test]
+    fn maintenance_capped_sampler_table_uses_sampler_increment() {
+        let host = crate::host::host().expect("a real host device is required for this regression probe");
+        #[repr(C)]
+        struct ViewHeap {
+            desc: D3D12_DESCRIPTOR_HEAP_DESC,
+            placement: [u64; 2],
+        }
+        let desc = ViewHeap {
+            desc: D3D12_DESCRIPTOR_HEAP_DESC {
+                Type: D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+                NumDescriptors: 2049,
+                Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                NodeMask: 0,
+            },
+            placement: [0; 2],
+        };
+        let iid = ID3D12DescriptorHeap::IID;
+        let mut heap = std::ptr::null();
+        assert_eq!(crate::descriptor::create_heap(
+            std::ptr::null(), (&raw const desc).cast(), (&raw const iid).cast(), &mut heap,
+        ), crate::object::S_OK);
+        let table = crate::descriptor::heap(heap).start + 2048 * 16;
+        let used = UsedResource {
+            kind: ResourceType::Sampler,
+            root: RootType::Table,
+            table_offset_dwords: 0,
+            slot: 0,
+            user_data: 0,
+            dwords: 4,
+            lower_bound: 0,
+            stride: 0,
+        };
+        let list = host.new_list().expect("host command list");
+        let mut state = State::default();
+        state.set_heaps(&[heap]);
+        state.set_table(false, 0, table);
+        let remapped = state.tables(&list, &[used], false);
+        list.close();
+        drop(state);
+        drop(list);
+        let release = crate::object::slot::<extern "system" fn(This) -> u32>(heap, 0x10);
+        assert_eq!(release(heap), 0);
+        assert_eq!(remapped, vec![(0, 1792 * 16)]);
+    }
+
+```

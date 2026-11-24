@@ -213,3 +213,51 @@ SHA do not validate later code changes.
   that model at medium reasoning. Complex GPU/shader review was escalated
   to gpt-6.2-sol at high reasoning. Coordinator independently checked the
   relevant code paths and directed deterministic reproductions.
+- Validation correction: reusing Cargo artifacts between integration
+  worktrees left xtask checking an earlier checkout (159 files instead of
+  the current 161). A separate PR #480 source test also initially reused a
+  binary missing its new regression; that result was invalidated and the
+  package was rebuilt, executing all three intended tests. Fork-source and
+  Agility checks used fresh distinct targets, so their results stand.
+  Workflow now requires one Cargo target per worktree. A final fresh-target
+  integration gate will replace any ambiguous shared-target evidence.
+
+### Pending bounded PR candidates
+
+- #449 at `f625cc5`: 1/1 file reviewed; source-head targeted xsystem tests
+  passed 4/4, including the actual vtable null-output regression. Full
+  candidate integration gate is pending. Its patch also occurs in JMAN's
+  history, but that does not require importing the rest of that fork.
+- #480 at `75fe6c0`: 1/1 file reviewed; corrected source-head media run
+  passed 3/3, including strict percent-escape regression. Full candidate
+  integration gate pending; its patch occurs in JMAN's history too.
+- #629 at `350f91c`: coordinator reviewed the full changed file, discussion,
+  and surrounding layout logic; source tests 21 passed, 3 ignored. Full
+  candidate gate pending.
+- #396 at `10e9f56`: coordinator reviewed the full changed file, discussion,
+  and loader callers; source tests 8 passed, 0 ignored. Full candidate gate
+  pending. JMAN's fork does not supply this bounds fix.
+- #363 at `4874c3f` and #337 at `5cf259e`: static reviews 1/1 file each,
+  no skips/blockers; source and integration tests pending. #363 overlaps
+  #241's broader config change; #337 needs all four source commits or its
+  reviewed net patch, not just its initially uncompilable first commit.
+- Next PR integration order: #449, #480, then #396, refreshing exact heads
+  before each candidate. JMAN's wholesale batch is deferred by reproduced
+  failures. Remaining inventoried PRs are still queued; the issue and gap
+  passes have not started. This is an ongoing sweep, not a completed audit.
+
+### Authoritative final integration gate: 2026-11-24
+
+- Code checked at `c16779d913ea5dc0e8f042740d0a0e3132952f13`; concurrent
+  changes were documentation only (AGENTS, this log, JMAN assessment).
+- Used newly created, worktree-specific external `integration-final-target`
+  with explicit Rust 1.98.1 x86_64 Windows MSVC. No cross-worktree compiled
+  artifacts were reused. This supersedes ambiguous shared-target evidence.
+- Both exact required workspace Clippy commands: exit 0.
+- Workspace tests: exit 0; 346 harness passes, 6 ignored, with four known
+  compiler-dependent differential early returns. No title execution.
+- Policy: exit 0; 161 files, matching the actual tracked/unignored inventory.
+- `git diff --check`: exit 0.
+- Full logs remain outside the repository under `integration-final`.
+- Accepted local PR integrations remain #689 and #708. JMAN's wholesale
+  fork remains deferred because its additional focused checks fail.

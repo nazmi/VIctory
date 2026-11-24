@@ -40,6 +40,11 @@ owning crate. Consult `.github/workflows/ci.yml` for current required checks.
 - Assign each writing worker a separate branch and worktree. Keep worktrees
   outside the repository. Read-only workers may share the main checkout.
   Coordinate CPU/GPU-heavy checks to avoid resource contention.
+- Give every worktree its own Cargo target directory. Do not reuse compiled
+  artifacts across worktrees: stale binaries can omit new tests, and tools
+  using compile-time CARGO_MANIFEST_DIR can inspect a different checkout.
+  Share dependency downloads only. Check that each requested regression
+  actually executed and that policy file counts match the intended tree.
 - Workers return findings with file/line references, changes, test commands
   and exit codes, limitations, and their commit SHA if they created one.
   Workers do not merge, push, close issues, or edit shared tracking files.
