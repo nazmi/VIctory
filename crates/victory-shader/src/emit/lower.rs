@@ -1708,15 +1708,83 @@ impl<'a> Lower<'a> {
         self.s.m.select(c, finite, z, th)
     }
 
+    /// `f` as an f16 in the low bits, rounded to nearest even as the
+    /// console does (MODE's default): a tie goes to the even half, a finite
+    /// value from 65520 up becomes infinity, results below 2^-14 stay
+    /// subnormal, NaN stays NaN (quiet, top payload bits kept). Worked on
+    /// the bits: the host's f32-to-f16 conversion (DXIL op 130) rounds
+    /// toward zero on NVIDIA and WARP alike (1 + 3/2048 gives 0x3C01, 1e6
+    /// gives 0x7BFF).
+    fn f16_nearest(&mut self, f: V) -> V {
+        let c = self.cur;
+        let x = self.as_int(f);
+        let k = |l: &mut Self, v: u32| l.s.m.i32(v);
+        let (k0, k1, k13, k16, k23) = (
+            k(self, 0),
+            k(self, 1),
+            k(self, 13),
+            k(self, 16),
+            k(self, 23),
+        );
+        let sign = self.s.m.bin(c, Bin::LShr, x, k16);
+        let sign_mask = k(self, 0x8000);
+        let sign = self.s.m.bin(c, Bin::And, sign, sign_mask);
+        let abs_mask = k(self, 0x7FFF_FFFF);
+        let a = self.s.m.bin(c, Bin::And, x, abs_mask);
+        // Normal halves: rebias the exponent (127 - 15) and round on bit 13.
+        let odd = self.s.m.bin(c, Bin::LShr, a, k13);
+        let odd = self.s.m.bin(c, Bin::And, odd, k1);
+        let bias = k(self, 0xFFF_u32.wrapping_sub(112 << 23));
+        let n = self.s.m.bin(c, Bin::Add, a, bias);
+        let n = self.s.m.bin(c, Bin::Add, n, odd);
+        let normal = self.s.m.bin(c, Bin::LShr, n, k13);
+        // Subnormal halves: the 24-bit significand shifted down by
+        // 126 - exponent (at least 14, at most 31), rounded to nearest even.
+        let e = self.s.m.bin(c, Bin::LShr, a, k23);
+        let man_mask = k(self, 0x7F_FFFF);
+        let man = self.s.m.bin(c, Bin::And, a, man_mask);
+        let implicit = k(self, 0x80_0000);
+        let m = self.s.m.bin(c, Bin::Or, man, implicit);
+        let k126 = k(self, 126);
+        let sh = self.s.m.bin(c, Bin::Sub, k126, e);
+        let k31 = k(self, 31);
+        let wide = self.s.m.cmp(c, pred::IUGT, sh, k31);
+        let sh = self.s.m.select(c, wide, k31, sh);
+        let q = self.s.m.bin(c, Bin::LShr, m, sh);
+        let one_s = self.s.m.bin(c, Bin::Shl, k1, sh);
+        let low = self.s.m.bin(c, Bin::Sub, one_s, k1);
+        let rem = self.s.m.bin(c, Bin::And, m, low);
+        let half = self.s.m.bin(c, Bin::LShr, one_s, k1);
+        let above = self.s.m.cmp(c, pred::IUGT, rem, half);
+        let tie = self.s.m.cmp(c, pred::EQ, rem, half);
+        let q_odd = self.s.m.bin(c, Bin::And, q, k1);
+        let q_odd = self.s.m.cmp(c, pred::NE, q_odd, k0);
+        let tie_up = self.s.m.bin(c, Bin::And, tie, q_odd);
+        let up = self.s.m.bin(c, Bin::Or, above, tie_up);
+        let inc = self.s.m.select(c, up, k1, k0);
+        let sub = self.s.m.bin(c, Bin::Add, q, inc);
+        let min_normal = k(self, 0x3880_0000);
+        let is_sub = self.s.m.cmp(c, pred::IULT, a, min_normal);
+        let r = self.s.m.select(c, is_sub, sub, normal);
+        let overflow = k(self, 0x477F_F000);
+        let big = self.s.m.cmp(c, pred::IUGE, a, overflow);
+        let inf = k(self, 0x7C00);
+        let r = self.s.m.select(c, big, inf, r);
+        let f32_inf = k(self, 0x7F80_0000);
+        let nan = self.s.m.cmp(c, pred::IUGT, a, f32_inf);
+        let payload = self.s.m.bin(c, Bin::LShr, man, k13);
+        let quiet = k(self, 0x7E00);
+        let qnan = self.s.m.bin(c, Bin::Or, quiet, payload);
+        let r = self.s.m.select(c, nan, qnan, r);
+        self.s.m.bin(c, Bin::Or, r, sign)
+    }
+
     /// `f` as an f16 in the low bits, rounded toward zero: the nearest-even
     /// conversion, one step back toward zero where it rounded away (which
     /// also turns an overflow to infinity into the largest finite half).
     fn f16_toward_zero(&mut self, f: V) -> V {
         let c = self.cur;
-        let i32t = self.s.t.i32;
-        let h = self
-            .s
-            .op(c, "legacyF32ToF16", Attr::ReadNone, i32t, 130, &[f]);
+        let h = self.f16_nearest(f);
         let back = self
             .s
             .op(c, "legacyF16ToF32", Attr::ReadNone, self.s.t.f32, 131, &[h]);
@@ -4827,9 +4895,7 @@ impl<'a> Lower<'a> {
                     Some(o) => self.i32_of(o)?,
                     None => self.s.m.i32(0),
                 };
-                let h = self
-                    .s
-                    .op(c, "legacyF32ToF16", Attr::ReadNone, self.s.t.i32, 130, &[r]);
+                let h = self.f16_nearest(r);
                 let (keep, h) = if name == "v_fma_mixhi_f16" {
                     let k16 = self.s.m.i32(16);
                     (0xFFFF, self.s.m.bin(c, Bin::Shl, h, k16))
@@ -4854,9 +4920,7 @@ impl<'a> Lower<'a> {
             "v_cvt_f16_f32" if v.opsel == 0 => {
                 // Rounded to nearest even (the MODE default) into the low half.
                 let a = f(self, 0)?;
-                let r = self
-                    .s
-                    .op(c, "legacyF32ToF16", Attr::ReadNone, self.s.t.i32, 130, &[a]);
+                let r = self.f16_nearest(a);
                 let Some(Operand::Vector { reg, .. }) = v.dst else {
                     return Err("a 16-bit result outside a VGPR");
                 };
@@ -5245,8 +5309,7 @@ impl<'a> Lower<'a> {
             if v.clamp {
                 f = l.unary(7, f);
             }
-            let h =
-                l.s.op(l.cur, "legacyF32ToF16", Attr::ReadNone, i32t, 130, &[f]);
+            let h = l.f16_nearest(f);
             l.write_half(inst, h, guard)
         };
         if name == "v_cvt_f16_f32" {
@@ -5592,7 +5655,7 @@ impl<'a> Lower<'a> {
             return Err("modifiers on a packed integer operation");
         }
         let c = self.cur;
-        let (i32t, f32t) = (self.s.t.i32, self.s.t.f32);
+        let f32t = self.s.t.f32;
         let mut halves = Vec::new();
         for high in [false, true] {
             let mut xs = Vec::new();
@@ -5624,8 +5687,7 @@ impl<'a> Lower<'a> {
                 if v.clamp {
                     f = self.unary(7, f);
                 }
-                self.s
-                    .op(c, "legacyF32ToF16", Attr::ReadNone, i32t, 130, &[f])
+                self.f16_nearest(f)
             } else {
                 let k16 = self.s.m.i32(16);
                 let sext = |l: &mut Self, x: V| {
@@ -6345,15 +6407,7 @@ impl<'a> Lower<'a> {
                     };
                     let x = channel(l, row, ch)?;
                     let f = l.as_float(x);
-                    let i32t = l.s.t.i32;
-                    Ok(Some(l.s.op(
-                        l.cur,
-                        "legacyF32ToF16",
-                        Attr::ReadNone,
-                        i32t,
-                        130,
-                        &[f],
-                    )))
+                    Ok(Some(l.f16_nearest(f)))
                 };
                 let h = 2 * attribute.channel;
                 let c = self.cur;
@@ -6937,9 +6991,7 @@ impl<'a> Lower<'a> {
             xs.push(if *d16 {
                 // shortcut: d16 results are taken as floats (rounded to
                 // nearest even); integer formats would keep 16 bits.
-                let i32t = self.s.t.i32;
-                self.s
-                    .op(c, "legacyF32ToF16", Attr::ReadNone, i32t, 130, &[x])
+                self.f16_nearest(x)
             } else {
                 self.as_int(x)
             });
@@ -7350,14 +7402,11 @@ impl<'a> Lower<'a> {
         if d16 {
             // Two f16 channels per VGPR (an odd last high half 0).
             let k16 = self.s.m.i32(16);
-            let i32t = self.s.t.i32;
             for k in 0..count.div_ceil(2) {
                 let mut x = None;
                 for ch in (2 * k..(2 * k + 2).min(count)).rev() {
                     let f = self.s.m.extract(c, r, ch);
-                    let h = self
-                        .s
-                        .op(c, "legacyF32ToF16", Attr::ReadNone, i32t, 130, &[f]);
+                    let h = self.f16_nearest(f);
                     x = Some(match x {
                         Some(hi) => {
                             let hi = self.s.m.bin(c, Bin::Shl, hi, k16);

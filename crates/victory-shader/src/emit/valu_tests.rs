@@ -497,6 +497,129 @@ fn v_div_fixup_f16_follows_the_isa_special_cases() {
     });
 }
 
+/// The f16 nearest to `x`, ties to even, as the console's conversions
+/// round (MODE's default); found by search over the f16 values, so it does
+/// not share the lowering's bit arithmetic.
+fn f16_nearest_reference(x: f32) -> u16 {
+    if x.is_nan() {
+        return 0x7E00;
+    }
+    let sign = if x.is_sign_negative() { 0x8000 } else { 0 };
+    let a = f64::from(x.abs());
+    if a >= 65520.0 {
+        return sign | 0x7C00;
+    }
+    // The largest finite half at or below `a` (halves order as their bits).
+    let (mut lo, mut hi) = (0u16, 0x7BFF);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if f64::from(f16_to_f32(mid)) <= a {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let below = f64::from(f16_to_f32(lo));
+    let above = if lo == 0x7BFF {
+        65536.0
+    } else {
+        f64::from(f16_to_f32(lo + 1))
+    };
+    let pick = if a - below < above - a || (a - below == above - a && lo % 2 == 0) {
+        lo
+    } else {
+        lo + 1
+    };
+    sign | pick
+}
+
+#[test]
+fn f32_to_f16_rounds_to_nearest_even() {
+    // Midpoints between neighbouring halves (ties), the f32 next to them, and
+    // a spread of f32 values from below the smallest subnormal to past 65504.
+    let mut inputs: Vec<f32> = Vec::new();
+    for h in (0x0000u16..0x7BFF)
+        .step_by(613)
+        .chain([0x0000, 0x0001, 0x03FF, 0x0400, 0x3C00, 0x3C01, 0x7BFE])
+    {
+        let mid = ((f64::from(f16_to_f32(h)) + f64::from(f16_to_f32(h + 1))) / 2.0) as f32;
+        inputs.extend([
+            mid,
+            -mid,
+            f32::from_bits(mid.to_bits() + 1),
+            f32::from_bits(mid.to_bits() - 1),
+        ]);
+    }
+    let mut bits = 0x3280_0000u32; // 2^-26
+    while bits < 0x4790_0000 {
+        inputs.push(f32::from_bits(bits));
+        bits += 0x0013_3F7D;
+    }
+    inputs.extend([
+        65504.0,
+        65519.99,
+        65520.0,
+        1.0e6,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+        -0.0,
+        2.0f32.powi(-25),
+        f32::MIN_POSITIVE,
+    ]);
+    // v_mov_b32 v0, 0; v_cvt_f16_f32 v0, v1 (VOP1 0x00a).
+    let shader = build_valu_cs(&[vop1(0x001, 0, 128), vop1(0x00A, 0, vgpr(1))]);
+    let cases: Vec<[u32; 4]> = inputs.iter().map(|x| [x.to_bits(), 0, 0, 0]).collect();
+    run_cases(&shader, &cases, |backend, i, _, got| {
+        let (x, want) = (inputs[i], f16_nearest_reference(inputs[i]));
+        let got_h = got as u16;
+        if is_f16_nan(want) {
+            assert!(
+                is_f16_nan(got_h),
+                "{backend}: v_cvt_f16_f32({x:e}) = {got_h:#06x}, want NaN"
+            );
+        } else {
+            assert_eq!(
+                got_h,
+                want,
+                "{backend}: v_cvt_f16_f32({x:e} = {:#010x}) = {got_h:#06x}, want {want:#06x}",
+                x.to_bits()
+            );
+        }
+    });
+    // f16 arithmetic narrows the same way: 1 + 2^-10 plus 2^-11 is a tie
+    // that goes to the even 1 + 2^-9 (toward zero would give 1 + 2^-10).
+    let mut body = vec![vop1(0x001, 0, 128)];
+    body.extend_from_slice(&vop3(0x132, 0, vgpr(1), vgpr(2), 0)); // v_add_f16 v0, v1, v2
+    let add = build_valu_cs(&body);
+    run_cases(
+        &add,
+        &[[0x3C01, 0x1000, 0, 0], [0x7BFF, 0x5000, 0, 0]],
+        |backend, i, _, got| {
+            let want = [0x3C02u32, 0x7C00][i];
+            assert_eq!(
+                got, want,
+                "{backend}: v_add_f16 case {i} = {got:#06x}, want {want:#06x}"
+            );
+        },
+    );
+    // v_cvt_pkrtz_f16_f32 still rounds toward zero: 1 + 3/2048 to 1 + 2^-10,
+    // 1e6 to the largest finite half, -1e-8 to -0.
+    let pkrtz = build_valu_cs(&vop3(0x12F, 0, vgpr(1), vgpr(2), 0));
+    let (a, b) = ((1.0f32 + 3.0 / 2048.0).to_bits(), 1.0e6f32.to_bits());
+    run_cases(
+        &pkrtz,
+        &[[a, b, 0, 0], [(-1.0e-8f32).to_bits(), a, 0, 0]],
+        |backend, i, _, got| {
+            let want = [0x7BFF_3C01u32, 0x3C01_8000][i];
+            assert_eq!(
+                got, want,
+                "{backend}: v_cvt_pkrtz_f16_f32 case {i} = {got:#010x}, want {want:#010x}"
+            );
+        },
+    );
+}
+
 #[test]
 fn v_fract_f32_never_returns_one() {
     // v_fract_f32 v0, v1 (VOP1 opcode 0x020)
