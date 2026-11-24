@@ -140,16 +140,16 @@ pub(crate) fn save(now: bool) {
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     const SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
     let (Some(dir), Some(library)) = (DIR.get(), library()) else { return };
-    {
-        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-        if !now && last.is_some_and(|t| t.elapsed() < SAVE_EVERY) {
-            return;
-        }
-        *last = Some(std::time::Instant::now());
+    // Hold this lock through both writes so saves cannot share temporary paths.
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if !now && last.is_some_and(|t| t.elapsed() < SAVE_EVERY) {
+        return;
     }
-    let blob = {
-        let mut l = library.lock().unwrap_or_else(|e| e.into_inner());
-        if l.added == 0 && !USED_CHANGED.swap(false, Ordering::Relaxed) {
+    *last = Some(std::time::Instant::now());
+    let used_changed = USED_CHANGED.swap(false, Ordering::Relaxed);
+    let (blob, added) = {
+        let l = library.lock().unwrap_or_else(|e| e.into_inner());
+        if l.added == 0 && !used_changed {
             return;
         }
         // SAFETY: a buffer of the size the library asks for.
@@ -158,11 +158,11 @@ pub(crate) fn save(now: bool) {
             l.library.Serialize(&mut bytes).map(|()| bytes)
         };
         match bytes {
-            Ok(bytes) => {
-                l.added = 0;
-                bytes
-            }
+            Ok(bytes) => (bytes, l.added),
             Err(e) => {
+                if used_changed {
+                    USED_CHANGED.store(true, Ordering::Relaxed);
+                }
                 tracing::warn!(error = %e, "host pipeline library not serialised");
                 return;
             }
@@ -173,15 +173,24 @@ pub(crate) fn save(now: bool) {
         .and_then(|()| write_atomically(&dir.join(LIBRARY_FILE), &blob))
         .and_then(|()| write_atomically(&dir.join(EARLY_FILE), used.join("\n").as_bytes()));
     match written {
-        Ok(()) => tracing::info!(
-            bytes = blob.len(),
-            early = used.len(),
-            made = MADE.load(Ordering::Relaxed),
-            loaded = LOADED.load(Ordering::Relaxed),
-            started_early = EARLY.load(Ordering::Relaxed),
-            "host pipeline library saved"
-        ),
-        Err(e) => tracing::warn!(error = %e, "host pipeline library not saved"),
+        Ok(()) => {
+            // Keep any pipelines added while we were writing this snapshot.
+            library.lock().unwrap_or_else(|e| e.into_inner()).added -= added;
+            tracing::info!(
+                bytes = blob.len(),
+                early = used.len(),
+                made = MADE.load(Ordering::Relaxed),
+                loaded = LOADED.load(Ordering::Relaxed),
+                started_early = EARLY.load(Ordering::Relaxed),
+                "host pipeline library saved"
+            );
+        }
+        Err(e) => {
+            if used_changed {
+                USED_CHANGED.store(true, Ordering::Relaxed);
+            }
+            tracing::warn!(error = %e, "host pipeline library not saved");
+        }
     }
 }
 
