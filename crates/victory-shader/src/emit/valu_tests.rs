@@ -232,6 +232,26 @@ fn is_f16_nan(bits: u16) -> bool {
     (bits & 0x7FFF) > 0x7C00
 }
 
+#[test]
+fn a_branch_to_fallthrough_keeps_both_values_at_a_join() {
+    let shader = build_valu_cs(&[
+        0xBF06_0100,             // s_cmp_eq_u32 s0, s1
+        0xBF85_0002,             // s_cbranch_scc1 -> the s2 = 1 path
+        s_mov_b32(2, 128),       // s2 = 0
+        0xBF82_0002,             // s_branch -> the join
+        s_mov_b32(2, 129),       // s2 = 1
+        0xBF85_0000,             // s_cbranch_scc1 -> the following instruction
+        vop1(0x001, 0, sgpr(2)), // join: v0 = s2
+    ]);
+    run_cases(
+        &shader,
+        &[[7, 7, 0, 0], [7, 5, 0, 0]],
+        |backend, _, inputs, actual| {
+            assert_eq!(actual, u32::from(inputs[0] == inputs[1]), "{backend}");
+        },
+    );
+}
+
 fn f16_to_f32(bits: u16) -> f32 {
     let sign = u32::from(bits >> 15) << 31;
     let exp = (bits >> 10) & 0x1F;
@@ -725,6 +745,68 @@ fn v_cvt_u16_and_i16_f16_saturate() {
                 u32::from(want),
                 "{backend}: {what}({:#06x}) = {got:#010x}, want {want:#06x}",
                 cases[i].0,
+            );
+        });
+    }
+}
+
+#[test]
+fn s_min_and_s_max_compare_signed_and_unsigned() {
+    // s_{min,max}_{i32,u32} s6, s0, s1 (SOP2 0x06..0x09); v_mov_b32 v0, s6.
+    type Pick = fn(u32, u32) -> u32;
+    let ops: [(&str, u8, Pick); 4] = [
+        ("s_min_i32", 0x06, |a, b| (a as i32).min(b as i32) as u32),
+        ("s_min_u32", 0x07, u32::min),
+        ("s_max_i32", 0x08, |a, b| (a as i32).max(b as i32) as u32),
+        ("s_max_u32", 0x09, u32::max),
+    ];
+    // The sign bit set on some values, so the signed and unsigned answers differ.
+    let values = [0u32, 1, 5, 0x7FFF_FFFF, 0x8000_0000, 0xFFFF_FFFF];
+    let mut cases = Vec::new();
+    for a in values {
+        for b in values {
+            cases.push([a, b, 0, 0]);
+        }
+    }
+    for (name, op, pick) in ops {
+        let shader = build_valu_cs(&[sop2(op, 6, 0, 1), vop1(0x001, 0, sgpr(6))]);
+        run_cases(&shader, &cases, |backend, _, inp, got| {
+            let want = pick(inp[0], inp[1]);
+            assert_eq!(
+                got, want,
+                "{backend}: {name}({:#010x}, {:#010x}) = {got:#010x}, want {want:#010x}",
+                inp[0], inp[1],
+            );
+        });
+    }
+}
+
+#[test]
+fn s_lshl_add_shifts_the_first_operand_then_adds() {
+    // s_lshl{1,2,3,4}_add_u32 s6, s0, s1 (SOP2 0x2e..0x31): (s0 << n) + s1.
+    let values = [
+        0u32,
+        1,
+        3,
+        0x1000_0001,
+        0x7FFF_FFFF,
+        0x8000_0000,
+        0xFFFF_FFFF,
+    ];
+    let mut cases = Vec::new();
+    for a in values {
+        for b in values {
+            cases.push([a, b, 0, 0]);
+        }
+    }
+    for n in 1..=4u32 {
+        let shader = build_valu_cs(&[sop2(0x2d + n as u8, 6, 0, 1), vop1(0x001, 0, sgpr(6))]);
+        run_cases(&shader, &cases, |backend, _, inp, got| {
+            let want = (inp[0] << n).wrapping_add(inp[1]);
+            assert_eq!(
+                got, want,
+                "{backend}: s_lshl{n}_add_u32({:#010x}, {:#010x}) = {got:#010x}, want {want:#010x}",
+                inp[0], inp[1],
             );
         });
     }

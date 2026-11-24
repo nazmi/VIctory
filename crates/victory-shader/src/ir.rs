@@ -1,7 +1,8 @@
 //! One-to-one SSA form of a native program (decision 0003, step 1).
 //!
 //! Every machine instruction becomes one [`Inst`], except scheduling-only
-//! ones (`s_nop`, `s_waitcnt*`, `s_inst_prefetch`...), which are dropped.
+//! ones (`s_nop`, `s_waitcnt*`, `s_inst_prefetch`...) and redundant conditional
+//! branches.
 //! Each register dword is a variable: a read names the [`Value`] it sees, a
 //! write defines a new one, and [`Phi`]s merge values where control flow
 //! joins. Nothing is raised: an instruction keeps its opcode and decoded
@@ -186,6 +187,18 @@ pub fn build_bounded(
         })?;
         let fields = machine.fields(wave64);
         let fallthrough = || block_at(next.ok_or(isa(machine.offset, "falls off the code"))?);
+        // A conditional SOPP branch to fallthrough has no register effects
+        // and contributes one edge to the join. Calls also use Flow::Branch
+        // but write a return address; the debug branches stay refused
+        // (`effects` has no lowering for them, and dropping one would accept
+        // an instruction we do not implement).
+        if machine.encoding == gfx10::Encoding::Sopp
+            && !name.starts_with("s_cbranch_cdbg")
+            && matches!(flow, Flow::Branch(target) if Some(target) == next)
+        {
+            blocks[b].exit = Exit::Jump(fallthrough()?);
+            continue;
+        }
         let ends = flow != Flow::Next || next.is_none_or(|n| leaders.binary_search(&n).is_ok());
         if ends {
             blocks[b].exit = match flow {
@@ -1077,6 +1090,18 @@ mod tests {
 
     fn input(p: &Program, reg: Reg) -> Value {
         p.inputs.iter().find(|i| i.0 == reg).expect("input").1
+    }
+
+    #[test]
+    fn a_debug_branch_to_fallthrough_stays_refused() {
+        // s_cbranch_cdbgsys -> the next instruction; `effects` has no lowering
+        // for the debug branches, so the fold must not quietly drop it.
+        let code = [0xBF97_0000, S_ENDPGM];
+        let bytes: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
+        assert!(matches!(
+            build(&bytes, false, 256),
+            Err(ShaderError::Unsupported { .. })
+        ));
     }
 
     #[test]

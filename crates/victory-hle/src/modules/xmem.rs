@@ -383,6 +383,7 @@ struct Slice {
 #[derive(Default)]
 struct Physical {
     next_page: usize,
+    free_pages: Vec<usize>,
     pages: HashMap<usize, Slice>,
     /// Mapped views by address: their length and what they show.
     views: BTreeMap<usize, (usize, Slice)>,
@@ -451,6 +452,16 @@ fn report_written(shown: &[usize]) {
     }
 }
 
+impl Physical {
+    fn allocate_page_number(&mut self) -> usize {
+        self.free_pages.pop().unwrap_or_else(|| {
+            let page = self.next_page;
+            self.next_page += FRAMES;
+            page
+        })
+    }
+}
+
 static PHYSICAL: LazyLock<Mutex<Physical>> = LazyLock::new(|| {
     Mutex::new(Physical {
         // Page numbers are opaque to titles; 0 stays unused.
@@ -509,14 +520,12 @@ pub extern "system" fn XMemAllocatePhysicalPages(
     );
     let section = Arc::new(Section(handle));
     let mut physical = physical();
-    let first = physical.next_page;
-    physical.next_page += n * FRAMES;
     for index in 0..n {
         let slice = Slice {
             section: section.clone(),
             index,
         };
-        let number = first + index * FRAMES;
+        let number = physical.allocate_page_number();
         physical.pages.insert(number, slice);
         // SAFETY: the title passes room for `n` page numbers.
         unsafe { pages.add(index).write(number) };
@@ -537,7 +546,10 @@ pub extern "system" fn XMemFreePhysicalPages(n: usize, pages: *const usize) -> B
     let mut physical = physical();
     for i in 0..n {
         // SAFETY: the title passes `n` page numbers.
-        physical.pages.remove(&unsafe { *pages.add(i) });
+        let page = unsafe { *pages.add(i) };
+        if physical.pages.remove(&page).is_some() {
+            physical.free_pages.push(page);
+        }
     }
     1
 }
@@ -1261,6 +1273,21 @@ mod tests {
         assert_eq!(size_of::<WorkingSet>(), 0x50);
         assert_eq!(size_of::<BasicInformation>(), 0x40);
         assert_eq!(std::mem::offset_of!(WorkingSet, gpu_optimal_limit), 0x28);
+    }
+
+    #[test]
+    fn freed_physical_page_numbers_are_reused_before_growing_the_pool() {
+        let mut physical = Physical {
+            next_page: 0x10_0000,
+            ..Default::default()
+        };
+        let first = physical.allocate_page_number();
+        let second = physical.allocate_page_number();
+        physical.free_pages.push(first);
+
+        assert_eq!(physical.allocate_page_number(), first);
+        assert_eq!(physical.allocate_page_number(), 0x10_0000 + 2 * FRAMES);
+        assert_eq!(second, 0x10_0000 + FRAMES);
     }
 
     #[test]
