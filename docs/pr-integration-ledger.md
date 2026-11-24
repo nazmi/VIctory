@@ -10,6 +10,10 @@ added; do not edit the tables by hand.
 
 ## Summary
 
+For a disposition on **every** currently open PR — including the ones with
+no decision yet — see [pr-disposition.md](pr-disposition.md). This file only
+lists what is in the branch.
+
 | | Count |
 | --- | --- |
 | Upstream PRs integrated locally | 182 |
