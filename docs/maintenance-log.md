@@ -749,3 +749,97 @@ Hand-merged:
 - Full logs remain outside the repository under `integration-final`.
 - Accepted local PR integrations remain #689 and #708. JMAN's wholesale
   fork remains deferred because its additional focused checks fail.
+
+### Wave 6: review-before-integrate: 2026-11-25
+
+Inventory refreshed twice: 1,016 open PRs at 20:39 UTC, **1,024** at 21:04 UTC
+(9 new: #1699-#1710; #1672 closed upstream; 8 heads moved). Every integration
+below re-read its PR at its exact head SHA. Heads that moved were re-fetched
+with a forced ref update, because a plain fetch silently kept a stale local ref
+and made #1656 look unfixed when upstream had already fixed it.
+
+**Process change for this wave.** PRs are reviewed and tested in an isolated
+worktree *before* being cherry-picked, and worker subagents get write-capable
+roles with their own `CARGO_TARGET_DIR`. The earlier read-only `explore` role is
+capped at 24 model steps and two of them exhausted that budget mid-task.
+
+Acting on the world-load diagnosis, in order:
+
+- **The refusal text now names which case it is**, and that immediately paid
+  off: all 31 world-load refusals read "an address in an SGPR before the first
+  root parameter". The previous text conflated three different bugs.
+- **But that message was partly an artifact.** `why_no_base` compared the
+  register against the declared spans; with no parameters declared the spans are
+  empty, `first` stayed `u8::MAX`, and every register compared below it. So a
+  program with no layout reported "before the first parameter". Fixed in tree
+  (`4b5fe162`) with a test that pins the new wording. The runtime and offline
+  paths still disagree about the layout, and that disagreement is the next thing
+  to settle — not the address rule.
+- **The second title run died differently**: the host GPU was removed as hung
+  during a 16-list submission on the Radeon 780M. That is the README's documented
+  hazard, not a new defect, and it is a third candidate cause alongside the null
+  write and the memory report. No further runs on this iGPU.
+
+Integrated this wave (each reviewed, then tested, then committed with the author
+and the source SHA):
+
+| Local commit | PR | Subject |
+| --- | --- | --- |
+| `bc9c0f60` | #1668 | Shaders: read inline floats as f32 bits in 16-bit integer ops |
+| `138e43c5` | #1685 | Shaders: lower v_cmp_{f,t}_{i64,u64} constant 64-bit compares |
+| `621c3c17` | #1686 | Shaders: lower pixel shader SV_Coverage input via dx.op.coverage |
+| `13ab09bb` | #1667 | flush a kept save blob that had to be copied |
+| `4cf31e8e` | #1664 | hle: return S_OK with null handle when PowerSetRequest fails unsupported |
+| `d32efcd9` | #1660 | GPU: serialize pipeline library atomic writes with unique temp files |
+| `15316a22` | #1657 | XSystem: name the analytics family Windows.Xbox |
+| `336bee70` | #1703 | README: the GPU timing switch needs DRED for the per-command notes |
+| `aec7eb38` | #1700 | GPU: say when a draw's render target has no host copy or permission |
+| `5c61aa48` | #1701 | GPU: VICTORY_MODE overrides the reported console display mode |
+| `a9040302` | #1702 | HLE: add VICTORY_NO_HOST_PAD to hide host gamepads |
+
+Corrections made while integrating (each would have been a silent defect):
+
+- **#1656 was rejected, correctly, then fixed upstream.** I found that
+  `pooled()` returns a length-0 `Vec` while the new copy-back indexed it
+  (`&mut piece[..n]`), so it panicked on the first changed piece; its only new
+  test was `#[ignore]`d. The author's new head (`dd2c3eda`) adds
+  `piece.resize(PIECE, 0)` and a real `shadow_parallel` test. Re-verification is
+  the gate for integrating it.
+- **#1675 is a duplicate**, not new work: `lower.rs:3567` already lowers
+  `s_absdiff_i32`, `s_sext_i32_i8/i16` and the three `s_pack_*_b16` forms.
+  Applying it would add duplicate match arms, which `-D warnings` rejects.
+  Its device-value test is stronger than our translation-only test and is worth
+  salvaging on its own.
+- **#1668 needed HEAD's structure**, not the PR's: HEAD already carried
+  `half_int_src`, so only three call sites and their tests were taken.
+- **Two test bodies were interleaved by a mechanical merge** in `xgamesave.rs`
+  (#1667 against a test added after its base); they were split back into two
+  functions rather than accepted as one, which would have mixed two unrelated
+  assertions into one test.
+- **A reviewer subagent claimed #1685 was already present.** It was not:
+  `git show 321580dd:...lower.rs` has no `f`/`t` arm. The integrated commit is
+  the only source of that code. Recorded because agent summaries are inputs to
+  review, never evidence.
+- **`cargo fmt --check` caught two formatting drifts** introduced by the appends
+  above; both were folded back into their originating commits with
+  `--fixup`/`--autosquash` rather than left as a trailing style commit.
+
+Held with reasons this wave: #1694 (would revert the single-rounding
+`v_dot2_f32_f16` fix and turn a refusal into a wrong value), #1654 and #1662
+(one inline constant expanded from f64 among f32 siblings), #1663 (drops wave32
+forcing; out-of-bounds ADDTID returns 0 instead of refusing). Rejected: #694,
+#1067/#1084 deferred as before.
+
+**New evidence: the whole-game shader census.** `victory translate` over every
+container in `shaders.rpf` (offline, no GPU) gives 22,875 of 25,322 programs
+emitted and a ranked refusal table — see `docs/isa-gaps.md`. The dominant
+finding is that descriptor-bits-as-data is at least 1,424 of 2,807 failures,
+more than every instruction-encoding gap combined.
+
+**The RDNA 2 ISA PDF used in an earlier session is no longer on this machine.**
+A search of the user's disks finds no such file, so no claim in this wave is
+cited to it; the census and the repo's own opcode tables replaced it.
+
+Gate at `4b5fe162`: fmt 0 differing, both Clippy commands exit 0, workspace 670
+passed / 14 ignored / 0 failed, policy ok. Four commits landed after that gate,
+so it is explicitly stale and is re-run on the final tip.
