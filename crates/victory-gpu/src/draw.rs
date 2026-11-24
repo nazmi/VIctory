@@ -317,8 +317,26 @@ impl State {
                 continue;
             };
             let Some(texture) = crate::resource::host_resource(record.resource) else {
+                once!(
+                    resource = format_args!("{:#x}", record.resource as usize),
+                    "render target without a host copy; the draw renders into it as nothing"
+                );
                 continue;
             };
+            // The host copy can have lost the permission the title asked for:
+            // `resource::host_texture` gives up what the host refuses, and a
+            // render target view of a texture without
+            // `ALLOW_RENDER_TARGET` is not a view at all (the call that makes
+            // it returns nothing and D3D12 binds an empty descriptor).
+            // SAFETY: a live resource.
+            if unsafe { texture.GetDesc() }.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0 == 0
+            {
+                once!(
+                    resource = format_args!("{:#x}", record.resource as usize),
+                    "render target without the render-target permission; the draw renders into it as nothing"
+                );
+                continue;
+            }
             self.targets.push(record.resource as usize);
             #[cfg(feature = "diagnostics")]
             crate::capture::note_target(record.resource);
@@ -327,6 +345,16 @@ impl State {
         self.depth = 0;
         let dsv = crate::descriptor::dsv_record(depth).and_then(|record| {
             let texture = crate::resource::host_resource(record.resource)?;
+            // The same for depth: a copy that lost `ALLOW_DEPTH_STENCIL`.
+            // SAFETY: a live resource.
+            if unsafe { texture.GetDesc() }.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL.0 == 0
+            {
+                once!(
+                    resource = format_args!("{:#x}", record.resource as usize),
+                    "depth target without the depth permission; the draw runs without depth"
+                );
+                return None;
+            }
             self.depth = record.resource as usize;
             #[cfg(feature = "diagnostics")]
             crate::capture::note_target(record.resource);
