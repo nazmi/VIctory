@@ -379,6 +379,12 @@ mod tests {
         } as usize;
         assert_ne!(p, 0);
         let (start, end) = (p, p + 4 * PAGE);
+        // A previous test may have used these virtual addresses.
+        let mut journal = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+        for page in start / PAGE..end / PAGE {
+            journal.written.remove(&page);
+        }
+        drop(journal);
         let (_, before) = writes(start, end, false).expect("watched");
         assert!(before.is_empty());
         // SAFETY: committed pages of ours.
