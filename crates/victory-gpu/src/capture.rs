@@ -4,6 +4,8 @@
 //! size. Only in builds with diagnostics.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::Relaxed;
 
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
@@ -16,8 +18,9 @@ pub(crate) fn folder() -> Option<&'static PathBuf> {
         .as_ref()
 }
 
-/// Frames listed in `VICTORY_CAPTURE_FRAMES` (comma-separated): saved
-/// too, and their draws traced at debug level.
+/// Frames listed in `VICTORY_CAPTURE_FRAMES` (comma-separated), and those
+/// the draw-count trigger picks ([`frame_recorded`]): saved too, and their
+/// draws traced at debug level.
 pub(crate) fn listed(n: u64) -> bool {
     static LIST: std::sync::OnceLock<Vec<u64>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| {
@@ -27,6 +30,61 @@ pub(crate) fn listed(n: u64) -> bool {
             .collect()
     })
     .contains(&n)
+        || trigger().is_some_and(|t| t.picks(n, TRIGGERED_AT.load(Relaxed)))
+}
+
+/// `VICTORY_CAPTURE_DRAWS=<draws>[,<frames>]`: the first frame that records
+/// at least `draws` draws picks the `frames` frames after it (3 by
+/// default), as if they were listed. Where a scene starts moves by hundreds
+/// of frames between runs (loading time, the shader cache), so a frame
+/// number taken from one run can miss the scene in the next.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Trigger {
+    draws: u64,
+    frames: u64,
+}
+
+impl Trigger {
+    fn parse(text: &str) -> Option<Trigger> {
+        let mut parts = text.split(',').map(str::trim);
+        let draws = parts.next()?.parse().ok().filter(|&d| d > 0)?;
+        let frames = match parts.next() {
+            Some(f) => f.parse().ok().filter(|&f| f > 0)?,
+            None => 3,
+        };
+        parts.next().is_none().then_some(Trigger { draws, frames })
+    }
+
+    /// Whether frame `n` is picked, the trigger having fired at the present
+    /// of frame `at` (0: not yet).
+    fn picks(self, n: u64, at: u64) -> bool {
+        at != 0 && n > at && n - at <= self.frames
+    }
+}
+
+fn trigger() -> Option<Trigger> {
+    static TRIGGER: std::sync::OnceLock<Option<Trigger>> = std::sync::OnceLock::new();
+    *TRIGGER.get_or_init(|| Trigger::parse(&std::env::var("VICTORY_CAPTURE_DRAWS").ok()?))
+}
+
+/// The frame whose present fired the trigger; 0 until then. It fires once.
+static TRIGGERED_AT: AtomicU64 = AtomicU64::new(0);
+
+/// At the present of frame `frame`, which recorded `draws` draws.
+pub(crate) fn frame_recorded(frame: u64, draws: u64) {
+    if let Some(t) = trigger()
+        && draws >= t.draws
+        && TRIGGERED_AT
+            .compare_exchange(0, frame, Relaxed, Relaxed)
+            .is_ok()
+    {
+        tracing::info!(
+            frame,
+            draws,
+            frames = t.frames,
+            "capture trigger: saving the frames after this one"
+        );
+    }
 }
 
 /// Whether frame `n` is saved.
@@ -608,5 +666,31 @@ mod tests {
             super::to_rgba(87, 1, 1, 4, &[1, 2, 3, 4]),
             Some(vec![3, 2, 1, 255])
         );
+    }
+
+    #[test]
+    fn the_draw_trigger_reads_a_count_and_an_optional_length() {
+        use super::Trigger;
+        let t = |draws, frames| Some(Trigger { draws, frames });
+        assert_eq!(Trigger::parse("1000"), t(1000, 3));
+        assert_eq!(Trigger::parse(" 1500 , 5 "), t(1500, 5));
+        assert_eq!(Trigger::parse(""), None);
+        assert_eq!(Trigger::parse("0"), None);
+        assert_eq!(Trigger::parse("1000,0"), None);
+        assert_eq!(Trigger::parse("many"), None);
+        assert_eq!(Trigger::parse("1000,3,7"), None);
+    }
+
+    #[test]
+    fn the_draw_trigger_picks_the_frames_after_the_one_that_fired() {
+        let t = super::Trigger {
+            draws: 1000,
+            frames: 3,
+        };
+        // Not fired yet: nothing is picked.
+        assert!(!(0..10).any(|n| t.picks(n, 0)));
+        // Fired at the present of frame 2850: frames 2851 to 2853.
+        let picked: Vec<u64> = (2840..2860).filter(|&n| t.picks(n, 2850)).collect();
+        assert_eq!(picked, [2851, 2852, 2853]);
     }
 }
