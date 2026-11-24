@@ -267,8 +267,17 @@ extern "system" fn find_for_device(_: This, _device: *const c_void, _: *mut Hand
     USER_NOT_FOUND
 }
 
-// Unset slots (no title seen calls them): maximum users, gamer pictures,
+// Unset slots (no title seen calls them): gamer pictures,
 // the UTF-16 token calls, issue resolution.
+/// 1: one offline local user can be signed in at a time.
+///
+/// Slot 0x30: maximum users (`IXUserProvider::GetMaxUsers`). The title calls it
+/// during its account init right after `XUserAddAsync` and dereferences the output
+/// (issue #348, #622, #630).
+extern "system" fn get_max_users(_: This, _: Handle, out: *mut u32) -> HRESULT {
+    put(out, 1)
+}
+
 static VTABLE: Methods<35> = Methods([
     missing::<0> as *const (),             // 0x00 QueryInterface
     add_ref as *const (),                  // 0x08 AddRef
@@ -276,7 +285,7 @@ static VTABLE: Methods<35> = Methods([
     duplicate as *const (),                // 0x18
     close as *const (),                    // 0x20
     compare as *const (),                  // 0x28
-    missing::<6> as *const (),             // 0x30 maximum users
+    get_max_users as *const (),            // 0x30 maximum users
     add_async as *const (),                // 0x38
     add_result as *const (),               // 0x40
     get_local_id as *const (),             // 0x48
@@ -420,6 +429,28 @@ mod tests {
         assert_eq!(
             xasync::XAsyncGetStatus(&mut block, true),
             FAILED_TO_GET_TOKEN
+        );
+    }
+
+    #[test]
+    fn get_max_users_reports_one_user() {
+        type GetMaxUsers = extern "system" fn(This, Handle, *mut u32) -> HRESULT;
+        let this: This = &OBJECT;
+        let mut max = 0;
+        assert_eq!(
+            slot::<GetMaxUsers>(&OBJECT, 0x30)(this, user(), &mut max),
+            S_OK
+        );
+        assert_eq!(max, 1);
+        max = 0;
+        assert_eq!(
+            slot::<GetMaxUsers>(&OBJECT, 0x30)(this, std::ptr::null(), &mut max),
+            S_OK
+        );
+        assert_eq!(max, 1);
+        assert_eq!(
+            slot::<GetMaxUsers>(&OBJECT, 0x30)(this, user(), std::ptr::null_mut()),
+            crate::modules::xasync::E_INVALIDARG
         );
     }
 }
