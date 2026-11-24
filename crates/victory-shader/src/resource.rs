@@ -824,6 +824,15 @@ impl<'a> Tracer<'a> {
                     // group info) used as an address; past the last one the
                     // layout under-declares what the shader reads, which is a
                     // bug on our side; between two is a gap in the layout.
+                    //
+                    // A program that declares no parameters has no span to
+                    // compare against: without this check every register is
+                    // "below" the empty layout's absent first span and the
+                    // message would blame a system SGPR for what is a
+                    // missing layout.
+                    if self.layout.is_empty() {
+                        return "an address with no root parameters declared";
+                    }
                     let Reg::S(code) = reg else { unreachable!() };
                     let spans = self.layout.iter().map(|p| {
                         let at = self.stage.user_sgpr(p.user_data);
@@ -2250,6 +2259,26 @@ pub(crate) mod tests {
             ShaderError::Unsupported {
                 offset: 0,
                 what: "an address in an SGPR before the first root parameter"
+            }
+        );
+    }
+
+    #[test]
+    fn an_address_with_no_declared_parameters_is_named_as_such() {
+        // The same code as above, with no layout at all: it must not claim
+        // the register sits before the first parameter, because there is no
+        // first parameter to be before.
+        let code: Vec<u8> = [0xF408_0001, 0xFA00_0000, S_ENDPGM] // s_load_dwordx4 s[0:3], s[2:3]
+            .iter()
+            .flat_map(|w: &u32| w.to_le_bytes())
+            .collect();
+        let p = crate::ir::build(&code, false, 256).unwrap();
+        let err = track(&p, &[], HwStage::Ps, lanes(&p).as_ref()).unwrap_err();
+        assert_eq!(
+            err,
+            ShaderError::Unsupported {
+                offset: 0,
+                what: "an address with no root parameters declared"
             }
         );
     }
