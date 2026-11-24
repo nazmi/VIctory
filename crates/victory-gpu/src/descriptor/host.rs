@@ -53,33 +53,6 @@ pub(crate) struct HostHeap {
     pub(crate) viewed: std::sync::Arc<crate::bindless::Viewed>,
 }
 
-/// Host heaps' GPU ranges (start, bytes, bytes per slot, sampler), for
-/// device-removed reports: a shader indexing a heap past its end faults.
-static GPU_RANGES: Mutex<Vec<(u64, u64, u64, bool)>> = Mutex::new(Vec::new());
-
-/// For device-removed reports: where host GPU address `va` lies against
-/// the host descriptor heaps.
-pub(crate) fn near_heaps(va: u64) -> String {
-    let ranges = GPU_RANGES.lock().unwrap_or_else(|e| e.into_inner());
-    let mut text = String::new();
-    for &(start, bytes, step, sampler) in ranges.iter() {
-        let kind = if sampler { "sampler" } else { "view" };
-        let place = if va < start {
-            format!("{:#x} below", start - va)
-        } else if va < start + bytes {
-            format!("inside, slot {}", (va - start) / step)
-        } else {
-            format!(
-                "{:#x} past its end (slot {})",
-                va - start - bytes,
-                (va - start) / step
-            )
-        };
-        text.push_str(&format!("; {kind} heap {start:#x}+{bytes:#x}: {place}"));
-    }
-    text
-}
-
 /// The host's limit for shader-visible view heaps on resource binding
 /// tiers 1 and 2; tier 3 hardware may take more.
 const PORTABLE_VIEWS: u32 = 1_000_000;
@@ -169,19 +142,14 @@ impl HostHeap {
             )
         };
         tracing::debug!(count, sampler, "host descriptor heap");
-        // SAFETY: a live shader-visible heap.
-        let (gpu, total) = unsafe {
-            (
-                heap.GetGPUDescriptorHandleForHeapStart().ptr,
-                heap.GetDesc().NumDescriptors,
-            )
-        };
-        GPU_RANGES.lock().unwrap_or_else(|e| e.into_inner()).push((
-            gpu,
-            u64::from(total) * u64::from(step),
-            u64::from(step),
-            sampler,
-        ));
+        // DRED identifies matching allocations by name. Descriptor handles
+        // have their own increment and cannot locate a faulting GPU VA.
+        crate::host::name(&heap, || {
+            let kind = if sampler { "sampler" } else { "view" };
+            format!("{kind} descriptor heap ({} slots)", count + extra)
+        });
+        // SAFETY: a live heap.
+        let total = unsafe { heap.GetDesc().NumDescriptors };
         let h = HostHeap {
             heap,
             cpu,

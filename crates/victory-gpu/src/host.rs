@@ -884,7 +884,6 @@ impl Host {
                     }
                 }
                 text.push_str(&crate::shadow::near(va));
-                text.push_str(&crate::descriptor::host::near_heaps(va));
             }
             // The plain output: the extended one (with marker texts) came
             // back without stopped lists on this host.
