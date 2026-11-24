@@ -1,5 +1,23 @@
 # Maintenance log
 
+## Binding constraint: off-peak only
+
+The user set this as a standing hard rule on 2026-11-25:
+
+> Work only in off-peak hours. Off-peak rates are half the peak rates. Peak
+> hours are 01:00-04:00 and 06:00-10:00 UTC, Monday through Friday, excluding
+> Chinese public holidays. All other hours are off-peak, including weekends and
+> Chinese public holidays in full.
+
+How it is enforced here: before starting a maintenance pass, compute the
+current UTC time and check it against those windows; do not begin or continue
+a pass inside a peak window, and do not schedule unattended work that would
+run into one. Record the check with the pass. A pass that is already running
+when a peak window begins must stop rather than run into it.
+
+Current state at the time of writing: 2026-11-24 21:17 UTC, Tuesday -
+off-peak. The next peak window opens 2026-11-25 01:00 UTC, 3.7 hours later.
+
 ## Bootstrap: 2026-11-24
 
 - Scope of this run: create maintenance instructions and tracking templates.
