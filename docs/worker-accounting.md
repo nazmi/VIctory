@@ -38,6 +38,11 @@ sides keep their behaviour, never "ours dropped to make it apply".
 | verify-shader | `ec2aa220` | Shaders: v_med3 NaN from the bits | in branch |
 | verify-shader | `8516122d` | Shaders: op_sel/omod/clamp on v_interp_p2_f16 | in branch |
 | verify-shader | — | `1699` v_add_nc_i16 / v_mad_i16 clamp | **refused**: reads src2 with `half_src` where src0/src1 use `half_int_src`; an inline float there is read as packed f16. Probe on this GPU: 15366 where hardware gives 0. |
+| wave7-hle | `a067e991` | HLE: the retail console ID has the documented dotted form | in branch |
+| wave7-hle | `da106558` | DirectStorage: clear the factory out pointer on failure | in branch |
+| wave7-hle | `df16f7d2` | report APU heap allocations that fail | in branch |
+| wave7-hle | `df359c78` | DirectStorage: read a page list naming page 0 again | in branch |
+| wave7-hle | — | `1729` stray/unreadable save folder | **refused**: it rejects `v0`, breaking `a_folder_named_like_a_version_does_not_remove_the_save`, and returns a readable older version where HEAD deliberately refuses an unreadable newest one — a silent rollback replacing a clean refusal. A policy flip, so it needs the two HEAD tests rewritten deliberately, not a cherry-pick. |
 
 ## Verification of this table
 
