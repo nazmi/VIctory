@@ -28,6 +28,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Clippy, diagnostics build
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      # Includes xtask's repository_passes_policy, the asset-policy check.
+      # GPU tests share D3D12/WARP driver state; parallel test processes can crash on AMD (#181).
+      # Keep the workspace test run deterministic across Windows GPU/driver configurations.
       - name: Tests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --test-threads=1
