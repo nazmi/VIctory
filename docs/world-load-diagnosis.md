@@ -59,6 +59,26 @@ The refusals are therefore not cosmetic. Ranked by how often the run hit them:
 | descriptor read only as data | 2 | 3% |
 | five singletons (see the log) | 5 | 7% |
 
+## The shape of the top refusal
+
+Two facts from the log change what the 31 refusals mean:
+
+1. **Every one of them is a compute shader.**
+2. **Every one fails at offset `0x2c`, `0x30` or `0x40`** — the prologue, within
+   the shader's first sixteen instructions.
+
+Thirty-one *distinct* shaders all failing at the same three offsets is not
+thirty-one problems; it is one systematic one. A prologue failure means our
+tracking does not recognise the address the shader builds from its very first
+instructions, before any of its own logic runs. The most likely cause is that a
+root parameter's declared SGPR span in our layout is too small, so a register
+the shader treats as part of that parameter's address falls outside every
+parameter we declared.
+
+If that is right, the same cause may also explain the crash: a compute family
+of 31 kernels failing together is exactly the kind of subsystem a worker thread
+would wait on and then dereference a null from.
+
 ## What was done about it tonight
 
 **Fixed — 64-bit image atomics (7 refusals).** PR #705 is integrated
@@ -84,12 +104,13 @@ assembled into the 2×2 quad or a mip-specific view. Left out on purpose.
 
 ## What to do next, in order
 
-1. **Re-run with the new refusal text.** The 31 refusals now say which case
-   they are. That single piece of information decides the next fix: if they are
-   root constants past the first dword, the fix is the address rule (#667
-   already does this for one shape and can be extended); if they are descriptor
-   high halves, our user-data layout for that parameter is wrong and that is a
-   different, more serious bug.
+1. **Re-run with the new refusal text.** The 31 prologue refusals now say
+   which case they are. If they read "an SGPR that is no root parameter", our
+   layout is not covering a register the shader uses — a parameter's SGPR span
+   is too small — and that is the bug to fix first, because it takes out a
+   whole subsystem at once. If instead they read "a root constant past the
+   first dword", the fix is the address rule #667 already applies to one shape.
+   Either way one run decides it; no guessing needed.
 2. **Capture what the null write is.** Set `VICTORY_WATCH` on nothing and
    instead run with `VICTORY_CRASH_SAVE` around the faulting RVA to dump the
    registers and the thread's stack (`--features diagnostics` build). The log
