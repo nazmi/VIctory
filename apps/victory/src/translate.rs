@@ -361,11 +361,9 @@ fn translate(
     let Some(dxil) = container.part(FourCC::DXIL).map(|p| p.data) else {
         return t.fail("no DXIL part (SM5 or older)".into(), example);
     };
-    if !lock(seen).insert(blake3::hash(dxil)) {
-        if !list {
-            t.duplicates += 1;
-            return;
-        }
+    if !lock(seen).insert(blake3::hash(dxil)) && !list {
+        t.duplicates += 1;
+        return;
     }
     let programs = match native_programs(dxil) {
         Ok(p) => p,
