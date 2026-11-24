@@ -1,0 +1,25 @@
+name: Format
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rustfmt:
+    # rustfmt does not compile code, so a Linux runner can check the
+    # Windows-only crates.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      # Installs the toolchain that rust-toolchain.toml gives, with its
+      # components, so CI uses the same rustfmt as local builds.
+      - name: Install the toolchain
+        run: rustup toolchain install
+      - name: Check the formatting
+        run: cargo fmt --all -- --check
