@@ -576,10 +576,8 @@ fn buffer_uav(
 /// family takes the texture's format.
 /// shortcut: such a view (sRGB of UNORM, say) reads without its
 /// conversion; cast with castable formats if colors come out wrong.
-fn fits(texture: &ID3D12Resource, mut format: Option<&mut DXGI_FORMAT>, unordered: bool) -> bool {
+fn fits(d: &D3D12_RESOURCE_DESC, mut format: Option<&mut DXGI_FORMAT>, unordered: bool) -> bool {
     use crate::resource::{DEPTH_FORMATS, family};
-    // SAFETY: a live resource.
-    let d = unsafe { texture.GetDesc() };
     let allowed = if unordered {
         d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 != 0
     } else {
@@ -621,6 +619,50 @@ fn fits(texture: &ID3D12Resource, mut format: Option<&mut DXGI_FORMAT>, unordere
     true
 }
 
+/// A shader view of a typeless depth texture names the readable aspect.
+/// For a 2D view D3D12 also requires the plane index to match that format.
+fn texture_srv_desc(
+    resource: &D3D12_RESOURCE_DESC,
+    words: &[u32; 10],
+) -> D3D12_SHADER_RESOURCE_VIEW_DESC {
+    let mut view = srv_desc(words);
+    if !resource
+        .Flags
+        .contains(D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
+    {
+        return view;
+    }
+    let (dsv, depth, stencil) = match resource.Format {
+        DXGI_FORMAT_R32G8X24_TYPELESS => (
+            DXGI_FORMAT_D32_FLOAT_S8X24_UINT,
+            DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS,
+            Some(DXGI_FORMAT_X32_TYPELESS_G8X24_UINT),
+        ),
+        DXGI_FORMAT_R24G8_TYPELESS => (
+            DXGI_FORMAT_D24_UNORM_S8_UINT,
+            DXGI_FORMAT_R24_UNORM_X8_TYPELESS,
+            Some(DXGI_FORMAT_X24_TYPELESS_G8_UINT),
+        ),
+        DXGI_FORMAT_R32_TYPELESS => (DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_R32_FLOAT, None),
+        DXGI_FORMAT_R16_TYPELESS => (DXGI_FORMAT_D16_UNORM, DXGI_FORMAT_R16_UNORM, None),
+        _ => return view,
+    };
+    let plane = if Some(view.Format) == stencil {
+        1
+    } else if [DXGI_FORMAT_UNKNOWN, resource.Format, dsv, depth].contains(&view.Format) {
+        view.Format = depth;
+        0
+    } else {
+        return view;
+    };
+    match view.ViewDimension {
+        D3D12_SRV_DIMENSION_TEXTURE2D => view.Anonymous.Texture2D.PlaneSlice = plane,
+        D3D12_SRV_DIMENSION_TEXTURE2DARRAY => view.Anonymous.Texture2DArray.PlaneSlice = plane,
+        _ => {}
+    }
+    view
+}
+
 /// Makes the host descriptor for `view` at `at`: the host resource it
 /// views, or `None` if it cannot.
 fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
@@ -648,8 +690,10 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
         View::Shader(resource, desc) => {
             let resource = *resource as crate::object::This;
             if let Some(texture) = crate::resource::host_resource(resource) {
-                let mut desc = desc.as_ref().map(srv_desc);
-                if !fits(texture, desc.as_mut().map(|d| &mut d.Format), false) {
+                // SAFETY: a live host texture.
+                let info = unsafe { texture.GetDesc() };
+                let mut desc = desc.as_ref().map(|words| texture_srv_desc(&info, words));
+                if !fits(&info, desc.as_mut().map(|d| &mut d.Format), false) {
                     return None;
                 }
                 // SAFETY: a live texture and a slot of our heap.
@@ -680,7 +724,9 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
                 };
             };
             let mut desc = desc.as_ref().map(uav_desc);
-            if !fits(texture, desc.as_mut().map(|d| &mut d.Format), true) {
+            // SAFETY: a live host texture.
+            let info = unsafe { texture.GetDesc() };
+            if !fits(&info, desc.as_mut().map(|d| &mut d.Format), true) {
                 return None;
             }
             // SAFETY: a live texture and a slot of our heap.
@@ -956,6 +1002,73 @@ mod tests {
         null_for(&view, heap.cpu(0));
         // SAFETY: a plain device query.
         assert!(unsafe { host.device.GetDeviceRemovedReason() }.is_ok());
+    }
+
+    #[test]
+    fn depth_srv_uses_the_requested_aspect() {
+        for (own, request, expected, plane) in [
+            (19, 20, 21, 0),
+            (19, 22, 22, 1),
+            (44, 45, 46, 0),
+            (44, 47, 47, 1),
+            (44, 120, 47, 1),
+            (44, 119, 46, 0),
+            (39, 40, 41, 0),
+            (53, 55, 56, 0),
+            (19, 0, 21, 0),
+            (44, 44, 46, 0),
+        ] {
+            let resource = D3D12_RESOURCE_DESC {
+                Format: DXGI_FORMAT(own),
+                Flags: D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+                ..Default::default()
+            };
+            for dim in [
+                D3D12_SRV_DIMENSION_TEXTURE2D,
+                D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+            ] {
+                let mut words = [0; 10];
+                words[0] = request;
+                words[1] = dim.0 as u32;
+                words[2] = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                words[4] = 2; // MostDetailedMip
+                words[5] = 3; // MipLevels
+                if dim == D3D12_SRV_DIMENSION_TEXTURE2DARRAY {
+                    words[6] = 1; // FirstArraySlice
+                    words[7] = 2; // ArraySize
+                }
+                let plane_word = if dim == D3D12_SRV_DIMENSION_TEXTURE2DARRAY {
+                    8
+                } else {
+                    6
+                };
+                words[plane_word] = 1 - plane;
+                let view = texture_srv_desc(&resource, &words);
+                assert_eq!(view.Format.0, expected);
+                // SAFETY: read the member selected by the input view dimension.
+                unsafe {
+                    if dim == D3D12_SRV_DIMENSION_TEXTURE2DARRAY {
+                        let a = view.Anonymous.Texture2DArray;
+                        assert_eq!(
+                            (
+                                a.MostDetailedMip,
+                                a.MipLevels,
+                                a.FirstArraySlice,
+                                a.ArraySize,
+                                a.PlaneSlice
+                            ),
+                            (2, 3, 1, 2, plane)
+                        );
+                    } else {
+                        let a = view.Anonymous.Texture2D;
+                        assert_eq!(
+                            (a.MostDetailedMip, a.MipLevels, a.PlaneSlice),
+                            (2, 3, plane)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Dynamic slots stay taken until given back, and runs do not wrap.
