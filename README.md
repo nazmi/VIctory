@@ -193,6 +193,10 @@ cargo build --profile diag -p victory --features diagnostics   # target\diag\vic
 Every build appends crashes and host GPU failures to `crashes.log` in the
 title's data folder.
 
+[docs/debugging-notes-from-a-gta-v-port.md](docs/debugging-notes-from-a-gta-v-port.md)
+collects what got another RAGE port from "the world loads" to "the game
+runs": what the title waited for, and how each wait was found.
+
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
