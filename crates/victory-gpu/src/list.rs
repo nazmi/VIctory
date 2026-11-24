@@ -416,13 +416,38 @@ extern "system" fn barrier(this: This, count: u32, barriers: *const Barrier) -> 
 /// Moves a title texture's host copy to `state` in the list, if needed.
 #[cfg(windows)]
 pub(crate) fn ensure_state(list: &crate::host::HostList, resource: This, state: u32) {
-    use windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_STATES as State;
     if let Some((texture, before)) = list.transition(resource, state) {
-        let state = crate::host::legal_state(texture, state);
-        let barrier = crate::host::transition(texture, State(before as i32), State(state as i32));
-        // SAFETY: an open list and a live texture.
-        unsafe { list.list.ResourceBarrier(&[barrier]) };
+        record_transition(list, texture, before, state);
     }
+}
+
+/// As [`ensure_state`], for a host copy the list holds directly (a placed
+/// copy's writer, which the list may never name as a title resource).
+#[cfg(windows)]
+pub(crate) fn ensure_state_host(
+    list: &crate::host::HostList,
+    copy: &std::sync::Arc<crate::resource::HostTexture>,
+    state: u32,
+) {
+    if let Some((texture, before)) = list.transition_host(copy, state) {
+        record_transition(list, texture, before, state);
+    }
+}
+
+/// Records the barrier moving `texture` from `before` to `state` (as the
+/// host has them).
+#[cfg(windows)]
+fn record_transition(
+    list: &crate::host::HostList,
+    texture: &windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+    before: u32,
+    state: u32,
+) {
+    use windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_STATES as State;
+    let state = crate::host::legal_state(texture, state);
+    let barrier = crate::host::transition(texture, State(before as i32), State(state as i32));
+    // SAFETY: an open list and a live texture.
+    unsafe { list.list.ResourceBarrier(&[barrier]) };
 }
 
 #[cfg(windows)]

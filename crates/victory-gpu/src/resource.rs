@@ -1145,6 +1145,15 @@ fn hand_out_resource(
         host,
     });
     #[cfg(windows)]
+    if let Some(host) = &resource.host {
+        add_addressed(
+            std::ptr::from_ref::<Resource>(&resource) as usize,
+            resource.data() as u64,
+            desc,
+            host,
+        );
+    }
+    #[cfg(windows)]
     if desc.dimension == BUFFER {
         let at = std::ptr::from_ref::<Resource>(&resource) as usize;
         crate::shadow::register(at, resource.data() as u64, desc.width);
@@ -1191,6 +1200,7 @@ impl Drop for Resource {
         }
         crate::texture::forget(std::ptr::from_ref::<Resource>(self) as usize);
         crate::descriptor::forget(std::ptr::from_ref::<Resource>(self) as usize);
+        forget_addressed(std::ptr::from_ref::<Resource>(self) as usize);
         if self.desc.dimension == BUFFER {
             crate::shadow::unregister(
                 std::ptr::from_ref::<Resource>(self) as usize,
@@ -1429,6 +1439,106 @@ pub(crate) fn texture_at(address: u64, desc: &[u32; 14]) -> Option<This> {
     }
     map.insert((address, desc), out as usize);
     resource(out).host.is_some().then_some(out)
+}
+
+/// The host copies of title textures, by the title memory they are in: where
+/// a placed copy of that memory takes its contents from, when another
+/// resource writes it (see `crate::texture::sync_placed`).
+#[cfg(windows)]
+struct Addressed {
+    /// The resource object, so its release drops the entry.
+    object: usize,
+    desc: ResourceDesc,
+    /// The host copy, held: a lookup never names a freed texture.
+    host: std::sync::Arc<HostTexture>,
+}
+
+#[cfg(windows)]
+static ADDRESSED: std::sync::Mutex<std::collections::BTreeMap<u64, Vec<Addressed>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Notes that `host` is the host copy of the texture `object` at `address`.
+#[cfg(windows)]
+fn add_addressed(
+    object: usize,
+    address: u64,
+    desc: ResourceDesc,
+    host: &std::sync::Arc<HostTexture>,
+) {
+    if desc.dimension == BUFFER {
+        return;
+    }
+    ADDRESSED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(address)
+        .or_default()
+        .push(Addressed {
+            object,
+            desc,
+            host: host.clone(),
+        });
+}
+
+/// The title released the resource `object`: its host copy is no writer.
+#[cfg(windows)]
+fn forget_addressed(object: usize) {
+    let mut map = ADDRESSED.lock().unwrap_or_else(|e| e.into_inner());
+    map.retain(|_, entries| {
+        entries.retain(|e| e.object != object);
+        !entries.is_empty()
+    });
+}
+
+/// The resource whose host copy writes the title memory that `placed` is a
+/// copy of: the latest one at `address` of the same size, texel width and
+/// format family, with unordered access (its shaders write it). The two
+/// formats differ (the reader's is the console's packed one), so the copy
+/// has to go through a buffer, one format at each end: it needs the same
+/// bytes per texel, which a format of the same family differs from.
+#[cfg(windows)]
+pub(crate) fn writer_at(
+    address: u64,
+    placed: This,
+    placed_copy: &windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+) -> Option<std::sync::Arc<HostTexture>> {
+    use windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    // SAFETY: a live resource.
+    let copy = unsafe { placed_copy.GetDesc() };
+    let bytes = element(copy.Format.0 as u32)?.0;
+    if copy.Dimension.0 == BUFFER as i32 || copy.SampleDesc.Count != 1 {
+        return None;
+    }
+    let map = ADDRESSED.lock().unwrap_or_else(|e| e.into_inner());
+    for entry in map.get(&address)?.iter().rev() {
+        if entry.object == placed as usize || entry.desc.dimension == BUFFER {
+            continue;
+        }
+        // SAFETY: live host textures (each entry holds one).
+        let d = unsafe { entry.host.texture.GetDesc() };
+        if d.Dimension != copy.Dimension
+            || d.Width != copy.Width
+            || d.Height != copy.Height
+            || d.DepthOrArraySize != copy.DepthOrArraySize
+            || d.MipLevels != copy.MipLevels
+            || d.SampleDesc.Count != copy.SampleDesc.Count
+            || d.Format == copy.Format
+            || d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0
+        {
+            continue;
+        }
+        if element(d.Format.0 as u32).map(|(b, _)| b) != Some(bytes) {
+            continue;
+        }
+        tracing::debug!(
+            address = format_args!("{address:#x}"),
+            writer = ?entry.desc,
+            placed = ?copy,
+            "a placed copy takes its contents from the resource that writes its memory"
+        );
+        return Some(entry.host.clone());
+    }
+    None
 }
 
 pub(crate) extern "system" fn create_placed(
@@ -2877,4 +2987,234 @@ mod tests {
             "released rt_b is unregistered from LIVE_TEXTURES"
         );
     }
+
+    /// different families, so the copy goes through a staging buffer with
+    /// one format at each end.
+    #[test]
+    fn a_placed_copy_takes_the_bytes_of_its_writer() {
+        use windows::Win32::Graphics::Direct3D12::*;
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
+
+        let Some(host) = crate::host::host() else {
+            return; // no host GPU
+        };
+        // 8x4x2 3D textures of 4 bytes a texel: the writer in R32_SINT (42,
+        // as the world's fog volumes are written), the placed copy in the
+        // console's packed R9G9B9E5 (67, as their gather reads them).
+        let writer_desc = ResourceDesc {
+            dimension: TEXTURE_3D,
+            width: 8,
+            height: 4,
+            depth_or_array_size: 2,
+            mip_levels: 1,
+            format: 42,
+            sample_count: 1,
+            flags: 4, // unordered access
+            layout: 0,
+            ..buffer(0)
+        };
+        let placed_desc = ResourceDesc {
+            format: 67,
+            flags: 0,
+            ..writer_desc
+        };
+        let words = |d: &ResourceDesc| -> [u32; 14] {
+            // SAFETY: a description is 56 bytes of plain words, aligned.
+            unsafe { std::ptr::from_ref(d).cast::<[u32; 14]>().read() }
+        };
+        let memory = Memory::zeroed(4 * KIB_64, KIB_64).expect("title memory");
+        let address = memory.address();
+        let writer = texture_at(address, &words(&writer_desc)).expect("a writer");
+        let placed = texture_at(address, &words(&placed_desc)).expect("a placed copy");
+
+        // The writer's host texture, as a shader fill left it.
+        let writer_host = host_resource(writer)
+            .expect("the writer's host copy")
+            .clone();
+        // SAFETY: a live resource.
+        let d = unsafe { writer_host.GetDesc() };
+        let mut from = [D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default(); 1];
+        let mut total = 0u64;
+        // SAFETY: one output for the one subresource.
+        unsafe {
+            host.device.GetCopyableFootprints(
+                &d,
+                0,
+                1,
+                0,
+                Some(from.as_mut_ptr()),
+                None,
+                None,
+                Some(&mut total),
+            );
+        }
+        let (staging, data) = host.upload_buffer(total).expect("staging");
+        {
+            let f = from[0].Footprint;
+            for z in 0..f.Depth {
+                for y in 0..f.Height {
+                    for x in 0..f.Width {
+                        let at = from[0].Offset as usize
+                            + (z * f.Height * f.RowPitch + y * f.RowPitch) as usize
+                            + (x * 4) as usize;
+                        // SAFETY: inside the staging buffer's mapping.
+                        unsafe {
+                            (data.add(at) as *mut u32)
+                                .write(x + y * f.Width + z * f.Width * f.Height)
+                        };
+                    }
+                }
+            }
+        }
+        let list = host.new_list().expect("new_list");
+        let texture_at_location = |resource: &ID3D12Resource, sub: u32| {
+            D3D12_TEXTURE_COPY_LOCATION {
+                // SAFETY: borrowed pointers the locations never release.
+                pResource: unsafe { std::mem::transmute_copy(resource) },
+                Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                    SubresourceIndex: sub,
+                },
+            }
+        };
+        let staging_location = |footprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT| {
+            D3D12_TEXTURE_COPY_LOCATION {
+                // SAFETY: as above.
+                pResource: unsafe { std::mem::transmute_copy(&staging) },
+                Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                    PlacedFootprint: footprint,
+                },
+            }
+        };
+        crate::list::ensure_state(&list, writer, 0x400);
+        // SAFETY: an open list and live resources of the same size.
+        unsafe {
+            list.list.CopyTextureRegion(
+                &texture_at_location(&writer_host, 0),
+                0,
+                0,
+                0,
+                &staging_location(from[0]),
+                None,
+            )
+        };
+        list.close();
+        host.execute(&[&list]);
+
+        // The copy from it into the placed copy, as a reader's bind makes.
+        list.reset();
+        let view = crate::descriptor::View::Placed(false, words(&placed_desc), [0; 16]);
+        assert!(
+            crate::texture::sync_placed(&list, placed, &view),
+            "the placed copy is synced"
+        );
+        list.close();
+        host.execute(&[&list]);
+
+        // Read it back and compare with what the writer held.
+        let placed_copy = host_copy(placed).expect("the placed copy's host copy");
+        // SAFETY: a live resource.
+        let d = unsafe { placed_copy.texture.GetDesc() };
+        let mut to = [D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default(); 1];
+        let mut back_total = 0u64;
+        // SAFETY: one output for the one subresource.
+        unsafe {
+            host.device.GetCopyableFootprints(
+                &d,
+                0,
+                1,
+                0,
+                Some(to.as_mut_ptr()),
+                None,
+                None,
+                Some(&mut back_total),
+            );
+        }
+        let back_heap = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_READBACK,
+            ..Default::default()
+        };
+        let back_desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Width: back_total,
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            ..Default::default()
+        };
+        let mut back: Option<ID3D12Resource> = None;
+        // SAFETY: plain creation of a read-back buffer.
+        unsafe {
+            host.device
+                .CreateCommittedResource(
+                    &back_heap,
+                    D3D12_HEAP_FLAGS(0),
+                    &back_desc,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    None,
+                    &mut back,
+                )
+                .expect("a read-back buffer");
+        }
+        let back = back.expect("a read-back buffer");
+        let back_at =
+            |footprint| windows::Win32::Graphics::Direct3D12::D3D12_TEXTURE_COPY_LOCATION {
+                // SAFETY: a borrowed pointer the location never releases.
+                pResource: unsafe { std::mem::transmute_copy(&back) },
+                Type:
+                    windows::Win32::Graphics::Direct3D12::D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                Anonymous: windows::Win32::Graphics::Direct3D12::D3D12_TEXTURE_COPY_LOCATION_0 {
+                    PlacedFootprint: footprint,
+                },
+            };
+        list.reset();
+        crate::list::ensure_state_host(&list, &placed_copy, 0x800);
+        // SAFETY: an open list; both locations name live resources of the
+        // same size.
+        unsafe {
+            list.list.CopyTextureRegion(
+                &back_at(to[0]),
+                0,
+                0,
+                0,
+                &texture_at_location(&placed_copy.texture, 0),
+                None,
+            )
+        };
+        list.close();
+        host.execute(&[&list]);
+        let mut data = std::ptr::null_mut();
+        let range = D3D12_RANGE {
+            Begin: 0,
+            End: back_total as usize,
+        };
+        // SAFETY: a read-back buffer this list resolved into.
+        unsafe { back.Map(0, Some(&range), Some(&mut data)).expect("map") };
+        let f = to[0].Footprint;
+        let mut wrong = 0;
+        for z in 0..f.Depth {
+            for y in 0..f.Height {
+                for x in 0..f.Width {
+                    let at = to[0].Offset as usize
+                        + (z * f.Height * f.RowPitch + y * f.RowPitch) as usize
+                        + (x * 4) as usize;
+                    // SAFETY: inside the read-back buffer's mapping.
+                    let got = unsafe { (data.add(at) as *const u32).read() };
+                    if got != x + y * f.Width + z * f.Width * f.Height {
+                        wrong += 1;
+                    }
+                }
+            }
+        }
+        // SAFETY: the same buffer, read above.
+        unsafe { back.Unmap(0, None) };
+        assert_eq!(wrong, 0, "the placed copy holds the writer's texels");
+    }
+
 }

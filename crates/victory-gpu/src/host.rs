@@ -718,6 +718,9 @@ struct Deferred {
     refreshed: std::collections::HashSet<(usize, usize, usize)>,
     /// Textures whose contents the list brings up to date.
     textures: std::collections::HashSet<usize>,
+    /// Placed copies the list already takes its contents from a writer for
+    /// (by their host copy): one copy per list.
+    synced: std::collections::HashSet<usize>,
     /// Bottom-of-pipe writes, done once the list has run: address, what,
     /// bytes.
     writes: Vec<(usize, crate::queue::Written, usize)>,
@@ -1383,13 +1386,28 @@ impl HostList {
         resource: crate::object::This,
         wanted: u32,
     ) -> Option<(&'static ID3D12Resource, u32)> {
-        let texture = crate::resource::host_resource(resource)?;
         let copy = crate::resource::host_copy(resource)?;
+        self.transition_host(&copy, wanted)
+    }
+
+    /// As [`HostList::transition`], for a host copy held directly (a placed
+    /// copy's writer, whose title resource the list may never name).
+    pub(crate) fn transition_host(
+        &self,
+        copy: &std::sync::Arc<crate::resource::HostTexture>,
+        wanted: u32,
+    ) -> Option<(&'static ID3D12Resource, u32)> {
+        // SAFETY: the states map below holds a clone of `copy` for the life
+        // of the list, as the resource map does, so the texture outlives
+        // every use of the reference (the same assumption
+        // `crate::resource::host_resource` makes).
+        let texture: &'static ID3D12Resource =
+            unsafe { &*(&copy.texture as *const ID3D12Resource) };
         let wanted = legal_state(texture, wanted);
         let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
         match states.entry(std::sync::Arc::as_ptr(&copy) as usize) {
             std::collections::hash_map::Entry::Vacant(v) => {
-                v.insert((wanted, wanted, copy));
+                v.insert((wanted, wanted, copy.clone()));
                 None
             }
             std::collections::hash_map::Entry::Occupied(mut o) => {
@@ -1701,6 +1719,13 @@ impl HostList {
     /// about `key` (a texture to bring up to date).
     pub(crate) fn first_use(&self, key: usize) -> bool {
         self.deferred().textures.insert(key)
+    }
+
+    /// Whether this is the first time since the reset that the list copies
+    /// the placed copy `key` (its host copy) from the resource that writes
+    /// its memory.
+    pub(crate) fn first_sync(&self, key: usize) -> bool {
+        self.deferred().synced.insert(key)
     }
 
     /// Runs `work` when the list is submitted, in order with its copies.
@@ -2346,6 +2371,7 @@ impl Meter {
                 .map(|i| COPY_BACK[i].swap(0, Ordering::Relaxed) as f64 / [1e3, 1e6][i] / frames);
             let dropped = crate::draw::take_dropped() as f64 / frames;
             let indirect = crate::list::take_indirect() as f64 / frames;
+            let placed_syncs = crate::texture::take_syncs() as f64 / frames;
             // Over the same frames as the counts above.
             #[cfg(feature = "diagnostics")]
             let drops = crate::pipeline::take_drops();
@@ -2353,8 +2379,8 @@ impl Meter {
                 "{fps:.1} fps, {ms:.1} ms/frame ({cpu:.1} preparing: copies {copy_ms:.1} ms \
                  {copy_mb:.1} MB, textures {texture_ms:.1} ms {texture_mb:.1} MB; {gpu:.1} on the \
                  GPU; {back_ms:.1} copying back {back_mb:.1} MB), {draws:.0} draws/frame, \
-                 dropped {dropped:.0} without a host pipeline ({making} being made) and \
-                 {indirect:.0} indirect",
+                 dropped {dropped:.0} without a host pipeline ({making} being made), \
+                 {indirect:.0} indirect and {placed_syncs:.0} placed copies/frame",
                 making = crate::pipeline::making()
             );
             #[cfg(feature = "diagnostics")]
