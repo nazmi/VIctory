@@ -50,8 +50,12 @@ const FORBIDDEN_MAGIC: &[(&[u8], &str)] = &[
 
 pub fn run(root: &Path, staged: bool) -> Result<()> {
     let files = list_files(root, staged)?;
+    check_files(root, staged, &files)
+}
+
+fn check_files(root: &Path, staged: bool, files: &[String]) -> Result<()> {
     let mut violations = Vec::new();
-    for path in &files {
+    for path in files {
         if EXCEPTIONS.iter().any(|(p, _)| p == path) {
             continue;
         }
@@ -61,7 +65,7 @@ pub fn run(root: &Path, staged: bool) -> Result<()> {
                 .current_dir(root)
                 .output()?;
             if !out.status.success() {
-                continue; // deleted in the index
+                bail!("cannot read staged file {path} ({})", out.status);
             }
             out.stdout
         } else {
@@ -228,6 +232,14 @@ mod tests {
     #[test]
     fn repository_passes_policy() {
         super::run(&crate::workspace_root(), false).unwrap();
+    }
+
+    #[test]
+    fn staged_file_read_failure_is_reported() {
+        let path = "missing-from-index.txt".to_string();
+        let result = super::check_files(&crate::workspace_root(), true, &[path]);
+        let err = result.expect_err("a staged file that cannot be read must fail the check");
+        assert!(err.to_string().contains("missing-from-index.txt"));
     }
 
     #[test]
