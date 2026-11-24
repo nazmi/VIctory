@@ -381,6 +381,8 @@ struct Lanes {
     refused: u64,
     /// BCPack bytes written and time spent on them.
     bcpack: (u64, std::time::Duration),
+    /// Requests into physical pages.
+    pages: u64,
     since: Option<std::time::Instant>,
 }
 
@@ -440,6 +442,7 @@ fn scheduler() -> Option<&'static Scheduler> {
                     done: Default::default(),
                     refused: 0,
                     bcpack: Default::default(),
+                    pages: 0,
                     since: None,
                 }),
                 work: Condvar::new(),
@@ -508,6 +511,9 @@ impl Lanes {
             self.bcpack.0 += u64::from(job.read.request.destination_size);
             self.bcpack.1 += started.elapsed();
         }
+        if job.read.request.options & PAGE_DESTINATION != 0 {
+            self.pages += 1;
+        }
         let since = *self.since.get_or_insert(started);
         let elapsed = since.elapsed();
         if elapsed.as_secs() >= 5 {
@@ -522,6 +528,7 @@ impl Lanes {
                 bcpack_mb = self.bcpack.0 / 1_000_000,
                 bcpack_workers =
                     format_args!("{:.2}", self.bcpack.1.as_secs_f64() / elapsed.as_secs_f64()),
+                page_destinations = std::mem::take(&mut self.pages),
                 waiting,
                 "dstorage: last {:.1} s",
                 elapsed.as_secs_f64()
@@ -1061,12 +1068,11 @@ fn into_destination(
     if request.options & PAGE_DESTINATION == 0 {
         // Raw reads land through the kernel, which does not fault into the
         // GPU side's guard on title buffers; open them first.
-        victory_gpu::kernel_will_write(request.destination as usize, len);
+        let _writing = victory_gpu::kernel_will_write(request.destination as usize, len);
         // SAFETY: the title's destination holds `destination_size` bytes, at
         // least `len`, and nothing else writes it until completion.
         let out = unsafe { std::slice::from_raw_parts_mut(request.destination.cast::<u8>(), len) };
         let filled = fill(out);
-        victory_gpu::kernel_wrote(request.destination as usize, len);
         return filled.map(drop);
     }
     let offset = (request.page_offset & 0xffff) as usize;
@@ -1557,6 +1563,7 @@ mod tests {
             done: Default::default(),
             refused: 0,
             bcpack: Default::default(),
+            pages: 0,
             since: None,
         }
     }

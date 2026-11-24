@@ -23,6 +23,9 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Other titles used to exercise platform-level code.
     pub test_titles: Vec<PathBuf>,
+    /// The user's copy of AMD FidelityFX for PC (the folder with its
+    /// upscaler DLL), which replaces a title's console build.
+    pub fidelityfx_dir: Option<PathBuf>,
     /// The config file that was read, if any.
     pub source: Option<PathBuf>,
 }
@@ -42,6 +45,7 @@ struct FilePaths {
     data_dir: Option<PathBuf>,
     #[serde(default)]
     test_titles: Vec<PathBuf>,
+    fidelityfx_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -97,6 +101,7 @@ impl Config {
             cache_dir,
             data_dir,
             test_titles,
+            fidelityfx_dir: env_path("VICTORY_FIDELITYFX_DIR").or(file.fidelityfx_dir),
             source,
         })
     }

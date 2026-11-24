@@ -3,9 +3,8 @@
 //! translate wrongly leaves whatever the memory held, and a draw of four
 //! billion vertices or a dispatch past the host's limits runs until the
 //! host resets the display driver. So every record is clamped on the GPU,
-//! just before its execution, by a compute shader of ours
-//! ([`victory_shader::emit::clamp`], built with our own writer: the system's
-//! shader compiler is not on every host, and Wine's does not compile it).
+//! just before its execution, by a compute shader of ours (HLSL compiled by
+//! the system's compiler; a 5.1 shader with its root signature inside).
 //!
 //! Each list also has a budget (2^27 vertex instances or threads, groups
 //! counted as 64 threads, mesh groups as 128): records past it run empty,
@@ -17,11 +16,58 @@
 //! dispatches, the budget) cut legitimate work beyond them; raise them if
 //! the title needs more.
 
-use victory_shader::emit::clamp::{ARGUMENTS, BUDGET, GROUP, argument_clamp};
-use victory_shader::emit::{ROOT_CBV_SPACE, USER_DATA_SPACE};
+use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
+use windows::Win32::Graphics::Direct3D::ID3DBlob;
 use windows::Win32::Graphics::Direct3D12::*;
+use windows::core::s;
 
-use crate::host::{HostList, host};
+use crate::host::{HostList, host, transition};
+
+const SOURCE: &str = r#"
+#define RS "RootConstants(num32BitConstants=4, b0), UAV(u0), UAV(u1)"
+cbuffer Record : register(b0) { uint kind; uint stride; uint records; uint unused; };
+RWByteAddressBuffer args : register(u0);
+// The list's work so far (vertex instances, threads): past the budget,
+// records run empty.
+RWByteAddressBuffer budget : register(u1);
+static const uint BUDGET = 1u << 27;
+// Groups of one dispatch; more run empty.
+static const uint GROUPS = 1u << 20;
+[RootSignature(RS)]
+[numthreads(64, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= records) return;
+    uint at = id.x * stride;
+    uint cost;
+    if (kind <= 1) {
+        // Draws: vertex or index count, then instances.
+        uint count = min(args.Load(at), 1u << 24);
+        uint instances = min(args.Load(at + 4), (1u << 26) / max(count, 1u));
+        cost = count * instances;
+        args.Store2(at, uint2(count, instances));
+    } else if (kind == 2) {
+        uint3 g = min(args.Load3(at), uint3(65535, 65535, 65535));
+        // x * y fits 32 bits; the whole count may not.
+        if (g.z != 0 && g.x * g.y > GROUPS / g.z) {
+            g = uint3(0, 0, 0);
+        }
+        cost = g.x * g.y * g.z * 64;
+        args.Store3(at, g);
+    } else {
+        // Mesh dispatches: the console's are one-dimensional.
+        uint3 g = args.Load3(at);
+        g = uint3(min(g.x, 65535u), min(g.y, 1u), min(g.z, 1u));
+        cost = g.x * g.y * g.z * 128;
+        args.Store3(at, g);
+    }
+    uint before;
+    budget.InterlockedAdd(0, cost, before);
+    if (before >= BUDGET || before + cost > BUDGET) {
+        // Draws keep their layout with no vertices; groups become zero.
+        args.Store(at, 0);
+    }
+}
+"#;
 
 struct Clamp {
     root: ID3D12RootSignature,
@@ -48,48 +94,53 @@ fn clamp() -> Option<&'static Clamp> {
 
 fn make() -> windows::core::Result<Clamp> {
     let device = &host().ok_or_else(windows::core::Error::empty)?.device;
-    // The shader's user data, then its two raw buffers, each at the
-    // register of its root parameter.
-    let uav = |slot: u8| D3D12_ROOT_PARAMETER1 {
-        ParameterType: D3D12_ROOT_PARAMETER_TYPE_UAV,
-        Anonymous: D3D12_ROOT_PARAMETER1_0 {
-            Descriptor: D3D12_ROOT_DESCRIPTOR1 {
-                ShaderRegister: u32::from(slot),
-                RegisterSpace: ROOT_CBV_SPACE,
-                Flags: D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE,
-            },
-        },
-        ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+    let mut code: Option<ID3DBlob> = None;
+    let mut errors: Option<ID3DBlob> = None;
+    // SAFETY: the source and names live through the call; out pointers ours.
+    let compiled = unsafe {
+        D3DCompile(
+            SOURCE.as_ptr().cast(),
+            SOURCE.len(),
+            s!("clamp"),
+            None,
+            None,
+            s!("main"),
+            s!("cs_5_1"),
+            0,
+            0,
+            &mut code,
+            Some(&mut errors),
+        )
     };
-    let params = [
-        D3D12_ROOT_PARAMETER1 {
-            ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
-            Anonymous: D3D12_ROOT_PARAMETER1_0 {
-                Constants: D3D12_ROOT_CONSTANTS {
-                    ShaderRegister: 0,
-                    RegisterSpace: USER_DATA_SPACE,
-                    Num32BitValues: 4,
-                },
-            },
-            ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
-        },
-        uav(ARGUMENTS),
-        uav(BUDGET),
-    ];
-    let (root, _) = crate::pipeline::host::root_signature(device, &params, &[], true)?;
-    let code = argument_clamp();
-    // SAFETY: the description points at the live root signature and code.
-    let pso = unsafe {
-        device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
+    if let Err(e) = compiled {
+        if let Some(errors) = errors {
+            // SAFETY: the blob's own bytes.
+            let text = unsafe {
+                std::slice::from_raw_parts(
+                    errors.GetBufferPointer().cast::<u8>(),
+                    errors.GetBufferSize(),
+                )
+            };
+            tracing::warn!("argument clamp: {}", String::from_utf8_lossy(text));
+        }
+        return Err(e);
+    }
+    let code = code.ok_or_else(windows::core::Error::empty)?;
+    // SAFETY: the blob's own bytes; the root signature is inside the shader.
+    unsafe {
+        let bytes =
+            std::slice::from_raw_parts(code.GetBufferPointer().cast::<u8>(), code.GetBufferSize());
+        let root: ID3D12RootSignature = device.CreateRootSignature(0, bytes)?;
+        let pso = device.CreateComputePipelineState(&D3D12_COMPUTE_PIPELINE_STATE_DESC {
             pRootSignature: std::mem::transmute_copy(&root),
             CS: D3D12_SHADER_BYTECODE {
-                pShaderBytecode: code.as_ptr().cast(),
-                BytecodeLength: code.len(),
+                pShaderBytecode: bytes.as_ptr().cast(),
+                BytecodeLength: bytes.len(),
             },
             ..Default::default()
-        })?
-    };
-    Ok(Clamp { root, pso })
+        })?;
+        Ok(Clamp { root, pso })
+    }
 }
 
 /// Records, in `list`, the clamp of `records` records of `kind` (PC
@@ -99,7 +150,7 @@ fn make() -> windows::core::Result<Clamp> {
 /// after). False if the clamp is not available.
 pub(crate) fn bound(
     list: &HostList,
-    shadow: &std::sync::Arc<crate::shadow::Shadow>,
+    buffer: &ID3D12Resource,
     gpu: u64,
     (kind, stride, records): (u32, u32, u32),
 ) -> bool {
@@ -110,7 +161,6 @@ pub(crate) fn bound(
         return false;
     }
     let l = &list.list;
-    list.buffer_state(shadow, crate::host::BUFFER_UNORDERED_ACCESS);
     let constants = [kind, stride, records, 0];
     // SAFETY: an open list; our root signature, pipeline and a live buffer
     // the caller's list holds.
@@ -120,19 +170,32 @@ pub(crate) fn bound(
         l.SetComputeRootSignature(&c.root);
         l.SetPipelineState(&c.pso);
         l.SetComputeRoot32BitConstants(0, 4, constants.as_ptr().cast(), 0);
-        l.SetComputeRootUnorderedAccessView(u32::from(ARGUMENTS), gpu);
-        l.SetComputeRootUnorderedAccessView(u32::from(BUDGET), budget);
-        l.Dispatch(records.div_ceil(GROUP), 1, 1);
-        l.ResourceBarrier(&[uav_barrier()]);
+        l.SetComputeRootUnorderedAccessView(1, gpu);
+        l.SetComputeRootUnorderedAccessView(2, budget);
+        l.Dispatch(records.div_ceil(64), 1, 1);
+        l.ResourceBarrier(&[
+            uav_barrier(),
+            transition(
+                buffer,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+            ),
+        ]);
     }
-    list.buffer_state(shadow, crate::host::BUFFER_INDIRECT_ARGUMENT);
     true
 }
 
 /// After the execution: the buffer back to unordered access, where the
 /// title's passes keep using it.
-pub(crate) fn done(list: &HostList, shadow: &std::sync::Arc<crate::shadow::Shadow>) {
-    list.buffer_state(shadow, crate::host::BUFFER_UNORDERED_ACCESS);
+pub(crate) fn done(list: &HostList, buffer: &ID3D12Resource) {
+    // SAFETY: an open list and a live buffer.
+    unsafe {
+        list.list.ResourceBarrier(&[transition(
+            buffer,
+            D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        )])
+    };
 }
 
 fn uav_barrier() -> D3D12_RESOURCE_BARRIER {
@@ -149,7 +212,7 @@ fn uav_barrier() -> D3D12_RESOURCE_BARRIER {
 
 #[cfg(test)]
 mod tests {
-    /// The host makes a pipeline of the clamp.
+    /// The clamp compiles with the system's compiler and the host takes it.
     #[test]
     fn argument_clamp_builds() {
         if super::host().is_none() {

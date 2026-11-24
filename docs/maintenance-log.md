@@ -1111,3 +1111,42 @@ integration from a worker's summary.
 
 Gate at `ed526231`: fmt 0 differing, both Clippy commands exit 0, workspace
 **717 passed / 16 ignored / 0 failed**, policy 200 files.
+
+### Upstream moved: 28 maintainer commits, and what they supersede: 2026-11-25
+
+`upstream/main` advanced from `ffe310eb` to `70564ae0` — 28 commits, 76 files,
+**+25,510 / -1,340** — in exactly the files this sweep has been changing. A
+three-way merge from the common base reports **36 conflicted files in 186
+hunks**: a hard merge, not a rebase.
+
+**The important finding is not the conflict count.** The maintainer has
+independently implemented a large part of what this sweep integrated from
+pull requests, and in several cases implemented it better:
+
+| Topic | Ours | Upstream |
+| --- | --- | --- |
+| `image_gather4_l` | refused; #694 rejected because it dropped the LOD operand | **lowered properly**: `gather_at_level` loads the four texels from the level (`lower.rs:8035`), refusing only the cases it cannot prove |
+| Lane masks spilled to VGPR lanes | PR #1074 (`2c1f3461`) | same feature, different shape (`restored` vs our `spilled`) |
+| Structured-buffer stride | refused 171 programs | a **per-slot stride table** taken from the heap |
+| BVH intersection | not implemented; the fork has it | `crates/victory-shader/src/emit/lower/bvh.rs` |
+| Title memory at raw addresses | not implemented; the fork has it | `crates/victory-shader/src/range.rs`, `victory-gpu/src/memory.rs` |
+| 64-bit image atomics | PR #705 (`cd1bbc84`) | present |
+| f16 rounding, denormals, med3, signed zeros | PRs #1668, #1689 | present |
+
+So the merge is not a matter of resolving text. For those topics it is a
+question of **which implementation wins**, and the answer is upstream's: it is
+the authority, it has tests built for its own architecture (`semantics_tests.rs`
+3,010 lines, `flow_tests.rs`, `memory_tests.rs`, `stride_tests.rs`), and
+keeping our parallel versions would leave two implementations of the same idea
+in one tree.
+
+Still ours alone, and confirmed absent upstream: the percent-escape decoder
+(#480), the PE data-directory bound (#396), the spilled user-data table
+(`spill.rs` — upstream has no such module), and the rest of the wave-1..7
+integrations. Those must survive the merge.
+
+**What was published.** Before touching the merge, `integration/maintenance`
+was fast-forwarded to the verified tip and pushed to `origin`:
+`321580dd..f355d4b6`, remote and local identical. Gate on that exact commit:
+fmt 0 differing, both Clippy commands exit 0, workspace 717 passed / 16 ignored
+/ 0 failed, policy 200 files.

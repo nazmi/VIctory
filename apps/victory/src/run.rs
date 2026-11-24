@@ -53,6 +53,9 @@ pub fn run(
     // A title that relaunched itself: the old process must be gone first.
     victory_hle::modules::lifecycle::wait_for_previous();
     let cfg = victory_core::Config::load()?;
+    // Before the import registry is first used: it holds the module only
+    // when the host's FidelityFX serves.
+    victory_hle::modules::fidelityfx::use_host_dir(cfg.fidelityfx_dir.as_deref());
     let exe = resolve_game_exe(cfg.game_dir.as_deref(), exe);
     let original = std::fs::read(&exe).with_context(|| match cfg.game_dir.as_deref() {
         // A bare name that was not found is a path mistake worth naming.
@@ -205,6 +208,7 @@ fn diagnostics(image: &victory_loader::LoadedImage, cfg: &victory_core::Config) 
     victory_loader::dump_stacks_on_schedule();
     victory_hle::modules::audio::capture::start();
     watch(image.base(), image.info().size_of_image as usize);
+    poke(image.base(), image.info().size_of_image as usize);
     // Debugging aid: `VICTORY_CRASH_SAVE=<rva>:<len>,...` (hex) writes those
     // title ranges to `crash-<rva>.bin` in the cache dir on a crash.
     let size = image.info().size_of_image as usize;
@@ -257,6 +261,34 @@ fn watch_rvas(list: &str, size: usize) -> Vec<usize> {
         .filter_map(|r| usize::from_str_radix(r.trim().trim_start_matches("0x"), 16).ok())
         .filter(|&rva| rva.checked_add(4).is_some_and(|end| end <= size))
         .collect()
+}
+
+/// Debugging aid: `VICTORY_POKE=<rva>:<byte>,...` (hex) writes the byte at
+/// each title+rva twice a second. A title that ends itself when its main
+/// loop has not ticked for a while (Grand Theft Auto VI: 30 s) runs on
+/// through slower frames with its tick flag poked. The address must be
+/// writable title data.
+#[cfg(all(windows, feature = "diagnostics"))]
+fn poke(base: usize, size: usize) {
+    let Ok(list) = std::env::var("VICTORY_POKE") else {
+        return;
+    };
+    let hex = |s: &str| usize::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok();
+    let pokes: Vec<(usize, u8)> = list
+        .split(',')
+        .filter_map(|p| p.split_once(':'))
+        .filter_map(|(rva, byte)| Some((hex(rva)?, u8::try_from(hex(byte)?).ok()?)))
+        .filter(|&(rva, _)| rva < size)
+        .collect();
+    std::thread::spawn(move || {
+        loop {
+            for &(rva, byte) in &pokes {
+                // SAFETY: a byte inside the mapped image, checked above.
+                unsafe { ((base + rva) as *mut u8).write_volatile(byte) };
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    });
 }
 
 /// DLLs the host or our runtime provide are never taken from the title.

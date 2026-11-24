@@ -35,12 +35,15 @@ windows-sys = { workspace = true, features = [
     "Win32_UI_Input_XboxController",
     "Win32_UI_WindowsAndMessaging",
 ] }
-# Diagnostics only: recording our own audio (`modules::audio::capture`).
+# The host's D3D12 objects handed to a host library (`modules::fidelityfx`);
+# diagnostics only: recording our own audio (`modules::audio::capture`).
 windows = { workspace = true, features = [
     "Foundation",
     "Media_Core",
     "Media_SpeechSynthesis",
     "Storage_Streams",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_Media_Audio",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",

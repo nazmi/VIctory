@@ -13,7 +13,10 @@
 //!
 //! M0-relative VGPR access (`v_movrels/d/sd_b32`, `v_swaprel_b32`) names its
 //! operand's whole possible range: from the encoded register up to the
-//! program's VGPR count, all read (and all written, for a destination).
+//! program's VGPR count, or the largest M0 proven there ([`build_bounded`]),
+//! all read (and all written, for a destination).
+
+use std::collections::HashMap;
 
 use crate::ShaderError;
 use crate::gfx10::{self, Fields, Flow, Instruction, Operand};
@@ -40,8 +43,8 @@ pub struct Program {
     pub wave64: bool,
     /// VGPRs v0 up to this exist; bounds M0-relative access.
     pub vgprs: u16,
-    /// In code order, then copies made to give every loop one entry. Block 0
-    /// is the entry, which can be an empty block before the code.
+    /// In code order, then copies made to give every loop one entry; block 0
+    /// is the entry.
     pub blocks: Vec<Block>,
     /// Registers read before any write, with their value on entry: what the
     /// hardware or a called fetch routine set up (user SGPRs, system values,
@@ -52,7 +55,7 @@ pub struct Program {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     /// Byte offset of the block's first machine instruction (shared by a
-    /// block and its copies). Zero for an empty entry block.
+    /// block and its copies).
     pub offset: usize,
     pub preds: Vec<usize>,
     pub phis: Vec<Phi>,
@@ -123,6 +126,17 @@ impl Inst {
 /// count. Fails on instructions the IR cannot express yet
 /// ([`ShaderError::Unsupported`]).
 pub fn build(code: &[u8], wave64: bool, vgprs: u16) -> Result<Program, ShaderError> {
+    build_bounded(code, wave64, vgprs, &HashMap::new())
+}
+
+/// [`build`], with the largest M0 (at most 255) each relative move can see,
+/// by instruction offset, bounding the registers it names.
+pub fn build_bounded(
+    code: &[u8],
+    wave64: bool,
+    vgprs: u16,
+    m0_max: &HashMap<usize, u8>,
+) -> Result<Program, ShaderError> {
     let list = gfx10::decode(code)?;
     let lanes = 1 + u8::from(wave64);
     let isa = |offset, reason| ShaderError::Isa { offset, reason };
@@ -145,17 +159,9 @@ pub fn build(code: &[u8], wave64: bool, vgprs: u16) -> Result<Program, ShaderErr
     }
     leaders.sort_unstable();
     leaders.dedup();
-    // When the first instruction is a loop header, give SSA a separate
-    // entry edge to carry the initial register values into its phis.
-    let preheader = usize::from(
-        flows
-            .iter()
-            .any(|flow| matches!(flow, Flow::Jump(0) | Flow::Branch(0))),
-    );
     let block_at = |offset: usize| {
         leaders
             .binary_search(&offset)
-            .map(|b| b + preheader)
             .map_err(|_| isa(offset, "jump into a block"))
     };
 
@@ -169,23 +175,11 @@ pub fn build(code: &[u8], wave64: bool, vgprs: u16) -> Result<Program, ShaderErr
             exit: Exit::End,
         })
         .collect();
-    if preheader != 0 {
-        blocks.insert(
-            0,
-            Block {
-                offset: 0,
-                preds: Vec::new(),
-                phis: Vec::new(),
-                insts: Vec::new(),
-                exit: Exit::Jump(1),
-            },
-        );
-    }
     let next_offsets: Vec<Option<usize>> = (0..list.len())
         .map(|i| list.get(i + 1).map(|n| n.offset))
         .collect();
     for ((machine, flow), next) in list.into_iter().zip(flows).zip(next_offsets) {
-        let b = leaders.partition_point(|&l| l <= machine.offset) - 1 + preheader;
+        let b = leaders.partition_point(|&l| l <= machine.offset) - 1;
         let name = machine.name().ok_or(ShaderError::Unsupported {
             offset: machine.offset,
             what: "unknown opcode",
@@ -205,13 +199,8 @@ pub fn build(code: &[u8], wave64: bool, vgprs: u16) -> Result<Program, ShaderErr
                 Flow::Stop => Exit::End,
             };
         }
-        if let Some((mut reads, writes)) = effects(&machine, &fields, name, lanes, vgprs)? {
-            // Lanes disabled in EXEC keep the old value.
-            for w in writes.iter().filter(|w| matches!(w, Reg::V(_))) {
-                if !reads.contains(w) {
-                    reads.push(*w);
-                }
-            }
+        let m0 = m0_max.get(&machine.offset).copied();
+        if let Some((reads, writes)) = effects(&machine, &fields, name, lanes, vgprs, m0)? {
             let unset = |regs: Vec<Reg>| regs.into_iter().map(|r| (r, NONE)).collect();
             blocks[b].insts.push(Inst {
                 machine,
@@ -222,6 +211,12 @@ pub fn build(code: &[u8], wave64: bool, vgprs: u16) -> Result<Program, ShaderErr
         }
     }
     link(&mut blocks);
+    if !blocks[0].preds.is_empty() {
+        return Err(ShaderError::Unsupported {
+            offset: 0,
+            what: "a branch to the program entry",
+        });
+    }
     split_irreducible(&mut blocks)?;
 
     let order = reverse_postorder(&blocks);
@@ -686,10 +681,17 @@ type Effects = (Vec<Reg>, Vec<Reg>);
 /// value of a VGPR it only writes.
 pub(crate) fn operand_reads(p: &Program, inst: &Inst) -> Vec<Reg> {
     let lanes = 1 + u8::from(p.wave64);
-    effects(&inst.machine, &inst.fields, inst.name(), lanes, p.vgprs)
-        .ok()
-        .flatten()
-        .map_or_else(Vec::new, |e| e.0)
+    effects(
+        &inst.machine,
+        &inst.fields,
+        inst.name(),
+        lanes,
+        p.vgprs,
+        None,
+    )
+    .ok()
+    .flatten()
+    .map_or_else(Vec::new, |e| e.0)
 }
 
 /// Registers an instruction reads and writes, one per dword, or `None` if
@@ -700,6 +702,7 @@ fn effects(
     name: &'static str,
     lanes: u8,
     vgprs: u16,
+    m0_max: Option<u8>,
 ) -> Result<Option<Effects>, ShaderError> {
     if DROPPED.contains(&name) {
         return Ok(None);
@@ -804,10 +807,13 @@ fn effects(
                 "v_movrelsd_b32" | "v_movrelsd_2_b32" | "v_swaprel_b32" => (true, true),
                 _ => (false, false),
             };
-            // v[reg + M0] for any M0 that stays inside the program's VGPRs.
+            // v[reg + M0] for any M0 that stays inside the program's VGPRs
+            // (and below the proven bound).
             let indexed = |op: &Operand, out: &mut Vec<Reg>| match *op {
                 Operand::Vector { reg, .. } if u16::from(reg) < vgprs => {
-                    out.extend((u16::from(reg)..vgprs).map(|r| Reg::V(r as u8)));
+                    let end =
+                        m0_max.map_or(vgprs, |m| vgprs.min(u16::from(reg) + u16::from(m) + 1));
+                    out.extend((u16::from(reg)..end).map(|r| Reg::V(r as u8)));
                     Ok(())
                 }
                 _ => Err(ShaderError::Isa {
@@ -960,6 +966,8 @@ fn effects(
     }
     if vector {
         r.extend(mask(EXEC));
+        // Lanes disabled in EXEC keep the old value.
+        r.extend(w.iter().filter(|w| matches!(w, Reg::V(_))));
     }
     let mut seen = Vec::with_capacity(r.len());
     r.retain(|reg| {
@@ -1177,46 +1185,6 @@ mod tests {
         assert_eq!(add.read(Reg::S(0)), Some(phi.value));
         assert_eq!(b1.insts[1].read(Reg::S(0)), add.write(Reg::S(0)));
         assert_eq!(b2.insts[0].name(), "s_endpgm");
-    }
-
-    #[test]
-    fn loops_can_branch_to_offset_zero() {
-        let p = build_words(
-            &[
-                0x8000_8100, // 0: s_add_u32 s0, s0, 1
-                0xBF07_8400, // s_cmp_lg_u32 s0, 4
-                0xBF85_FFFD, // s_cbranch_scc1 -> 0
-                S_ENDPGM,
-            ],
-            false,
-        );
-        let [entry, header, end] = &p.blocks[..] else {
-            panic!("{:?}", p.blocks);
-        };
-        assert!(entry.preds.is_empty());
-        assert!(entry.insts.is_empty());
-        assert_eq!(entry.exit, Exit::Jump(1));
-        assert_eq!(header.offset, 0);
-        assert_eq!(header.preds, [0, 1]);
-        assert_eq!(
-            header.exit,
-            Exit::Branch {
-                taken: 1,
-                not_taken: 2,
-            }
-        );
-        assert_eq!(end.exit, Exit::End);
-        let [phi] = &header.phis[..] else {
-            panic!("{:?}", header.phis);
-        };
-        let add = &header.insts[0];
-        assert_eq!(phi.reg, Reg::S(0));
-        assert_eq!(
-            phi.args,
-            [input(&p, Reg::S(0)), add.write(Reg::S(0)).unwrap()]
-        );
-        assert_eq!(add.read(Reg::S(0)), Some(phi.value));
-        assert!(crate::structure::structure(&p).is_ok());
     }
 
     #[test]

@@ -273,16 +273,18 @@ extern "system" fn check_feature_support(
     const FEATURE_LEVELS: u32 = 2;
     const FORMAT_SUPPORT: u32 = 3;
     const MULTISAMPLE: u32 = 4;
-    const FORMAT_INFO: u32 = 5;
-    const VIRTUAL_ADDRESS: u32 = 6;
+    const SHADER_MODEL: u32 = 7;
+    const OPTIONS1: u32 = 8;
+    const OPTIONS4: u32 = 23;
     let expected = match feature {
         OPTIONS_QUERY => size_of_val(&OPTIONS),
         ARCHITECTURE => 16,
         FEATURE_LEVELS => size_of::<FeatureLevels>(),
         FORMAT_SUPPORT => 12,
         MULTISAMPLE => 16,
-        FORMAT_INFO => 8,
-        VIRTUAL_ADDRESS => 8,
+        SHADER_MODEL => 4,
+        OPTIONS1 => 24,
+        OPTIONS4 => 12,
         _ => {
             tracing::warn!(feature, size, "device feature query not implemented");
             return E_NOTIMPL;
@@ -324,31 +326,29 @@ extern "system" fn check_feature_support(
             q[3] = u32::from(matches!(q[1], 1 | 2 | 4 | 8));
             S_OK
         }
-        FORMAT_INFO => {
+        SHADER_MODEL => {
             // SAFETY: checked size and non-null.
-            let q = unsafe { &mut *data.cast::<[u32; 2]>() };
-            // DXGI_FORMAT in, plane count out (the byte is padded to 8).
-            q[1] = plane_count(q[0]);
+            let q = unsafe { &mut *data.cast::<u32>() };
+            // The highest asked for, up to 6.6 (the AMD upscaler asks).
+            *q = (*q).min(0x66);
             S_OK
         }
-        VIRTUAL_ADDRESS => {
+        OPTIONS1 => {
+            let lanes = crate::console::current().compute_units() * 64;
             // SAFETY: checked size and non-null.
-            let q = unsafe { &mut *data.cast::<[u32; 2]>() };
-            // The bits OPTIONS reports for a resource, and user space's
-            // 48 bits for the process (addresses are CPU addresses here).
-            q[0] = OPTIONS[9];
-            q[1] = 48;
+            unsafe {
+                data.cast::<[u32; 6]>()
+                    .write_unaligned([1, 32, 64, lanes, 1, 1])
+            };
+            S_OK
+        }
+        OPTIONS4 => {
+            // SAFETY: checked size and non-null. Native 16-bit shader operations.
+            unsafe { data.cast::<[u32; 3]>().write_unaligned([0, 0, 1]) };
             S_OK
         }
         _ => feature_levels(data),
     }
-}
-
-/// The planes of the depth/stencil format families; everything else has
-/// one. These are the DXGI format numbers, including the typeless and
-/// read-only views of the same two planes.
-fn plane_count(format: u32) -> u32 {
-    1 + u32::from(matches!(format, 19..=22 | 44..=47))
 }
 
 fn feature_levels(data: *mut c_void) -> HRESULT {
@@ -557,31 +557,27 @@ mod tests {
         assert_eq!(query(&levels[4..], 0x18).0, UNSUPPORTED);
     }
 
+    /// The queries the AMD upscaler's capability check makes.
     #[test]
-    fn format_info_reports_the_planes_of_depth_formats() {
+    fn shader_model_and_wave_options_are_the_consoles() {
         type Check = extern "system" fn(This, u32, *mut c_void, u32) -> HRESULT;
-        let check = slot::<Check>(device(), 0x68);
-        let query = |format: u32, size| {
-            let mut info = [format, u32::MAX];
-            let hr = check(device(), 5, (&raw mut info).cast(), size);
-            (hr, info[1])
-        };
-        assert_eq!(query(28, 8), (S_OK, 1), "R8G8B8A8_UNORM");
-        assert_eq!(query(45, 8), (S_OK, 2), "D24_UNORM_S8_UINT");
-        assert_eq!(query(20, 8), (S_OK, 2), "D32_FLOAT_S8X24_UINT");
-        assert_eq!(query(19, 8), (S_OK, 2), "R32G8X24_TYPELESS");
-        assert_eq!(query(47, 8), (S_OK, 2), "X24_TYPELESS_G8_UINT");
-        assert_eq!(query(28, 4).0, E_INVALIDARG, "wrong size");
-    }
-
-    #[test]
-    fn virtual_address_support_matches_the_reported_address_space() {
-        type Check = extern "system" fn(This, u32, *mut c_void, u32) -> HRESULT;
-        let check = slot::<Check>(device(), 0x68);
-        let mut info = [0u32; 2];
-        assert_eq!(check(device(), 6, (&raw mut info).cast(), 8), S_OK);
-        assert_eq!(info[0], OPTIONS[9], "resource bits agree with OPTIONS");
-        assert_eq!(info[1], 48);
-        assert_eq!(check(device(), 6, (&raw mut info).cast(), 4), E_INVALIDARG);
+        let device = device();
+        let check = slot::<Check>(device, 0x68);
+        let mut model = 0x67u32;
+        assert_eq!(check(device, 7, (&raw mut model).cast(), 4), S_OK);
+        assert_eq!(model, 0x66);
+        model = 0x62;
+        assert_eq!(check(device, 7, (&raw mut model).cast(), 4), S_OK);
+        assert_eq!(model, 0x62);
+        let mut waves = [0u32; 6];
+        assert_eq!(check(device, 8, waves.as_mut_ptr().cast(), 24), S_OK);
+        assert_eq!(waves[..3], [1, 32, 64]);
+        let mut options4 = [0u32; 3];
+        assert_eq!(check(device, 23, options4.as_mut_ptr().cast(), 12), S_OK);
+        assert_eq!(options4[2], 1, "native 16-bit operations");
+        assert_eq!(
+            check(device, 8, waves.as_mut_ptr().cast(), 16),
+            E_INVALIDARG
+        );
     }
 }
