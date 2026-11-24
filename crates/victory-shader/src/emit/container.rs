@@ -71,7 +71,9 @@ pub(crate) fn signature(elements: &[SigElement], input: bool) -> Vec<u8> {
     // Validator 1.6 writes one name per element in element order, repeats
     // included, except that system values share theirs (it keys names by
     // the semantic's string, which is one static string per system value);
-    // the rows sorted by register (unallocated last).
+    // the rows sorted by register (unallocated last), then by name offset,
+    // not column (its `sort_sig`): rows of one register keep element order,
+    // apart from system values.
     let mut offsets: Vec<u32> = Vec::new();
     let mut next = 8 + 32 * elements.len() as u32;
     let mut names = Vec::new();
@@ -89,7 +91,7 @@ pub(crate) fn signature(elements: &[SigElement], input: bool) -> Vec<u8> {
         }
     }
     let mut order: Vec<usize> = (0..elements.len()).collect();
-    order.sort_by_key(|&i| (elements[i].row.unwrap_or(u32::MAX), elements[i].col));
+    order.sort_by_key(|&i| (elements[i].row.unwrap_or(u32::MAX), offsets[i]));
     for i in order {
         let (e, offset) = (&elements[i], offsets[i]);
         let used = e.usage << e.col;
@@ -385,5 +387,42 @@ mod tests {
             .map(|b| format!("{b:02x}"))
             .collect();
         assert_eq!(hex, "900150983cd24fb0d6963f7d28e17f72");
+    }
+
+    #[test]
+    fn rows_of_one_register_keep_element_order_not_column_order() {
+        let element = |name: &str, index, kind, row, col, cols| SigElement {
+            name: name.into(),
+            index,
+            kind,
+            comp: 9,
+            interp: if kind == 0 { 2 } else { 4 },
+            row: Some(row),
+            col,
+            cols,
+            usage: (1 << cols) - 1,
+            half: false,
+        };
+        // As a vertex program declares them: a w channel before the xyz of
+        // the same register.
+        let elements = [
+            element("SV_Position", 0, 3, 0, 0, 4),
+            element("TEXCOORD", 3, 0, 1, 3, 1),
+            element("NORMAL", 0, 0, 1, 0, 3),
+        ];
+        let part = signature(&elements, false);
+        let rows: Vec<(u32, u32)> = (0..3)
+            .map(|r| {
+                let word = |k: usize| {
+                    let at = 8 + 32 * r + 4 * k;
+                    u32::from_le_bytes(part[at..at + 4].try_into().unwrap())
+                };
+                // Semantic index and register.
+                (word(2), word(5))
+            })
+            .collect();
+        // Register order, then name offset (element order here), as the
+        // validator writes them: TEXCOORD3 before NORMAL0 in register 1.
+        assert_eq!(rows, [(0, 0), (3, 1), (0, 1)]);
     }
 }
