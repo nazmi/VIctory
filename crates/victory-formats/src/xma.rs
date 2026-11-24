@@ -127,6 +127,61 @@ pub fn read_frame(data: &[u8], start: usize) -> Option<Frame> {
     })
 }
 
+/// Reads a frame that begins near the end of one rolling input buffer and
+/// finishes at the start of the next. The continuation lives in the first
+/// `first_frame_bit` bits after the next packet's header; `next_in_tail` is
+/// where the frame after it begins in `tail`.
+pub fn read_frame_spanning(
+    head: &[u8],
+    head_bits: usize,
+    tail: &[u8],
+    start: usize,
+) -> Option<(Frame, usize)> {
+    let mut cursor = Cursor { data: head, pos: start };
+    let bits = cursor.bits(LENGTH_BITS)? as usize;
+    if bits <= LENGTH_BITS as usize || bits == 0x7fff {
+        return None;
+    }
+    let continuation = packet(tail, 0)?.first_frame_bit as usize;
+    if continuation == 0 || continuation >= bits || start >= head_bits {
+        return None;
+    }
+    let mut out = vec![0u8; bits.div_ceil(8)];
+    // Gather the head with the packet-aware cursor: it skips each packet's
+    // header and the packets of other streams, which raw bit copying would
+    // mistake for frame payload (review note on #443).
+    let mut cursor = Cursor { data: head, pos: start };
+    let mut got = 0;
+    while got < bits && cursor.pos < head_bits {
+        let bit = cursor.bit()?;
+        out[got / 8] |= (bit as u8) << (7 - got % 8);
+        got += 1;
+    }
+    if got >= bits {
+        return None;
+    }
+    let needed = bits - got;
+    if continuation != needed {
+        return None; // the tail belongs to a different frame
+    }
+    // The continuation is at the start of the next packet's payload.
+    for i in 0..needed {
+        let at = HEADER_BITS + i;
+        let byte = *tail.get(at / 8)?;
+        out[(got + i) / 8] |= ((byte >> (7 - at % 8)) & 1) << (7 - (got + i) % 8);
+    }
+    let next_in_tail = 32 + continuation;
+    Some((
+        Frame {
+            data: out,
+            bits,
+            start,
+            next: Some(next_in_tail),
+        },
+        next_in_tail,
+    ))
+}
+
 /// Where the frame after the one at `start`..`end` begins: right after it,
 /// unless it was the last frame to begin in its packet and the rest of that
 /// packet is padding.
@@ -1413,6 +1468,91 @@ mod tests {
         assert_eq!(frame.bits, bits);
         assert_eq!(frame.next, Some(3 * PACKET_BITS + HEADER_BITS));
         assert_eq!(read_frame(&data, 3 * PACKET_BITS + HEADER_BITS).unwrap().next, None);
+    }
+
+    #[test]
+    /// A frame whose last eleven bits sit in the next rolling input buffer
+    /// comes back byte-for-byte the same as an unsplit frame.
+    #[test]
+    fn a_frame_can_finish_in_the_next_rolling_buffer() {
+        const BITS: usize = 31;
+        let whole = {
+            let mut d = vec![0u8; PACKET_BYTES];
+            put_bits(&mut d, 0, 32, 1 << 26);
+            put_bits(&mut d, 32, LENGTH_BITS, BITS as u32);
+            put_bits(&mut d, 47, 2, 0b10);
+            put_bits(&mut d, 49, 16, 0xABCD);
+            d
+        };
+        let unsplit = read_frame(&whole, 32).expect("whole frame");
+        assert_eq!(unsplit.bits, BITS);
+
+        let split_at = 52; // 20 bits in the head, 11 in the tail.
+        let mut head = vec![0u8; PACKET_BYTES];
+        for bit in 0..split_at {
+            if whole[bit / 8] >> (7 - bit % 8) & 1 == 1 {
+                head[bit / 8] |= 1 << (7 - bit % 8);
+            }
+        }
+        put_bits(&mut head, 0, 32, 1 << 26);
+        let mut tail = vec![0u8; PACKET_BYTES];
+        put_bits(&mut tail, 0, 32, (1 << 26) | (11 << 11));
+        for bit in split_at..32 + BITS {
+            let value = whole[bit / 8] >> (7 - bit % 8) & 1;
+            let at = 32 + bit - split_at;
+            if value == 1 {
+                tail[at / 8] |= 1 << (7 - at % 8);
+            }
+        }
+
+        let (spanning, next) =
+            read_frame_spanning(&head, split_at, &tail, 32).expect("spanning frame");
+        assert_eq!(spanning.bits, BITS);
+        assert_eq!(spanning.data, unsplit.data);
+        assert_eq!(next, 43);
+    }
+
+    /// A frame that crosses a packet header keeps that header out of its
+    /// payload (review note on #443).
+    #[test]
+    fn a_spanning_frame_skips_the_packet_header_it_crosses() {
+        const PACKET: usize = PACKET_BYTES * 8;
+        const BITS: usize = 500;
+        const START: usize = PACKET + PACKET - 352; // late in packet 1
+        const SECOND: usize = 2 * PACKET + HEADER_BITS; // payload of packet 2
+        const HEAD_BITS: usize = SECOND + 100;
+        const NEEDED: usize = BITS - 352 - 100;
+
+        let mut whole = vec![0u8; 3 * PACKET_BYTES];
+        for p in 0..3 {
+            put_bits(&mut whole, p * PACKET, 32, 1 << 26);
+        }
+        put_bits(&mut whole, START, LENGTH_BITS, BITS as u32);
+        // Distinct payload bytes make a stray header obvious.
+        for i in LENGTH_BITS as usize..BITS {
+            let at = START + i;
+            if (PACKET..PACKET + HEADER_BITS).contains(&at) {
+                continue; // the cursor skips packet 2's header
+            }
+            let value = ((i * 7) % 251) as u32 & 1;
+            put_bits(&mut whole, at, 1, value);
+        }
+
+        let mut head = vec![0u8; 3 * PACKET_BYTES];
+        head.copy_from_slice(&whole);
+        let mut tail = vec![0u8; PACKET_BYTES];
+        put_bits(&mut tail, 0, 32, (1 << 26) | ((NEEDED as u32) << 11));
+        for i in 0..NEEDED {
+            let at = HEAD_BITS + i;
+            let value = (whole[at / 8] >> (7 - at % 8)) & 1;
+            put_bits(&mut tail, HEADER_BITS + i, 1, value as u32);
+        }
+
+        let (spanning, next) =
+            read_frame_spanning(&head, HEAD_BITS, &tail, START).expect("spanning frame");
+        let expected = read_frame(&whole, START).expect("whole frame");
+        assert_eq!(spanning.data, expected.data, "no header bits in the payload");
+        assert_eq!(next, 32 + NEEDED);
     }
 
     /// The direct sum `imdct_half` stands for (FFmpeg's naive inverse MDCT:

@@ -592,10 +592,46 @@ fn decode(context: Context, voice: &mut Voice) -> bool {
     if at < 32 {
         at = 32 + xma::packet(data, 0).map_or(0, |p| p.first_frame_bit as usize);
     }
-    let Some(frame) = xma::read_frame(data, at) else {
-        // This input is used up.
-        context.set_field(0, 20 + current, 1, 0);
-        return true;
+    let bank_data = |bank: u32| {
+        let (address, packets) = if bank == 0 {
+            (context.get(5), context.field(0, 0, 12))
+        } else {
+            (context.get(6), context.field(1, 0, 12))
+        };
+        let len = packets as usize * xma::PACKET_BYTES;
+        heap_bytes(address & !0x7ff, len).map(|data| (data, len * 8))
+    };
+    // A frame may straddle the end of one rolling input and the start of
+    // the other: the console keeps the partial bits in the next packet's
+    // `first_frame_bit` span. Finish it before switching banks, instead of
+    // dropping it and restarting at the other bank's first new frame.
+    let (frame, bank, mut next) = match xma::read_frame(data, at) {
+        Some(frame) => {
+            let next = frame.next.unwrap_or(0);
+            (frame, current, next)
+        }
+        None => {
+            let other = 1 - current;
+            let spanning = if valid & (1 << other) != 0 {
+                bank_data(other).and_then(|(tail, _)| {
+                    xma::read_frame_spanning(data, data.len() * 8, tail, at)
+                })
+            } else {
+                None
+            };
+            match spanning {
+                Some((frame, next)) => {
+                    context.set_field(0, 20 + current, 1, 0);
+                    context.set_field(4, 31, 1, other);
+                    (frame, other, next)
+                }
+                None => {
+                    // This input is used up.
+                    context.set_field(0, 20 + current, 1, 0);
+                    return true;
+                }
+            }
+        }
     };
     let decoder = voice.decoder.get_or_insert_with(|| {
         const RATES: [u32; 4] = [24_000, 32_000, 44_100, 48_000];
@@ -615,7 +651,6 @@ fn decode(context: Context, voice: &mut Voice) -> bool {
             );
         }
     }
-    let mut next = frame.next.unwrap_or(0);
     let loops = context.field(0, 12, 8);
     let loop_end = context.field(4, 0, 26) as usize;
     let ends_loop = loop_end != 0
@@ -641,7 +676,7 @@ fn decode(context: Context, voice: &mut Voice) -> bool {
         voice.skip = context.field(1, 17, 3) as usize * xma::SUBFRAME_SAMPLES;
     }
     if next == 0 {
-        context.set_field(0, 20 + current, 1, 0);
+        context.set_field(0, 20 + bank, 1, 0);
     }
     context.set_field(2, 0, 26, next as u32);
     true
@@ -1334,6 +1369,84 @@ mod tests {
         // No loops left: both frames whole, and on to the third.
         assert_eq!(step(third), 4 * subframe);
         ApuFree(input);
+    }
+
+    #[test]
+    /// One silent frame whose last eleven bits sit in the other rolling
+    /// input bank: a naive bank switch drops it, so the ring would get a
+    /// zero-padded block instead of the decoded frame.
+    #[test]
+    fn xma_frames_split_across_rolling_inputs_are_decoded() {
+        let _serial = lock(&CONTEXT_TESTS);
+        let mut request = ShapeContexts {
+            counts: [0, 0, 0, 0, 4, 0],
+            arrays: [std::ptr::null_mut(); 6],
+            apu: [0; 6],
+        };
+        assert_eq!(AcpHalAllocateShapeContexts(&mut request), S_OK);
+        let context = Context(request.arrays[4].cast::<u32>().wrapping_add(16));
+
+        let start = xma::PACKET_BYTES * 8 - 20;
+        let bits = 31usize;
+        let mut put = |data: &mut [u8], at: usize, value: u32, width: usize| {
+            for i in 0..width {
+                if value >> (width - 1 - i) & 1 == 1 {
+                    data[(at + i) / 8] |= 1 << (7 - (at + i) % 8);
+                }
+            }
+        };
+        let mut head = vec![0u8; xma::PACKET_BYTES];
+        put(&mut head, 0, 1 << 26, 32); // one frame, no interleaved streams
+        put(&mut head, start, bits as u32, 15);
+        put(&mut head, start + 15, 0b10, 2); // one 512-sample subframe
+        let mut tail = vec![0u8; xma::PACKET_BYTES];
+        put(&mut tail, 0, (1 << 26) | ((bits - 20) as u32) << 11, 32);
+
+        let (mut input0, mut apu0) = (std::ptr::null_mut(), 0);
+        assert_eq!(ApuAlloc(&mut input0, &mut apu0, 0x1000, 0x800, 1), S_OK);
+        let (mut input1, mut apu1) = (std::ptr::null_mut(), 0);
+        assert_eq!(ApuAlloc(&mut input1, &mut apu1, 0x1000, 0x800, 1), S_OK);
+        // SAFETY: both banks were allocated with a full packet's room.
+        unsafe {
+            std::ptr::copy_nonoverlapping(head.as_ptr(), input0.cast(), head.len());
+            std::ptr::copy_nonoverlapping(tail.as_ptr(), input1.cast(), tail.len());
+        }
+        let (mut output, mut output_apu) = (std::ptr::null_mut(), 0);
+        assert_eq!(ApuAlloc(&mut output, &mut output_apu, 0x400, 0x100, 2), S_OK);
+
+        context.set(0, 1 | 1 << 20 | 1 << 21 | 4 << 22); // bank 0: one packet, both valid
+        context.set(1, 1 | 1 << 31 | 3 << 27); // bank 1: one packet, writable
+        context.set(2, start as u32);
+        context.set(5, apu0);
+        context.set(6, apu1);
+        context.set(7, output_apu);
+
+        let mut acp = std::ptr::null_mut();
+        assert_eq!(AcpHalCreate(&mut acp), S_OK);
+        // SAFETY: just created.
+        let m = unsafe { (*acp).vtable };
+        assert_eq!((m.connect)(acp, 0x1000, 0x1000), S_OK);
+        let submit = |command: u32, words: &[u32]| {
+            assert_eq!(
+                (m.submit)(acp, command, 0xf1, u32::MAX, words.as_ptr().cast(), 0),
+                S_OK
+            );
+        };
+        submit(ENABLE_XMA, &[1]);
+        xma().pump();
+
+        let frames = |x: &Xma| lock(&x.voices[1]).as_ref().map(|v| v.trace.frames);
+        assert_eq!(frames(&xma()), Some(1), "the split frame was decoded");
+        // It continues in bank 1, not bank 0.
+        assert_eq!(context.field(4, 31, 1), 1);
+        assert_eq!(context.field(2, 0, 26), 43);
+
+        submit(DISABLE_XMA, &[1]);
+        (m.release)(acp);
+        ApuFree(input0);
+        ApuFree(input1);
+        ApuFree(output);
+        assert_eq!(AcpHalReleaseShapeContexts(), S_OK);
     }
 
     #[test]
