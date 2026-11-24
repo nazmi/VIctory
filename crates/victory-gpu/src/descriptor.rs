@@ -431,6 +431,92 @@ fn words<const N: usize>(desc: *const [u32; N]) -> Option<[u32; N]> {
     (!desc.is_null()).then(|| unsafe { desc.read_unaligned() })
 }
 
+#[cfg(windows)]
+const _: () = {
+    use std::mem::{offset_of, size_of};
+    use windows::Win32::Graphics::Direct3D12::*;
+    assert!(size_of::<D3D12_SHADER_RESOURCE_VIEW_DESC>() == 40);
+    assert!(offset_of!(D3D12_SHADER_RESOURCE_VIEW_DESC, Format) == 0);
+    assert!(offset_of!(D3D12_SHADER_RESOURCE_VIEW_DESC, ViewDimension) == 4);
+    assert!(offset_of!(D3D12_SHADER_RESOURCE_VIEW_DESC, Shader4ComponentMapping) == 8);
+    assert!(offset_of!(D3D12_SHADER_RESOURCE_VIEW_DESC, Anonymous) == 16);
+    assert!(size_of::<D3D12_BUFFER_SRV>() == 24);
+    assert!(offset_of!(D3D12_BUFFER_SRV, Flags) == 16);
+    assert!(size_of::<D3D12_BUFFER_SRV_FLAGS>() == 4);
+    assert!(size_of::<D3D12_TEX1D_SRV>() == 12);
+    assert!(size_of::<D3D12_TEX1D_ARRAY_SRV>() == 20);
+    assert!(size_of::<D3D12_TEX2D_SRV>() == 16);
+    assert!(size_of::<D3D12_TEX2D_ARRAY_SRV>() == 24);
+    assert!(size_of::<D3D12_TEX2DMS_SRV>() == 4);
+    assert!(size_of::<D3D12_TEX2DMS_ARRAY_SRV>() == 8);
+    assert!(size_of::<D3D12_TEX3D_SRV>() == 12);
+    assert!(size_of::<D3D12_TEXCUBE_SRV>() == 12);
+    assert!(size_of::<D3D12_TEXCUBE_ARRAY_SRV>() == 20);
+    assert!(size_of::<D3D12_RAYTRACING_ACCELERATION_STRUCTURE_SRV>() == 8);
+
+    assert!(size_of::<D3D12_UNORDERED_ACCESS_VIEW_DESC>() == 40);
+    assert!(offset_of!(D3D12_UNORDERED_ACCESS_VIEW_DESC, Format) == 0);
+    assert!(offset_of!(D3D12_UNORDERED_ACCESS_VIEW_DESC, ViewDimension) == 4);
+    assert!(offset_of!(D3D12_UNORDERED_ACCESS_VIEW_DESC, Anonymous) == 8);
+    assert!(size_of::<D3D12_BUFFER_UAV>() == 32);
+    assert!(offset_of!(D3D12_BUFFER_UAV, Flags) == 24);
+    assert!(size_of::<D3D12_BUFFER_UAV_FLAGS>() == 4);
+    assert!(size_of::<D3D12_TEX1D_UAV>() == 4);
+    assert!(size_of::<D3D12_TEX1D_ARRAY_UAV>() == 12);
+    assert!(size_of::<D3D12_TEX2D_UAV>() == 8);
+    assert!(size_of::<D3D12_TEX2D_ARRAY_UAV>() == 16);
+    assert!(size_of::<D3D12_TEX2DMS_UAV>() == 4);
+    assert!(size_of::<D3D12_TEX2DMS_ARRAY_UAV>() == 8);
+    assert!(size_of::<D3D12_TEX3D_UAV>() == 12);
+};
+
+/// Zeroes union alignment padding (`d[3]`) and unused union tail words of a
+/// raw `D3D12_SHADER_RESOURCE_VIEW_DESC` word array.
+fn canonical_srv_desc(mut d: [u32; 10]) -> [u32; 10] {
+    d[3] = 0;
+    let keep = match d[1] {
+        1 => 9,  // Buffer (d[9] is trailing struct padding)
+        2 => 7,  // Texture1D
+        3 => 9,  // Texture1DArray
+        4 => 8,  // Texture2D
+        5 => 10, // Texture2DArray
+        6 => 4,  // Texture2DMS (UnusedField_NothingToDefine only)
+        7 => 6,  // Texture2DMSArray
+        8 => 7,  // Texture3D
+        9 => 7,  // TextureCube
+        10 => 9, // TextureCubeArray
+        11 => 6, // RaytracingAccelerationStructure
+        _ => 10,
+    };
+    d[keep..].fill(0);
+    d
+}
+
+/// Zeroes unused union tail words (and `Buffer`'s trailing padding word) of a
+/// raw `D3D12_UNORDERED_ACCESS_VIEW_DESC` word array. The union begins at
+/// offset 8 (`d[2]`) with no leading padding.
+fn canonical_uav_desc(mut d: [u32; 10]) -> [u32; 10] {
+    let keep = match d[1] {
+        1 => 9, // Buffer (d[9] is trailing struct padding)
+        2 => 3, // Texture1D
+        3 => 5, // Texture1DArray
+        4 => 4, // Texture2D
+        5 => 6, // Texture2DArray
+        6 => 2, // Texture2DMS (UnusedField_NothingToDefine only)
+        7 => 4, // Texture2DMSArray
+        8 => 5, // Texture3D
+        _ => 10,
+    };
+    d[keep..].fill(0);
+    d
+}
+
+fn canonical_placed_desc(mut desc: [u32; 16], canonical: fn([u32; 10]) -> [u32; 10]) -> [u32; 16] {
+    let head = canonical(std::array::from_fn(|i| desc[i]));
+    desc[..10].copy_from_slice(&head);
+    desc
+}
+
 /// Device method.
 pub(crate) extern "system" fn create_cbv(_: This, desc: *const [u32; 4], handle: u64) {
     if let Some([lo, hi, size, _]) = words(desc) {
@@ -446,7 +532,10 @@ pub(crate) extern "system" fn create_srv(
     desc: *const [u32; 10],
     handle: u64,
 ) {
-    record(handle, View::Shader(resource as usize, words(desc)));
+    record(
+        handle,
+        View::Shader(resource as usize, words(desc).map(canonical_srv_desc)),
+    );
 }
 
 /// Device method.
@@ -457,7 +546,11 @@ pub(crate) extern "system" fn create_uav(
     desc: *const [u32; 10],
     handle: u64,
 ) {
-    let view = View::Unordered(resource as usize, counter as usize, words(desc));
+    let view = View::Unordered(
+        resource as usize,
+        counter as usize,
+        words(desc).map(canonical_uav_desc),
+    );
     record(handle, view);
 }
 
@@ -471,6 +564,8 @@ pub(crate) extern "system" fn create_placed_srv(
     handle: u64,
 ) {
     if let (Some(resource), Some(desc)) = (words(resource), words(desc)) {
+        let resource = crate::resource::canonical_resource_desc(resource);
+        let desc = canonical_placed_desc(desc, canonical_srv_desc);
         record(handle, View::Placed(false, resource, desc));
     }
 }
@@ -482,6 +577,8 @@ pub(crate) extern "system" fn create_placed_uav(
     handle: u64,
 ) {
     if let (Some(resource), Some(desc)) = (words(resource), words(desc)) {
+        let resource = crate::resource::canonical_resource_desc(resource);
+        let desc = canonical_placed_desc(desc, canonical_uav_desc);
         record(handle, View::Placed(true, resource, desc));
     }
 }
@@ -791,5 +888,194 @@ mod tests {
         // A size that does not match the count is not a placement.
         assert_eq!(create(desc, Placement { address, size: 7 }, &mut h), S_OK);
         assert_ne!(slot::<extern "system" fn(This) -> u64>(h, 0x48)(h), address);
+    }
+
+    #[test]
+    fn canonicalization_deduplicates_padding_and_unused_union_words() {
+        let mut raw_res = [0u32; 14];
+        for (i, word) in raw_res.iter_mut().enumerate() {
+            *word = 0x100 + i as u32;
+        }
+        let canon_res = crate::resource::canonical_resource_desc(raw_res);
+        assert_eq!(canon_res[1], 0);
+        assert_eq!(canon_res[13], 0);
+        assert_eq!(canon_res[0], raw_res[0]);
+        assert_eq!(canon_res[2..13], raw_res[2..13]);
+
+        let slots = [0u64; 4 * 4]; // four 32-byte slots
+        let slot_at = |i: usize| slots.as_ptr() as u64 + 32 * i as u64;
+        let raw_record = |h: u64| -> [u32; 3] {
+            // SAFETY: `h` points inside `slots`.
+            unsafe { *(h as *const [u32; 3]) }
+        };
+
+        let null = std::ptr::null();
+        let resource = 0x6666_0000usize as This;
+        let (s0, s1, s2, s3) = (slot_at(0), slot_at(1), slot_at(2), slot_at(3));
+
+        // SRV dimensions 1..=11: padding word d[3] and tail d[keep..] are zeroed.
+        let srv_keeps = [
+            (1u32, 9usize),
+            (2, 7),
+            (3, 9),
+            (4, 8),
+            (5, 10),
+            (6, 4),
+            (7, 6),
+            (8, 7),
+            (9, 7),
+            (10, 9),
+            (11, 6),
+        ];
+        for &(dim, keep) in &srv_keeps {
+            let mut a = [0u32; 10];
+            a[0] = 28;
+            a[1] = dim;
+            a[2] = 0x1688;
+            for (i, w) in a[4..keep].iter_mut().enumerate() {
+                *w = 10 + dim * 10 + i as u32;
+            }
+            let mut b = a;
+            a[3] = 0xdead_beef;
+            b[3] = 0xcafe_babe;
+            for (i, w) in a[keep..].iter_mut().enumerate() {
+                *w = 0xaaaa_0000 + i as u32;
+            }
+            for (i, w) in b[keep..].iter_mut().enumerate() {
+                *w = 0x5555_0000 + i as u32;
+            }
+
+            create_srv(null, resource, &a, s0);
+            create_srv(null, resource, &b, s1);
+            assert_eq!(raw_record(s0), raw_record(s1), "SRV dim {dim} deduplicates");
+            let Some(View::Shader(_, Some(stored))) = view(s0) else {
+                panic!("expected View::Shader for SRV dim {dim}");
+            };
+            assert_eq!(stored[3], 0, "SRV dim {dim} zeroes d[3]");
+            assert!(
+                stored[keep..].iter().all(|&w| w == 0),
+                "SRV dim {dim} zeroes tail d[{keep}..]"
+            );
+            assert_eq!(
+                stored[4..keep],
+                a[4..keep],
+                "SRV dim {dim} keeps live words"
+            );
+        }
+        let srv_live_a = [28, 4, 0x1688, 0, 0, 1, 0, 0, 0, 0];
+        let srv_live_b = [28, 4, 0x1688, 0, 1, 1, 0, 0, 0, 0];
+        create_srv(null, resource, &srv_live_a, s0);
+        create_srv(null, resource, &srv_live_b, s1);
+        assert_ne!(raw_record(s0), raw_record(s1));
+
+        // UAV dimensions 1..=8: union starts at d[2] with no leading padding.
+        let uav_keeps = [
+            (1u32, 9usize),
+            (2, 3),
+            (3, 5),
+            (4, 4),
+            (5, 6),
+            (6, 2),
+            (7, 4),
+            (8, 5),
+        ];
+        for &(dim, keep) in &uav_keeps {
+            let mut a = [0u32; 10];
+            a[0] = 28;
+            a[1] = dim;
+            for (i, w) in a[2..keep].iter_mut().enumerate() {
+                *w = 20 + dim * 10 + i as u32;
+            }
+            let mut b = a;
+            for (i, w) in a[keep..].iter_mut().enumerate() {
+                *w = 0xbbbb_0000 + i as u32;
+            }
+            for (i, w) in b[keep..].iter_mut().enumerate() {
+                *w = 0x4444_0000 + i as u32;
+            }
+
+            create_uav(null, resource, null, &a, s0);
+            create_uav(null, resource, null, &b, s1);
+            assert_eq!(raw_record(s0), raw_record(s1), "UAV dim {dim} deduplicates");
+            let Some(View::Unordered(_, _, Some(stored))) = view(s0) else {
+                panic!("expected View::Unordered for UAV dim {dim}");
+            };
+            assert!(
+                stored[keep..].iter().all(|&w| w == 0),
+                "UAV dim {dim} zeroes tail d[{keep}..]"
+            );
+            assert_eq!(
+                stored[2..keep],
+                a[2..keep],
+                "UAV dim {dim} keeps live words"
+            );
+        }
+        let uav_live_a = [28, 4, 0, 0, 0, 0, 0, 0, 0, 0];
+        let uav_live_b = [28, 4, 1, 0, 0, 0, 0, 0, 0, 0];
+        create_uav(null, resource, null, &uav_live_a, s0);
+        create_uav(null, resource, null, &uav_live_b, s1);
+        assert_ne!(raw_record(s0), raw_record(s1));
+
+        // Placed SRV and Placed UAV canonicalize ResourceDesc + first 10 view words
+        // while preserving desc[10..16] (GPU address and console fields).
+        let res_a = [
+            3,
+            0x1111_2222,
+            0,
+            0,
+            16,
+            0,
+            16,
+            0x0001_0001,
+            28,
+            1,
+            0,
+            0,
+            0,
+            0x3333_4444,
+        ];
+        let mut res_b = res_a;
+        res_b[1] = 0x5555_6666;
+        res_b[13] = 0x7777_8888;
+
+        let psrv_a = [
+            28, 4, 0x1688, 0x1234, 0, 1, 0, 0, 0x9abc, 0xdef0, 0x1000, 0x2, 3, 4, 5, 6,
+        ];
+        let mut psrv_b = psrv_a;
+        psrv_b[3] = 0x4321;
+        psrv_b[8] = 0x1111;
+        psrv_b[9] = 0x2222;
+        create_placed_srv(null, &res_a, &psrv_a, s0);
+        create_placed_srv(null, &res_b, &psrv_b, s1);
+        assert_eq!(raw_record(s0), raw_record(s1));
+        let Some(View::Placed(false, stored_res, stored_desc)) = view(s0) else {
+            panic!("expected placed SRV");
+        };
+        assert_eq!((stored_res[1], stored_res[13]), (0, 0));
+        assert_eq!((stored_desc[3], stored_desc[8], stored_desc[9]), (0, 0, 0));
+        assert_eq!(stored_desc[10..16], psrv_a[10..16]);
+
+        let mut psrv_diff_tail = psrv_a;
+        psrv_diff_tail[15] = 99;
+        create_placed_srv(null, &res_a, &psrv_diff_tail, s2);
+        assert_ne!(raw_record(s0), raw_record(s2));
+
+        let puav_a = [
+            28, 4, 1, 0, 0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666, 0x2000, 0x3, 7, 8, 9, 10,
+        ];
+        let mut puav_b = puav_a;
+        puav_b[4..10].fill(0xffff_0000);
+        create_placed_uav(null, &res_a, &puav_a, s2);
+        create_placed_uav(null, &res_b, &puav_b, s3);
+        assert_eq!(raw_record(s2), raw_record(s3));
+        let Some(View::Placed(true, stored_res, stored_desc)) = view(s2) else {
+            panic!("expected placed UAV");
+        };
+        assert_eq!((stored_res[1], stored_res[13]), (0, 0));
+        assert!(stored_desc[4..10].iter().all(|&w| w == 0));
+        assert_eq!(stored_desc[10..16], puav_a[10..16]);
+
+        forget(resource as usize);
+        let _ = slots[0];
     }
 }

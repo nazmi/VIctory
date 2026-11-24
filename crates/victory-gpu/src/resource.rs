@@ -107,7 +107,21 @@ pub(crate) struct AllocationInfo {
 
 const _: () = assert!(size_of::<HeapProperties>() == 20);
 const _: () = assert!(size_of::<HeapDesc>() == 48);
-const _: () = assert!(size_of::<ResourceDesc>() == 56);
+const _: () = {
+    use std::mem::offset_of;
+    assert!(offset_of!(ResourceDesc, dimension) == 0);
+    assert!(offset_of!(ResourceDesc, alignment) == 8);
+    assert!(offset_of!(ResourceDesc, flags) == 48);
+    assert!(size_of::<ResourceDesc>() == 56);
+};
+
+/// Zeroes the struct padding words (offsets 4..8 and 52..56) of a raw
+/// `ResourceDesc` word array so equal descriptions compare identically.
+pub(crate) fn canonical_resource_desc(mut d: [u32; 14]) -> [u32; 14] {
+    d[1] = 0;
+    d[13] = 0;
+    d
+}
 
 const BUFFER: u32 = 1;
 const TEXTURE_3D: u32 = 4;
@@ -795,6 +809,174 @@ pub(crate) fn host_copy(this: This) -> Option<std::sync::Arc<HostTexture>> {
     resource(this).host.clone()
 }
 
+#[cfg(windows)]
+const PC_FLAGS: u32 = 0xf; // render target, depth, UAV, no shader access
+#[cfg(windows)]
+const WRITABLE_FLAGS: u32 = 0x7; // render target, depth, UAV
+#[cfg(windows)]
+const DEPTH_FLAG: u32 = 0x2;
+#[cfg(windows)]
+const UNORDERED_FLAG: u32 = 0x4;
+#[cfg(windows)]
+const DENY_SHADER_RESOURCE_FLAG: u32 = 0x8;
+
+#[cfg(windows)]
+fn host_flags(flags: u32) -> u32 {
+    let mut f = flags & PC_FLAGS;
+    // PC refuses depth targets that are also unordered-access (the console
+    // allows both; Grand Theft Auto VI's shadow maps ask for it).
+    // shortcut: the host copy loses UAV use; give it a second view-only
+    // copy if draws write it as a UAV.
+    if f & DEPTH_FLAG != 0 {
+        f &= !UNORDERED_FLAG;
+    }
+    f
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TextureKey {
+    dimension: u32,
+    width: u64,
+    height: u32,
+    depth_or_array: u16,
+    mips: u32,
+    samples: u32,
+    family: u32,
+}
+
+#[cfg(windows)]
+struct LiveTexture {
+    resource: usize,
+    key: TextureKey,
+    host_flags: u32,
+    host_format: u32,
+    host: std::sync::Weak<HostTexture>,
+}
+
+#[cfg(windows)]
+static LIVE_TEXTURES: std::sync::Mutex<std::collections::BTreeMap<u64, Vec<LiveTexture>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+#[cfg(windows)]
+fn backing_address(backing: &Backing) -> u64 {
+    match *backing {
+        Backing::Committed(ref memory) => memory.address(),
+        // SAFETY: placement checked the range lies inside the heap.
+        Backing::Placed { heap, offset } => unsafe {
+            (*heap.cast::<Heap>())
+                .memory
+                .ptr
+                .as_ptr()
+                .add(offset as usize) as u64
+        },
+        Backing::Address(at) => at as u64,
+    }
+}
+
+#[cfg(windows)]
+fn texture_key(desc: &ResourceDesc) -> TextureKey {
+    TextureKey {
+        dimension: desc.dimension,
+        width: desc.width,
+        height: desc.height,
+        depth_or_array: desc.depth_or_array_size,
+        mips: mip_count(desc),
+        samples: desc.sample_count.max(1),
+        family: family(pc_format(desc.format)),
+    }
+}
+
+#[cfg(windows)]
+fn is_typeless(format: u32) -> bool {
+    family(format) == format && family(format.wrapping_add(1)) == format
+}
+
+#[cfg(windows)]
+fn find_live_texture(addr: u64, desc: &ResourceDesc) -> Option<std::sync::Arc<HostTexture>> {
+    if addr == 0 || desc.dimension == BUFFER {
+        return None;
+    }
+    let want_key = texture_key(desc);
+    let want_flags = host_flags(desc.flags);
+    let want_format = pc_format(desc.format);
+
+    let mut map = LIVE_TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
+    let entries = map.get_mut(&addr)?;
+    entries.retain(|e| e.host.strong_count() > 0);
+    if entries.is_empty() {
+        map.remove(&addr);
+        return None;
+    }
+    let compatible = |entry: &LiveTexture| -> bool {
+        if entry.key != want_key {
+            return false;
+        }
+        if (entry.host_flags & (want_flags & WRITABLE_FLAGS)) != (want_flags & WRITABLE_FLAGS) {
+            return false;
+        }
+        if want_flags & DENY_SHADER_RESOURCE_FLAG == 0
+            && entry.host_flags & DENY_SHADER_RESOURCE_FLAG != 0
+        {
+            return false;
+        }
+        if want_flags & DENY_SHADER_RESOURCE_FLAG == 0
+            && DEPTH_FORMATS
+                .iter()
+                .any(|&(typed, _)| typed == entry.host_format)
+        {
+            return false;
+        }
+        if !is_typeless(entry.host_format)
+            && want_flags & WRITABLE_FLAGS != 0
+            && entry.host_format != want_format
+        {
+            return false;
+        }
+        true
+    };
+    let mut fallback = None;
+    for entry in entries.iter() {
+        if !compatible(entry) {
+            continue;
+        }
+        let Some(host) = entry.host.upgrade() else {
+            continue;
+        };
+        if entry.host_flags & WRITABLE_FLAGS != 0 {
+            return Some(host);
+        }
+        if fallback.is_none() {
+            fallback = Some(host);
+        }
+    }
+    fallback
+}
+
+#[cfg(windows)]
+fn register_live_texture(addr: u64, entry: LiveTexture) {
+    LIVE_TEXTURES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(addr)
+        .or_default()
+        .push(entry);
+}
+
+#[cfg(windows)]
+fn unregister_live_texture(addr: u64, resource: usize) {
+    if addr == 0 {
+        return;
+    }
+    let mut map = LIVE_TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(entries) = map.get_mut(&addr) {
+        entries.retain(|e| e.resource != resource);
+        if entries.is_empty() {
+            map.remove(&addr);
+        }
+    }
+}
+
 /// A host texture like the title's: same description, in GPU memory,
 /// without the console's layout and flags.
 #[cfg(windows)]
@@ -804,7 +986,6 @@ fn host_texture(
     clear: *const c_void,
 ) -> Option<windows::Win32::Graphics::Direct3D12::ID3D12Resource> {
     use windows::Win32::Graphics::Direct3D12::*;
-    const PC_FLAGS: u32 = 0xf; // render target, depth, UAV, no shader access
     if desc.dimension == BUFFER {
         return None;
     }
@@ -812,26 +993,16 @@ fn host_texture(
     let mut d = *desc;
     d.layout = 0;
     d.alignment = 0;
-    d.flags &= PC_FLAGS;
-    // PC refuses depth targets that are also unordered-access (the console
-    // allows both; Grand Theft Auto VI's shadow maps ask for it).
-    // shortcut: the host copy loses UAV use; give it a second view-only
-    // copy if draws write it as a UAV.
-    const DEPTH: u32 = 2;
-    const UNORDERED: u32 = 4;
-    if d.flags & DEPTH != 0 {
-        d.flags &= !UNORDERED;
-    }
+    d.flags = host_flags(d.flags);
     d.format = pc_format(d.format);
-    const DENY_SHADER_RESOURCE: u32 = 8;
-    if d.flags & DENY_SHADER_RESOURCE == 0
+    if d.flags & DENY_SHADER_RESOURCE_FLAG == 0
         && let Some(&(_, typeless)) = DEPTH_FORMATS.iter().find(|&&(f, _)| f == d.format)
     {
         d.format = typeless;
     }
     // The host has no sRGB unordered access: such textures are typeless,
     // their unordered access views plain UNORM.
-    if d.flags & UNORDERED != 0 && SRGB.iter().any(|&(srgb, _)| srgb == d.format) {
+    if d.flags & UNORDERED_FLAG != 0 && SRGB.iter().any(|&(srgb, _)| srgb == d.format) {
         d.format = family(d.format);
     }
     // The clear value names the format too: format, then color or depth
@@ -867,7 +1038,10 @@ fn host_texture(
     }
     if let Some(t) = &texture {
         crate::host::name(t, || {
-            format!("texture {}x{} f{} flags {:#x}", d.width, d.height, d.format, d.flags)
+            format!(
+                "texture {}x{} f{} flags {:#x}",
+                d.width, d.height, d.format, d.flags
+            )
         });
     }
     texture
@@ -928,7 +1102,25 @@ fn hand_out_resource(
     #[cfg(not(windows))]
     let _ = (state, clear);
     #[cfg(windows)]
-    let host = host_texture(&desc, state, clear);
+    let addr = if desc.dimension != BUFFER {
+        backing_address(&backing)
+    } else {
+        0
+    };
+    #[cfg(windows)]
+    let host = if desc.dimension != BUFFER {
+        find_live_texture(addr, &desc).or_else(|| {
+            host_texture(&desc, state, clear).map(|texture| {
+                let state = crate::host::legal_state(&texture, crate::host::texture_state(state));
+                std::sync::Arc::new(HostTexture {
+                    texture,
+                    state: state.into(),
+                })
+            })
+        })
+    } else {
+        None
+    };
     let resource = Box::new(Resource {
         object: Object::new(&RESOURCE_FUNCTIONS),
         desc,
@@ -936,18 +1128,28 @@ fn hand_out_resource(
         heap_flags,
         backing,
         #[cfg(windows)]
-        host: host.map(|texture| {
-            let state = crate::host::legal_state(&texture, crate::host::texture_state(state));
-            std::sync::Arc::new(HostTexture {
-                texture,
-                state: state.into(),
-            })
-        }),
+        host,
     });
     #[cfg(windows)]
     if desc.dimension == BUFFER {
         let at = std::ptr::from_ref::<Resource>(&resource) as usize;
         crate::shadow::register(at, resource.data() as u64, desc.width);
+    } else if addr != 0
+        && let Some(ref h) = resource.host
+    {
+        let ptr = std::ptr::from_ref::<Resource>(&resource) as usize;
+        // SAFETY: a live host texture.
+        let hd = unsafe { h.texture.GetDesc() };
+        register_live_texture(
+            addr,
+            LiveTexture {
+                resource: ptr,
+                key: texture_key(&desc),
+                host_flags: hd.Flags.0 as u32,
+                host_format: hd.Format.0 as u32,
+                host: std::sync::Arc::downgrade(h),
+            },
+        );
     }
     object::hand_out(RESOURCE, resource, iid, &RESOURCE_IIDS, out)
 }
@@ -979,6 +1181,11 @@ impl Drop for Resource {
             crate::shadow::unregister(
                 std::ptr::from_ref::<Resource>(self) as usize,
                 self.data() as u64,
+            );
+        } else {
+            unregister_live_texture(
+                self.data() as u64,
+                std::ptr::from_ref::<Resource>(self) as usize,
             );
         }
     }
@@ -1151,14 +1358,47 @@ static PLACED_TEXTURES: std::sync::Mutex<std::collections::BTreeMap<(u64, [u32; 
 /// description `desc` (as words), made on first use.
 #[cfg(windows)]
 pub(crate) fn texture_at(address: u64, desc: &[u32; 14]) -> Option<This> {
-    let mut map = PLACED_TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(&r) = map.get(&(address, *desc)) {
-        return Some(r as This);
-    }
+    let desc = canonical_resource_desc(*desc);
     // SAFETY: 56 bytes in the description's layout.
     let d = unsafe { desc.as_ptr().cast::<ResourceDesc>().read_unaligned() };
     if d.dimension == BUFFER {
         return None;
+    }
+    let mut map = PLACED_TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&cached_r) = map.get(&(address, desc)) {
+        let cached_host = resource(cached_r as This).host.clone();
+        // SAFETY: a live host texture.
+        let cached_writable = cached_host
+            .as_ref()
+            .is_some_and(|h| unsafe { h.texture.GetDesc() }.Flags.0 as u32 & WRITABLE_FLAGS != 0);
+        if !cached_writable
+            && let Some(live) = find_live_texture(address, &d)
+            // SAFETY: a live host texture.
+            && unsafe { live.texture.GetDesc() }.Flags.0 as u32 & WRITABLE_FLAGS != 0
+            && !cached_host
+                .as_ref()
+                .is_some_and(|c| std::sync::Arc::ptr_eq(c, &live))
+        {
+            let mut out = std::ptr::null();
+            let made = create_at_address(
+                std::ptr::null(),
+                address,
+                &d,
+                0,
+                std::ptr::null(),
+                &RESOURCE_IIDS[0],
+                &mut out,
+            );
+            if made == S_OK {
+                if resource(out).host.is_some() {
+                    // Do not free `cached_r`: earlier callers may still hold it.
+                    map.insert((address, desc), out as usize);
+                    return Some(out);
+                }
+                resource_release(out);
+            }
+        }
+        return cached_host.is_some().then_some(cached_r as This);
     }
     let mut out = std::ptr::null();
     let made = create_at_address(
@@ -1173,7 +1413,7 @@ pub(crate) fn texture_at(address: u64, desc: &[u32; 14]) -> Option<This> {
     if made != S_OK {
         return None;
     }
-    map.insert((address, *desc), out as usize);
+    map.insert((address, desc), out as usize);
     resource(out).host.is_some().then_some(out)
 }
 
@@ -1840,5 +2080,472 @@ mod tests {
         // The resource keeps the heap alive.
         assert_eq!(slot::<Release>(heap, 0x10)(heap), 1);
         assert_eq!(slot::<Release>(placed, 0x10)(placed), 0);
+    }
+
+    #[cfg(windows)]
+    fn desc_words(desc: &ResourceDesc, pad1: u32, pad13: u32) -> [u32; 14] {
+        // SAFETY: `ResourceDesc` is 56 bytes (`[u32; 14]`).
+        let mut words: [u32; 14] = unsafe { std::mem::transmute_copy(desc) };
+        words[1] = pad1;
+        words[13] = pad13;
+        words
+    }
+
+    #[cfg(windows)]
+    fn fresh_va(hold: &mut Vec<Memory>) -> Memory {
+        loop {
+            let mem = Memory::zeroed(KIB_64, KIB_64).unwrap();
+            let addr = mem.address();
+            let in_live = LIVE_TEXTURES.lock().unwrap().contains_key(&addr);
+            let in_placed = PLACED_TEXTURES
+                .lock()
+                .unwrap()
+                .keys()
+                .any(|&(a, _)| a == addr);
+            if !in_live && !in_placed {
+                return mem;
+            }
+            hold.push(mem);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn placed_srv_and_aliased_resource_see_rendered_target_pixels() {
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        use windows::Win32::Graphics::Direct3D12::*;
+        use windows::core::Interface;
+
+        let Some(host) = crate::host::host() else {
+            return;
+        };
+        let mut hold = Vec::new();
+        let backing = fresh_va(&mut hold);
+        let addr = backing.address();
+        let null = std::ptr::null();
+
+        let rt_desc = ResourceDesc {
+            flags: 1, // ALLOW_RENDER_TARGET
+            ..texture(16, 16, 28, 1)
+        };
+        let mut r1 = null;
+        assert_eq!(
+            create_at_address(
+                null,
+                addr,
+                &rt_desc,
+                0,
+                null.cast(),
+                &RESOURCE_IIDS[0],
+                &mut r1
+            ),
+            S_OK
+        );
+
+        let rtv_slots = [0u64; 16];
+        let rtv_handle = rtv_slots.as_ptr() as u64;
+        crate::descriptor::create_rtv(null, r1, null.cast(), rtv_handle);
+
+        let queue_iid = guid(
+            0x0ec870a6,
+            0x5d7e,
+            0x4c22,
+            [0x8c, 0xfc, 0x5b, 0xaa, 0xe0, 0x76, 0x16, 0xed],
+        );
+        let allocator_iid = guid(
+            0x6102dee4,
+            0xaf59,
+            0x4b09,
+            [0xb9, 0x99, 0xb4, 0x4d, 0x73, 0xf0, 0x9b, 0x24],
+        );
+        let list_iid = guid(
+            0x5b160d0f,
+            0xac1b,
+            0x4185,
+            [0x8b, 0xa8, 0xb3, 0xae, 0x42, 0xa5, 0xa4, 0x55],
+        );
+        let (mut queue, mut allocator, mut list) = (null, null, null);
+        let queue_desc = [0u32; 4];
+        assert_eq!(
+            crate::queue::create(null, queue_desc.as_ptr().cast(), &queue_iid, &mut queue),
+            S_OK
+        );
+        assert_eq!(
+            crate::list::create_allocator(null, 0, &allocator_iid, &mut allocator),
+            S_OK
+        );
+        assert_eq!(
+            crate::list::create_list(null, 0, 0, allocator, null, &list_iid, &mut list),
+            S_OK
+        );
+
+        type ClearRtv = extern "system" fn(This, u64, *const [f32; 4], u32, *const [i32; 4]);
+        let clear = [64.0f32 / 255.0, 128.0 / 255.0, 191.0 / 255.0, 1.0];
+        slot::<ClearRtv>(list, 0x1a0)(list, rtv_handle, &clear, 0, null.cast());
+        assert_eq!(
+            slot::<extern "system" fn(This) -> HRESULT>(list, 0x48)(list),
+            S_OK
+        );
+        slot::<extern "system" fn(This, u32, *const This)>(queue, 0x50)(queue, 1, &list);
+
+        let srv_desc = texture(16, 16, 28, 1);
+        let srv_words_a = desc_words(&srv_desc, 0xdead_beef, 0x1234_5678);
+        let srv_words_b = desc_words(&srv_desc, 0xcafe_babe, 0x8765_4321);
+        let placed = texture_at(addr, &srv_words_a).expect("placed texture");
+        let placed_same = texture_at(addr, &srv_words_b).expect("canonical padding match");
+        assert_eq!(placed, placed_same);
+
+        let mut r2 = null;
+        assert_eq!(
+            create_at_address(
+                null,
+                addr,
+                &srv_desc,
+                0,
+                null.cast(),
+                &RESOURCE_IIDS[0],
+                &mut r2
+            ),
+            S_OK
+        );
+
+        let h1 = host_copy(r1).expect("r1 host");
+        let hp = host_copy(placed).expect("placed host");
+        let h2 = host_copy(r2).expect("r2 host");
+        assert!(Arc::ptr_eq(&h1, &hp));
+        assert!(Arc::ptr_eq(&h1, &h2));
+        assert!(!crate::texture::title_written(
+            host_resource(placed).unwrap()
+        ));
+        // Reusing a live HostTexture must not reset its tracked D3D12 state.
+        assert_eq!(h1.state.load(Ordering::Relaxed), 0x4);
+
+        // Read back `placed`'s host texture and verify the cleared pixels survive intact.
+        let readback_bytes = 16usize * 256;
+        let readback_heap = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_READBACK,
+            ..Default::default()
+        };
+        let readback_desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Width: readback_bytes as u64,
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            ..Default::default()
+        };
+        let mut readback: Option<ID3D12Resource> = None;
+        // SAFETY: plain creation of a readback buffer.
+        unsafe {
+            host.device
+                .CreateCommittedResource(
+                    &readback_heap,
+                    D3D12_HEAP_FLAG_NONE,
+                    &readback_desc,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    None,
+                    &mut readback,
+                )
+                .unwrap();
+        }
+        let readback = readback.unwrap();
+        let host_image = host_resource(placed).unwrap();
+        let back = host.new_list().unwrap();
+        let (_, before) = host_transition(placed, 0x800).unwrap();
+        assert_eq!(before, 0x4);
+
+        #[repr(C)]
+        struct Location {
+            resource: This,
+            kind: u32,
+            footprint: PlacedFootprint,
+        }
+        let rows = PlacedFootprint {
+            offset: 0,
+            format: 28,
+            width: 16,
+            height: 16,
+            depth: 1,
+            row_pitch: 256,
+        };
+        let out_to = Location {
+            resource: readback.as_raw().cast_const().cast(),
+            kind: 1,
+            footprint: rows,
+        };
+        let out_from = Location {
+            resource: host_image.as_raw().cast_const().cast(),
+            kind: 0,
+            footprint: PlacedFootprint { offset: 0, ..rows },
+        };
+        // SAFETY: open list, live resources, locations in the host layout.
+        unsafe {
+            back.list.ResourceBarrier(&[crate::host::transition(
+                host_image,
+                D3D12_RESOURCE_STATES(before as i32),
+                D3D12_RESOURCE_STATE_COPY_SOURCE,
+            )]);
+            back.list.CopyTextureRegion(
+                (&raw const out_to).cast(),
+                0,
+                0,
+                0,
+                (&raw const out_from).cast(),
+                None,
+            );
+        }
+        back.close();
+        host.execute(&[&back]);
+        assert_eq!(host.log_messages(), None);
+
+        let mut mapped = std::ptr::null_mut();
+        // SAFETY: `execute` waited for the copy; `readback` is `readback_bytes` long.
+        unsafe {
+            readback
+                .Map(
+                    0,
+                    Some(&D3D12_RANGE {
+                        Begin: 0,
+                        End: readback_bytes,
+                    }),
+                    Some(&mut mapped),
+                )
+                .unwrap();
+            let data = std::slice::from_raw_parts(mapped.cast::<u8>(), readback_bytes);
+            for y in 0..16 {
+                let row = &data[y * 256..y * 256 + 16 * 4];
+                for x in 0..16 {
+                    assert_eq!(
+                        &row[x * 4..x * 4 + 4],
+                        &[64, 128, 191, 255],
+                        "pixel ({x}, {y})"
+                    );
+                }
+            }
+            readback.Unmap(0, None);
+        }
+
+        assert_eq!(slot::<Release>(list, 0x10)(list), 0);
+        assert_eq!(slot::<Release>(allocator, 0x10)(allocator), 0);
+        assert_eq!(slot::<Release>(queue, 0x10)(queue), 0);
+        assert_eq!(slot::<Release>(r2, 0x10)(r2), 0);
+        assert_eq!(slot::<Release>(r1, 0x10)(r1), 0);
+        let _ = rtv_slots[0];
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn incompatible_alias_flags_or_geometry_do_not_share_host_texture() {
+        use std::sync::Arc;
+
+        let Some(_host) = crate::host::host() else {
+            return;
+        };
+        let mut hold = Vec::new();
+        let mem_a = fresh_va(&mut hold);
+        let va_a = mem_a.address();
+        let null = std::ptr::null();
+
+        let srv_desc = texture(16, 16, 28, 1);
+        let rt_desc = ResourceDesc {
+            flags: 1, // ALLOW_RENDER_TARGET
+            ..srv_desc
+        };
+        let rt_srgb_desc = ResourceDesc {
+            format: 29, // R8G8B8A8_UNORM_SRGB
+            ..rt_desc
+        };
+        let wider_desc = texture(32, 16, 28, 1);
+        let other_family_desc = texture(16, 16, 10, 1); // R16G16B16A16_FLOAT
+
+        let (mut r_srv, mut r_rt, mut r_rt_srgb, mut r_wider, mut r_fam) =
+            (null, null, null, null, null);
+        assert_eq!(
+            create_at_address(
+                null,
+                va_a,
+                &srv_desc,
+                0,
+                null.cast(),
+                &RESOURCE_IIDS[0],
+                &mut r_srv
+            ),
+            S_OK
+        );
+        // SRV-only must NOT be reused for ALLOW_RENDER_TARGET.
+        assert_eq!(
+            create_at_address(
+                null,
+                va_a,
+                &rt_desc,
+                0,
+                null.cast(),
+                &RESOURCE_IIDS[0],
+                &mut r_rt
+            ),
+            S_OK
+        );
+        assert!(!Arc::ptr_eq(
+            &host_copy(r_srv).unwrap(),
+            &host_copy(r_rt).unwrap()
+        ));
+
+        // Typed R8G8B8A8_UNORM RT must NOT be reused for typed R8G8B8A8_UNORM_SRGB RT.
+        assert_eq!(
+            create_at_address(
+                null,
+                va_a,
+                &rt_srgb_desc,
+                0,
+                null.cast(),
+                &RESOURCE_IIDS[0],
+                &mut r_rt_srgb
+            ),
+            S_OK
+        );
+        assert!(!Arc::ptr_eq(
+            &host_copy(r_rt).unwrap(),
+            &host_copy(r_rt_srgb).unwrap()
+        ));
+
+        // Different geometry and different format family must NOT share.
+        assert_eq!(
+            create_at_address(
+                null,
+                va_a,
+                &wider_desc,
+                0,
+                null.cast(),
+                &RESOURCE_IIDS[0],
+                &mut r_wider
+            ),
+            S_OK
+        );
+        assert_eq!(
+            create_at_address(
+                null,
+                va_a,
+                &other_family_desc,
+                0,
+                null.cast(),
+                &RESOURCE_IIDS[0],
+                &mut r_fam
+            ),
+            S_OK
+        );
+        for other in [r_srv, r_rt, r_rt_srgb] {
+            assert!(!Arc::ptr_eq(
+                &host_copy(other).unwrap(),
+                &host_copy(r_wider).unwrap()
+            ));
+            assert!(!Arc::ptr_eq(
+                &host_copy(other).unwrap(),
+                &host_copy(r_fam).unwrap()
+            ));
+        }
+
+        for r in [r_srv, r_rt, r_rt_srgb, r_wider, r_fam] {
+            assert_eq!(slot::<Release>(r, 0x10)(r), 0);
+        }
+        assert!(
+            !LIVE_TEXTURES.lock().unwrap().contains_key(&va_a),
+            "releasing all aliases removes LIVE_TEXTURES bucket"
+        );
+
+        // DENY_SHADER_RESOURCE depth texture must NOT be reused for shader-readable alias.
+        let depth_deny_desc = ResourceDesc {
+            flags: DEPTH_FLAG | DENY_SHADER_RESOURCE_FLAG,
+            ..texture(16, 16, 40, 1) // D32_FLOAT
+        };
+        let float_srv_desc = texture(16, 16, 41, 1); // R32_FLOAT
+        let (mut r_depth, mut r_float) = (null, null);
+        assert_eq!(
+            create_at_address(
+                null,
+                va_a,
+                &depth_deny_desc,
+                0,
+                null.cast(),
+                &RESOURCE_IIDS[0],
+                &mut r_depth
+            ),
+            S_OK
+        );
+        assert_eq!(
+            create_at_address(
+                null,
+                va_a,
+                &float_srv_desc,
+                0,
+                null.cast(),
+                &RESOURCE_IIDS[0],
+                &mut r_float
+            ),
+            S_OK
+        );
+        assert!(!Arc::ptr_eq(
+            &host_copy(r_depth).unwrap(),
+            &host_copy(r_float).unwrap()
+        ));
+        assert_eq!(slot::<Release>(r_depth, 0x10)(r_depth), 0);
+        assert_eq!(slot::<Release>(r_float, 0x10)(r_float), 0);
+        assert!(!LIVE_TEXTURES.lock().unwrap().contains_key(&va_a));
+
+        // `texture_at` before then after an RT exists at a fresh VA upgrades to the live RT.
+        let mem_b = fresh_va(&mut hold);
+        let va_b = mem_b.address();
+        let srv_words = desc_words(&srv_desc, 0x1111_2222, 0x3333_4444);
+        let before = texture_at(va_b, &srv_words).expect("placed texture before RT");
+        assert!(crate::texture::title_written(
+            host_resource(before).unwrap()
+        ));
+
+        let mut rt_b = null;
+        assert_eq!(
+            create_at_address(
+                null,
+                va_b,
+                &rt_desc,
+                0,
+                null.cast(),
+                &RESOURCE_IIDS[0],
+                &mut rt_b
+            ),
+            S_OK
+        );
+        assert!(!Arc::ptr_eq(
+            &host_copy(before).unwrap(),
+            &host_copy(rt_b).unwrap()
+        ));
+
+        let after = texture_at(va_b, &srv_words).expect("placed texture after RT");
+        assert_ne!(after, before);
+        assert!(Arc::ptr_eq(
+            &host_copy(after).unwrap(),
+            &host_copy(rt_b).unwrap()
+        ));
+        assert!(!crate::texture::title_written(
+            host_resource(after).unwrap()
+        ));
+
+        let after_pad = texture_at(va_b, &desc_words(&srv_desc, 0xaaaa_bbbb, 0xcccc_dddd))
+            .expect("canonical padding lookup after upgrade");
+        assert_eq!(after_pad, after);
+
+        assert_eq!(slot::<Release>(rt_b, 0x10)(rt_b), 0);
+        assert!(
+            LIVE_TEXTURES
+                .lock()
+                .unwrap()
+                .get(&va_b)
+                .is_some_and(|v| v.iter().all(|e| e.resource != rt_b as usize)),
+            "released rt_b is unregistered from LIVE_TEXTURES"
+        );
     }
 }
