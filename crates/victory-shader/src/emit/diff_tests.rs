@@ -1194,7 +1194,7 @@ fn float_semantics_are_the_consoles() {
 fn cube_gradients_pick_the_level() {
     use super::host::{Dispatch, View};
     let Some((console, pc)) = tools() else {
-        eprintln!("no console or PC compiler; skipped");
+        report_skip("console or PC DXC unavailable");
         return;
     };
     let dir = std::env::temp_dir().join(format!("victory-cube-{}", std::process::id()));
@@ -1265,7 +1265,7 @@ fn cube_gradients_pick_the_level() {
     let mut ran = 0;
     for (label, warp) in [("hardware", false), ("warp", true)] {
         let Ok(host) = Host::new(warp) else {
-            eprintln!("no SM 6.6 {label} device; skipped");
+            report_skip(&format!("no SM 6.6 {label} device"));
             continue;
         };
         let run = |root: &ID3D12RootSignature, pso: &ID3D12PipelineState, roots| {
