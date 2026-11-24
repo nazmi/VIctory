@@ -818,7 +818,30 @@ impl<'a> Tracer<'a> {
                     "an address in a descriptor heap index"
                 }
                 Some(_) => "an address from a root parameter's later dword",
-                None => "an address in an SGPR that is no root parameter",
+                None => {
+                    // No parameter covers it, and which side decides the fix:
+                    // before the first parameter is a system SGPR (thread id,
+                    // group info) used as an address; past the last one the
+                    // layout under-declares what the shader reads, which is a
+                    // bug on our side; between two is a gap in the layout.
+                    let Reg::S(code) = reg else { unreachable!() };
+                    let spans = self.layout.iter().map(|p| {
+                        let at = self.stage.user_sgpr(p.user_data);
+                        (at, at.saturating_add(p.sgprs as u8))
+                    });
+                    let (mut first, mut end) = (u8::MAX, 0u8);
+                    for (lo, hi) in spans {
+                        first = first.min(lo);
+                        end = end.max(hi);
+                    }
+                    if code < first {
+                        "an address in an SGPR before the first root parameter"
+                    } else if code >= end {
+                        "an address past the last user SGPR the shader declares"
+                    } else {
+                        "an address in an SGPR in a gap between root parameters"
+                    }
+                }
             };
         }
         if self
@@ -2226,7 +2249,7 @@ pub(crate) mod tests {
             err,
             ShaderError::Unsupported {
                 offset: 0,
-                what: "an address in an SGPR that is no root parameter"
+                what: "an address in an SGPR before the first root parameter"
             }
         );
     }
