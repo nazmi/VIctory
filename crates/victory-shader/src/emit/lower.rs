@@ -5432,6 +5432,17 @@ impl<'a> Lower<'a> {
     /// op_sel (or an SDWA word select) picks the high half; inline float
     /// constants are f16 values here.
     fn half_src(&mut self, inst: &Inst, k: usize) -> Result<V, Why> {
+        self.half_src_bits(inst, k, true)
+    }
+
+    /// Source `k` of a 16-bit integer operation. Hardware reads inline float
+    /// constants as 32-bit values there: `1.0` is `0x3F800000`, so its low
+    /// half is 0 and its high half `0x3F80`, not the packed f16 `0x3C00`.
+    fn half_int_src(&mut self, inst: &Inst, k: usize) -> Result<V, Why> {
+        self.half_src_bits(inst, k, false)
+    }
+
+    fn half_src_bits(&mut self, inst: &Inst, k: usize, f16: bool) -> Result<V, Why> {
         let Fields::Valu(v) = &inst.fields else {
             unreachable!()
         };
@@ -5447,7 +5458,8 @@ impl<'a> Lower<'a> {
         }
         let x = match self.src0 {
             Some(x) if k == 0 => x,
-            _ => self.f16_operand(inst, &op)?,
+            _ if f16 => self.f16_operand(inst, &op)?,
+            _ => self.operand(inst, &op)?,
         };
         let c = self.cur;
         let x = if high {
@@ -5681,7 +5693,7 @@ impl<'a> Lower<'a> {
         if float1.contains(&name) {
             let r = match name {
                 "v_cvt_f16_u16" | "v_cvt_f16_i16" => {
-                    let mut x = self.half_src(inst, 0)?;
+                    let mut x = self.half_int_src(inst, 0)?;
                     let op = if name == "v_cvt_f16_i16" {
                         let k16 = self.s.m.i32(16);
                         let t = self.s.m.bin(c, Bin::Shl, x, k16);
@@ -5756,7 +5768,9 @@ impl<'a> Lower<'a> {
             return Err("modifiers on a 16-bit integer operation");
         }
         let r = {
-            let (mut a, mut b) = (self.half_src(inst, 0)?, self.half_src(inst, 1)?);
+            // 16-bit integers read an inline float constant as its 32-bit
+            // pattern, not as a packed f16 pair.
+            let (mut a, mut b) = (self.half_int_src(inst, 0)?, self.half_int_src(inst, 1)?);
             let k16 = self.s.m.i32(16);
             let sext = |l: &mut Self, x: V| {
                 let t = l.s.m.bin(c, Bin::Shl, x, k16);
@@ -6565,7 +6579,7 @@ impl<'a> Lower<'a> {
             }
             "u32" | "i32" | "u16" | "i16" => {
                 let (a, b) = if ty.ends_with("16") {
-                    let (mut a, mut b) = (self.half_src(inst, 0)?, self.half_src(inst, 1)?);
+                    let (mut a, mut b) = (self.half_int_src(inst, 0)?, self.half_int_src(inst, 1)?);
                     if ty == "i16" {
                         let k16 = self.s.m.i32(16);
                         for x in [&mut a, &mut b] {

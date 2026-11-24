@@ -2380,3 +2380,20 @@ fn cvt_16bit_int_from_f16_saturates_and_honors_modifiers() {
         },
     );
 }
+
+#[test]
+fn integer_16bit_ops_read_inline_floats_as_f32_bits() {
+    // v_add_nc_u16 v0, 1.0, v1. The inline 1.0 is 0x3F800000 there, whose
+    // low half is 0, so 5 + 0 stays 5 (not 0x3C05 from the f16 pattern).
+    let [w0, w1] = vop3(0x303, 0, 242, vgpr(1), 0);
+    let shader = build_valu_cs(&[w0, w1]);
+    run_cases(&shader, &[[5, 0, 0, 0]], |backend, _, _, got| {
+        assert_eq!(got, 5, "{backend}: u16 add reads 1.0 as f32 bits");
+    });
+    // With op_sel the high half is 0x3F80, so 5 + 16256 stays 16261.
+    let hi = [w0 | 1 << 11, w1];
+    let shader = build_valu_cs(&hi);
+    run_cases(&shader, &[[5, 0, 0, 0]], |backend, _, _, got| {
+        assert_eq!(got, 16261, "{backend}: u16 add reads the high f32 half");
+    });
+}
