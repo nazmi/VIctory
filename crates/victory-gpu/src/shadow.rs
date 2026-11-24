@@ -698,6 +698,17 @@ pub(crate) fn all() -> Vec<Arc<Shadow>> {
 
 /// For device-removed reports: the copy of title memory whose host range
 /// starts closest below host GPU address `va`, and where `va` is in it.
+/// Where `offset` lies in a copy of `len` bytes: inside it, or how far past
+/// its end. A fault past the end is a read beyond the copied range (an
+/// unbounded view or address), which lands in whatever host allocation
+/// follows; DRED then names that allocation, often a freed texture (#557).
+fn place(offset: u64, len: u64) -> String {
+    match offset.checked_sub(len) {
+        None => format!("offset {offset:#x}, inside it"),
+        Some(past) => format!("offset {offset:#x}, {past:#x} past its end"),
+    }
+}
+
 pub(crate) fn near(va: u64) -> String {
     let mut all: Vec<(u64, u64, u64)> = buffers()
         .values()
@@ -714,8 +725,8 @@ pub(crate) fn near(va: u64) -> String {
     let above = all.iter().filter(|c| c.0 > va).min();
     let mut text = match below {
         Some(&(gpu, start, len)) => format!(
-            "; the nearest title memory copy below it: {start:#x}+{len:#x} at host {gpu:#x}, offset {:#x}",
-            va - gpu
+            "; the nearest title memory copy below it: {start:#x}+{len:#x} at host {gpu:#x}, {}",
+            place(va - gpu, len)
         ),
         None => "; no title memory copy below it".into(),
     };
@@ -794,5 +805,20 @@ mod tests {
         );
         assert_eq!(bytes(&copy), 0, "the snapshot goes with the last range");
         unregister(p, p as u64);
+    }
+    #[test]
+    fn a_fault_is_placed_inside_or_past_the_end_of_its_copy() {
+        use super::place;
+        assert_eq!(place(0, 0x40_0000), "offset 0x0, inside it");
+        assert_eq!(place(0x3f_ffff, 0x40_0000), "offset 0x3fffff, inside it");
+        assert_eq!(
+            place(0x40_0000, 0x40_0000),
+            "offset 0x400000, 0x0 past its end"
+        );
+        // Seen on an RX 9070 XT: 12 KiB past the end of a 4 MiB copy.
+        assert_eq!(
+            place(0x40_3000, 0x40_0000),
+            "offset 0x403000, 0x3000 past its end"
+        );
     }
 }

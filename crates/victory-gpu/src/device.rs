@@ -373,6 +373,18 @@ fn feature_levels(data: *mut c_void) -> HRESULT {
     }
 }
 
+/// The host device's state: the console's device is removed when the host's is.
+extern "system" fn removed_reason(_: This) -> HRESULT {
+    #[cfg(windows)]
+    if let Some(host) = crate::host::host() {
+        // SAFETY: a plain query.
+        if let Err(e) = unsafe { host.device.GetDeviceRemovedReason() } {
+            return e.code().0;
+        }
+    }
+    S_OK
+}
+
 /// IUnknown 3, object methods 4, device methods 76 (0x18-0x290), then the
 /// methods `ID3D12Device1` to `ID3D12Device8` add, in order: 3, 1, 3, 6, 9,
 /// 1, 2, 9 (0x298-0x3a0, the console's own among them), then those of
@@ -407,6 +419,7 @@ static FUNCTIONS: Table<160> = {
     f[34] = object::ignore as *const (); // 0x110 MakeResident: memory is always resident
     f[35] = object::ignore as *const (); // 0x118 Evict: memory is never evicted
     f[36] = fence::create as *const (); // 0x120
+    f[37] = removed_reason as *const (); // 0x128
     f[38] = resource::copyable_footprints as *const (); // 0x130
     f[39] = query::create as *const (); // 0x138
     f[40] = object::ignore as *const (); // 0x140 SetStablePowerState: a profiling setting
@@ -607,5 +620,12 @@ mod tests {
         let set = slot::<SetStablePowerState>(device, 0x140);
         assert_eq!(set(device, 1), S_OK);
         assert_eq!(set(device, 0), S_OK);
+    }
+
+    #[test]
+    fn a_healthy_device_reports_no_removal() {
+        let device = device();
+        let reason = slot::<extern "system" fn(This) -> HRESULT>(device, 0x128);
+        assert_eq!(reason(device), S_OK);
     }
 }
