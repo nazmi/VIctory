@@ -926,6 +926,8 @@ pub(crate) fn test_shader(
             host,
             used: Vec::new(),
         })),
+        #[cfg(all(windows, feature = "diagnostics"))]
+        wave64: std::sync::OnceLock::new(),
     })
 }
 
@@ -998,6 +1000,8 @@ mod tests {
             hash: String::new(),
             container: Vec::new(),
             translated: std::sync::OnceLock::new(),
+            #[cfg(all(windows, feature = "diagnostics"))]
+            wave64: std::sync::OnceLock::new(),
         })
     }
 
