@@ -16,7 +16,7 @@
 //! indexed heaps keep what their first use copied.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use windows::Win32::Graphics::Direct3D12::ID3D12Resource;
@@ -27,6 +27,8 @@ use crate::watch::PAGE;
 /// A title buffer's host copy.
 pub(crate) struct Shadow {
     pub(crate) buffer: ID3D12Resource,
+    /// D3D12 state after the last submitted list using this copy.
+    pub(crate) state: AtomicU32,
     data: *mut u8,
     gpu: u64,
     /// Where the title buffer starts and how long it is.
@@ -110,6 +112,7 @@ impl Shadow {
         let pages = (start + len).div_ceil(PAGE as u64) - start / PAGE as u64;
         Shadow {
             buffer,
+            state: AtomicU32::new(0),
             data,
             gpu,
             start,
@@ -639,6 +642,45 @@ mod tests {
         s.copy_back(base, 2 * PAGE);
         assert_eq!(peek(base + 8), 2, "the title's newer byte");
         assert_eq!(peek(base + 3), 9, "the shader's byte");
+    }
+
+    #[test]
+    fn buffer_states_follow_submission_order_and_combine_reads() {
+        let Some(host) = host() else { return };
+        let Some((buffer, data)) = host.shared_buffer(256) else {
+            return;
+        };
+        // SAFETY: a live buffer.
+        let gpu = unsafe { buffer.GetGPUVirtualAddress() };
+        let shadow = Arc::new(Shadow::new(buffer, data, gpu, 0, 256));
+
+        let write = host.new_list().unwrap();
+        write.buffer_state(&shadow, crate::host::BUFFER_UNORDERED_ACCESS);
+        write.close();
+        host.execute(&[&write]);
+        assert_eq!(
+            shadow.state.load(Ordering::Relaxed),
+            crate::host::BUFFER_UNORDERED_ACCESS
+        );
+
+        let read = host.new_list().unwrap();
+        read.buffer_state(&shadow, crate::host::BUFFER_VERTEX);
+        read.buffer_state(&shadow, crate::host::BUFFER_SHADER_RESOURCE);
+        read.close();
+        host.execute(&[&read]);
+        assert_eq!(
+            shadow.state.load(Ordering::Relaxed),
+            crate::host::BUFFER_VERTEX | crate::host::BUFFER_SHADER_RESOURCE
+        );
+
+        let next_write = host.new_list().unwrap();
+        next_write.buffer_state(&shadow, crate::host::BUFFER_UNORDERED_ACCESS);
+        next_write.close();
+        host.execute(&[&next_write]);
+        assert_eq!(
+            shadow.state.load(Ordering::Relaxed),
+            crate::host::BUFFER_UNORDERED_ACCESS
+        );
     }
 }
 

@@ -147,6 +147,14 @@ fn root_view(list: &HostList, address: u64, srv: bool) -> Option<u64> {
         .min(if srv { 1 << 20 } else { 1 << 16 });
     let gpu = shadow.gpu(address);
     if srv || gpu % 256 == 0 {
+        list.buffer_state(
+            &shadow,
+            if srv {
+                crate::host::BUFFER_SHADER_RESOURCE
+            } else {
+                crate::host::BUFFER_VERTEX
+            },
+        );
         shadow.refresh(list, address, len);
         return Some(gpu);
     }
@@ -463,6 +471,7 @@ impl State {
             let Some(shadow) = crate::shadow::find(v.address, u64::from(v.size)) else {
                 continue;
             };
+            list.buffer_state(&shadow, crate::host::BUFFER_VERTEX);
             shadow.refresh(list, v.address, u64::from(v.size));
             *view = D3D12_VERTEX_BUFFER_VIEW {
                 BufferLocation: shadow.gpu(v.address),
@@ -481,6 +490,7 @@ impl State {
             let Some(shadow) = crate::shadow::find(v.address, u64::from(v.size)) else {
                 return false;
             };
+            list.buffer_state(&shadow, crate::host::BUFFER_INDEX);
             shadow.refresh(list, v.address, u64::from(v.size));
             let view = D3D12_INDEX_BUFFER_VIEW {
                 BufferLocation: shadow.gpu(v.address),
@@ -1282,7 +1292,7 @@ impl State {
             s.refresh(list, *at, 4);
         }
         // Bounded first: the clamp binds a compute pipeline of its own.
-        if !crate::indirect::bound(list, &args.buffer, args.gpu(arguments), (kind, stride, max)) {
+        if !crate::indirect::bound(list, &args, args.gpu(arguments), (kind, stride, max)) {
             why("not bounded (no clamp, or arguments not 4-byte aligned)");
             #[cfg(feature = "diagnostics")]
             self.frame_op_why(
@@ -1307,7 +1317,7 @@ impl State {
         #[cfg(feature = "diagnostics")]
         self.frame_op("indirect", kind == DISPATCH, ran);
         if !ran {
-            crate::indirect::done(list, &args.buffer);
+            crate::indirect::done(list, &args);
             #[cfg(feature = "diagnostics")]
             match crate::pipeline::host_pipeline(self.pipeline as This) {
                 None => crate::pipeline::note_drop(self.pipeline as This),
@@ -1325,6 +1335,9 @@ impl State {
                 kind == DISPATCH,
             )
         });
+        if let Some((counter, _)) = &counter {
+            list.buffer_state(counter, crate::host::BUFFER_INDIRECT_ARGUMENT);
+        }
         // SAFETY: an open list with everything set; the buffers are host
         // copies the list keeps alive (refresh), the signature is cached.
         unsafe {
@@ -1337,7 +1350,7 @@ impl State {
                 counter.as_ref().map_or(0, |(s, at)| s.offset(*at)),
             )
         };
-        crate::indirect::done(list, &args.buffer);
+        crate::indirect::done(list, &args);
         if kind == DISPATCH {
             DISPATCHED.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -1398,6 +1411,15 @@ fn readable(list: &HostList, u: &UsedResource, view: &View) {
         && len > 0
         && let Some(shadow) = crate::shadow::find(address, len)
     {
+        let state = match u.kind {
+            ResourceType::Cbv => crate::host::BUFFER_VERTEX,
+            ResourceType::Srv => crate::host::BUFFER_SHADER_RESOURCE,
+            ResourceType::Uav => crate::host::BUFFER_UNORDERED_ACCESS,
+            _ => 0,
+        };
+        if state != 0 {
+            list.buffer_state(&shadow, state);
+        }
         shadow.refresh(list, address, len);
         if u.kind == ResourceType::Uav {
             shadow.gpu_writes(list, address, len);

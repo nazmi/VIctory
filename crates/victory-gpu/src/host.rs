@@ -519,6 +519,9 @@ pub(crate) struct HostList {
     /// list names alive until it is reset, even if the title releases the
     /// resource first.
     states: Mutex<States>,
+    /// Buffer states have the same submission ordering, but live on the
+    /// persistent shadow buffers rather than on title texture copies.
+    buffer_states: Mutex<BufferStates>,
     /// The list that runs those transitions just before this one.
     prelude: (ID3D12CommandAllocator, ID3D12GraphicsCommandList),
     /// The pipelines the list binds, for reports of slow submissions.
@@ -556,6 +559,18 @@ type Note = (String, Option<(u64, u64)>);
 
 type States =
     std::collections::HashMap<usize, (u32, u32, std::sync::Arc<crate::resource::HostTexture>)>;
+
+type BufferStates =
+    std::collections::HashMap<usize, (u32, u32, std::sync::Arc<crate::shadow::Shadow>)>;
+
+pub(crate) const BUFFER_VERTEX: u32 = 0x1;
+pub(crate) const BUFFER_INDEX: u32 = 0x2;
+pub(crate) const BUFFER_SHADER_RESOURCE: u32 = 0x40 | 0x80;
+pub(crate) const BUFFER_UNORDERED_ACCESS: u32 = 0x8;
+pub(crate) const BUFFER_INDIRECT_ARGUMENT: u32 = 0x200;
+
+const BUFFER_READ_STATES: u32 =
+    BUFFER_VERTEX | BUFFER_INDEX | BUFFER_SHADER_RESOURCE | BUFFER_INDIRECT_ARGUMENT;
 
 /// Whether device-removed data is on (`VICTORY_D3D12_DRED`, diagnostics
 /// builds).
@@ -781,6 +796,7 @@ impl Host {
                 deferred: Mutex::default(),
                 scratch: Mutex::default(),
                 states: Mutex::default(),
+                buffer_states: Mutex::default(),
                 prelude: (prelude_allocator, prelude),
                 pipelines: Mutex::default(),
                 id,
@@ -1333,6 +1349,10 @@ impl HostList {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        self.buffer_states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         self.pipelines
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1379,12 +1399,58 @@ impl HostList {
         }
     }
 
-    /// At submission: the list that moves each texture this list uses from
-    /// its real state to the one the list starts with; the textures' real
-    /// states become those the list ends with.
+    /// Moves a shadow buffer to `wanted` in this list. Read-only states are
+    /// combined when a buffer is used for more than one purpose in a draw.
+    pub(crate) fn buffer_state(
+        &self,
+        shadow: &std::sync::Arc<crate::shadow::Shadow>,
+        wanted: u32,
+    ) {
+        let key = std::sync::Arc::as_ptr(shadow) as usize;
+        let next = {
+            let mut states = self
+                .buffer_states
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match states.entry(key) {
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert((wanted, wanted, shadow.clone()));
+                    return;
+                }
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    let state = &mut o.get_mut().1;
+                    let before = *state;
+                    *state = if before != 0
+                        && wanted != 0
+                        && before & !BUFFER_READ_STATES == 0
+                        && wanted & !BUFFER_READ_STATES == 0
+                    {
+                        before | wanted
+                    } else {
+                        wanted
+                    };
+                    (before != *state).then_some((before, *state))
+                }
+            }
+        };
+        if let Some((before, after)) = next {
+            // SAFETY: this list and its shadow buffer are live.
+            unsafe {
+                self.list.ResourceBarrier(&[transition(
+                    &shadow.buffer,
+                    D3D12_RESOURCE_STATES(before as i32),
+                    D3D12_RESOURCE_STATES(after as i32),
+                )])
+            };
+        }
+    }
+
+    /// At submission: preludes move each resource from its real state to
+    /// the first state its list uses; the resource state becomes the list's
+    /// final state.
     fn prelude(&self) -> Option<ID3D12CommandList> {
         let states = self.states.lock().unwrap_or_else(|e| e.into_inner());
-        let barriers: Vec<D3D12_RESOURCE_BARRIER> = states
+        let mut barriers: Vec<D3D12_RESOURCE_BARRIER> = states
             .values()
             .filter_map(|(first, last, copy)| {
                 let real = copy.state.swap(*last, Ordering::Relaxed);
@@ -1397,6 +1463,20 @@ impl HostList {
                 })
             })
             .collect();
+        let states = self
+            .buffer_states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        barriers.extend(states.values().filter_map(|(first, last, shadow)| {
+            let real = shadow.state.swap(*last, Ordering::Relaxed);
+            (real != *first).then(|| {
+                transition(
+                    &shadow.buffer,
+                    D3D12_RESOURCE_STATES(real as i32),
+                    D3D12_RESOURCE_STATES(*first as i32),
+                )
+            })
+        }));
         if barriers.is_empty() {
             return None;
         }
