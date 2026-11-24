@@ -4755,18 +4755,26 @@ impl<'a> Lower<'a> {
                 Ok(())
             }
             "v_swap_b32" => {
-                let (
-                    Some(&Operand::Vector { reg: sreg, .. }),
-                    Some(Operand::Vector { reg: dreg, .. }),
-                ) = (v.src.first(), v.dst)
-                else {
-                    return Err("v_swap_b32");
+                // `tmp = D.u; D.u = S0.u; S0.u = tmp` (ISA 101 V_SWAP_B32).
+                // Only a VGPR source is written back: VALU cannot write an
+                // SGPR, an inline constant or a literal, so those are a move.
+                let Some(Operand::Vector { reg: dreg, .. }) = v.dst else {
+                    return Err("v_swap_b32 without a VGPR destination");
                 };
                 let a = self.i32_of(inst.read(Reg::V(dreg)).ok_or("v_swap_b32")?)?;
-                let b = self.i32_of(inst.read(Reg::V(sreg)).ok_or("v_swap_b32")?)?;
-                self.write_placed(inst, Reg::V(dreg), b, guard);
-                if dreg != sreg {
-                    self.write_placed(inst, Reg::V(sreg), a, guard);
+                match v.src.first().copied() {
+                    Some(Operand::Vector { reg: sreg, .. }) => {
+                        let b = self.i32_of(inst.read(Reg::V(sreg)).ok_or("v_swap_b32")?)?;
+                        self.write_placed(inst, Reg::V(dreg), b, guard);
+                        if dreg != sreg {
+                            self.write_placed(inst, Reg::V(sreg), a, guard);
+                        }
+                    }
+                    Some(src) => {
+                        let b = self.operand(inst, &src)?;
+                        self.write_placed(inst, Reg::V(dreg), b, guard);
+                    }
+                    None => return Err("v_swap_b32 without a source"),
                 }
                 Ok(())
             }

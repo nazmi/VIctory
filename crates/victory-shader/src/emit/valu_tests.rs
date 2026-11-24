@@ -932,6 +932,35 @@ fn v_cvt_u16_and_i16_f16_saturate() {
 }
 
 #[test]
+fn v_swap_b32_exchanges_two_vgprs_and_copies_from_anything_else() {
+    // ISA 101 V_SWAP_B32, "tmp = D.u; D.u = S0.u; S0.u = tmp": both VGPRs
+    // change. Integer constant n is operand code 128 + n.
+    let swap_then_read = |read: u16| {
+        build_valu_cs(&[
+            vop1(0x001, 1, 128 + 5), // v1 = 5
+            vop1(0x001, 2, 128 + 7), // v2 = 7
+            vop1(0x065, 1, vgpr(2)), // v_swap_b32 v1, v2
+            vop1(0x001, 0, read),    // v0 = the register under test
+        ])
+    };
+    let first = swap_then_read(vgpr(1));
+    run_cases(&first, &[[0; 4]], |backend, _, _, got| {
+        assert_eq!(got, 7, "{backend}: v1 after the swap");
+    });
+    let second = swap_then_read(vgpr(2));
+    run_cases(&second, &[[0; 4]], |backend, _, _, got| {
+        assert_eq!(got, 5, "{backend}: v2 after the swap");
+    });
+
+    // Only a VGPR source is written back: an integer constant cannot be, so
+    // the instruction is a move into the destination.
+    let from_constant = build_valu_cs(&[vop1(0x065, 1, 128 + 9), vop1(0x001, 0, vgpr(1))]);
+    run_cases(&from_constant, &[[0; 4]], |backend, _, _, got| {
+        assert_eq!(got, 9, "{backend}: v1 from a constant");
+    });
+}
+
+#[test]
 fn v_cvt_f16_u16_and_i16_widen_the_integer_first() {
     // v_mov_b32 v0, 0; v_cvt_f16_u16 / v_cvt_f16_i16 v0, v1 (VOP1 0x050 / 0x051).
     // Only integers f16 holds exactly: how the others round is the narrowing's
