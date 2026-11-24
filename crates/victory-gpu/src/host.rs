@@ -6,6 +6,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0;
@@ -338,6 +339,34 @@ mod tests {
         assert!(!warp_selected_at(Some(std::ffi::OsStr::new("0"))));
         assert_eq!(warp_selected_at(Some(std::ffi::OsStr::new(""))), on);
         assert_eq!(warp_selected_at(Some(std::ffi::OsStr::new("1"))), on);
+    }
+
+    #[test]
+    fn frame_report_keeps_activity_from_earlier_caption_updates() {
+        let since = Instant::now();
+        let mut caption = FrameWindow {
+            since,
+            frames: 0,
+            drawn: 10,
+        };
+        let mut report = caption;
+        let second = Duration::from_secs(1);
+        // The first second contains three frames and all 40 draws. The next
+        // frame arrives at the reporting deadline after a long stall.
+        for (ms, drawn) in [(250, 20), (500, 30), (1000, 50), (5000, 50)] {
+            let now = since + Duration::from_millis(ms);
+            let short = caption.frame(now, drawn, second);
+            let long = report.frame(now, drawn, 5 * second);
+            if ms < 5000 {
+                assert!(long.is_none());
+            } else {
+                assert_eq!(short.unwrap().draws, 0.0);
+                let rates = long.unwrap();
+                assert_eq!((rates.frames, rates.draws, rates.ms), (4.0, 10.0, 1250.0));
+            }
+        }
+        let next = report.frame(since + 10 * second, 53, 5 * second).unwrap();
+        assert_eq!((next.frames, next.draws), (1.0, 3.0));
     }
 
     #[test]
@@ -2166,26 +2195,59 @@ struct Presenter {
 /// The frame rate, shown in the window's caption every second and logged
 /// every few seconds.
 struct Meter {
-    since: std::time::Instant,
-    frames: u32,
-    #[cfg(feature = "diagnostics")]
-    copy_stats_frames: u64,
-    drawn: u64,
-    logged: std::time::Instant,
+    caption_window: FrameWindow,
+    report_window: FrameWindow,
     /// The caption the window had, once read.
     caption: Option<Vec<u16>>,
 }
 
-impl Meter {
-    fn new() -> Self {
-        let now = std::time::Instant::now();
-        Meter {
+#[derive(Clone, Copy)]
+struct FrameWindow {
+    since: Instant,
+    frames: u64,
+    drawn: u64,
+}
+
+struct FrameRates {
+    frames: f64,
+    fps: f64,
+    ms: f64,
+    draws: f64,
+}
+
+impl FrameWindow {
+    fn frame(&mut self, now: Instant, drawn: u64, interval: Duration) -> Option<FrameRates> {
+        self.frames += 1;
+        let elapsed = now.duration_since(self.since);
+        if elapsed < interval {
+            return None;
+        }
+        let frames = self.frames as f64;
+        let rates = FrameRates {
+            frames,
+            fps: frames / elapsed.as_secs_f64(),
+            ms: elapsed.as_secs_f64() * 1000.0 / frames,
+            draws: (drawn - self.drawn) as f64 / frames,
+        };
+        *self = Self {
             since: now,
             frames: 0,
-            #[cfg(feature = "diagnostics")]
-            copy_stats_frames: 0,
+            drawn,
+        };
+        Some(rates)
+    }
+}
+
+impl Meter {
+    fn new() -> Self {
+        let window = FrameWindow {
+            since: Instant::now(),
+            frames: 0,
             drawn: crate::draw::drawn(),
-            logged: now,
+        };
+        Self {
+            caption_window: window,
+            report_window: window,
             caption: None,
         }
     }
@@ -2194,37 +2256,29 @@ impl Meter {
     fn frame(&mut self, hwnd: HWND) {
         #[cfg(feature = "diagnostics")]
         tracing::debug!(target: "victory_gpu::frame", token = crate::frame::current(), "present");
-        self.frames += 1;
-        #[cfg(feature = "diagnostics")]
-        {
-            self.copy_stats_frames += 1;
-        }
-        let elapsed = self.since.elapsed();
-        if elapsed < std::time::Duration::from_secs(1) {
-            return;
-        }
+        let now = Instant::now();
         let drawn = crate::draw::drawn();
-        let frames = f64::from(self.frames);
-        let fps = frames / elapsed.as_secs_f64();
-        let ms = elapsed.as_secs_f64() * 1000.0 / frames;
-        let draws = (drawn - self.drawn) as f64 / frames;
-        (self.since, self.frames, self.drawn) = (std::time::Instant::now(), 0, drawn);
-        // Of a frame, ms preparing submissions and ms waiting for the GPU.
-        let [cpu, gpu] =
-            [0, 1].map(|i| SUBMISSION_US[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames);
-        let [copy_ms, copy_mb, texture_ms, texture_mb] = [0, 1, 2, 3].map(|i| {
-            let scale = if i % 2 == 0 { 1e3 } else { 1e6 };
-            PREPARING[i].swap(0, Ordering::Relaxed) as f64 / scale / frames
-        });
-        let [back_ms, back_mb] =
-            [0, 1].map(|i| COPY_BACK[i].swap(0, Ordering::Relaxed) as f64 / [1e3, 1e6][i] / frames);
-        let dropped = crate::draw::take_dropped() as f64 / frames;
-        let indirect = crate::list::take_indirect() as f64 / frames;
-        // Over the same frames as the counts above.
-        #[cfg(feature = "diagnostics")]
-        let drops = crate::pipeline::take_drops();
-        if self.logged.elapsed() >= std::time::Duration::from_secs(5) {
-            self.logged = std::time::Instant::now();
+        if let Some(FrameRates {
+            frames,
+            fps,
+            ms,
+            draws,
+        }) = self.report_window.frame(now, drawn, Duration::from_secs(5))
+        {
+            // Of a frame, ms preparing submissions and ms waiting for the GPU.
+            let [cpu, gpu] = [0, 1]
+                .map(|i| SUBMISSION_US[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames);
+            let [copy_ms, copy_mb, texture_ms, texture_mb] = [0, 1, 2, 3].map(|i| {
+                let scale = if i % 2 == 0 { 1e3 } else { 1e6 };
+                PREPARING[i].swap(0, Ordering::Relaxed) as f64 / scale / frames
+            });
+            let [back_ms, back_mb] = [0, 1]
+                .map(|i| COPY_BACK[i].swap(0, Ordering::Relaxed) as f64 / [1e3, 1e6][i] / frames);
+            let dropped = crate::draw::take_dropped() as f64 / frames;
+            let indirect = crate::list::take_indirect() as f64 / frames;
+            // Over the same frames as the counts above.
+            #[cfg(feature = "diagnostics")]
+            let drops = crate::pipeline::take_drops();
             tracing::info!(
                 "{fps:.1} fps, {ms:.1} ms/frame ({cpu:.1} preparing: copies {copy_ms:.1} ms \
                  {copy_mb:.1} MB, textures {texture_ms:.1} ms {texture_mb:.1} MB; {gpu:.1} on the \
@@ -2235,7 +2289,7 @@ impl Meter {
             );
             #[cfg(feature = "diagnostics")]
             {
-                crate::copystat::log(std::mem::take(&mut self.copy_stats_frames) as f64);
+                crate::copystat::log(frames);
                 for (why, n) in drops.iter().take(40) {
                     tracing::info!(
                         "dropped {:.1}/frame without a host pipeline: {why}",
@@ -2244,6 +2298,12 @@ impl Meter {
                 }
             }
         }
+        let Some(FrameRates { fps, ms, draws, .. }) =
+            self.caption_window
+                .frame(now, drawn, Duration::from_secs(1))
+        else {
+            return;
+        };
         if self.caption.is_none() {
             // The window's own text, read without a message.
             let mut buffer = vec![0u16; 512];
