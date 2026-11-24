@@ -1585,7 +1585,7 @@ impl HostList {
         #[cfg(feature = "diagnostics")]
         use crate::copystat::{C, add};
         for step in &self.deferred().copies {
-            let started = std::time::Instant::now();
+            let mut started = std::time::Instant::now();
             #[cfg(feature = "diagnostics")]
             let _timed = crate::watch::Timed(
                 started,
@@ -1607,6 +1607,9 @@ impl HostList {
                         add(C::CopyBytes, len as u64);
                     }
                     batch.title_written();
+                    // The flush added its own time to PREPARING; the copy
+                    // starts here, so the step does not count it again.
+                    started = std::time::Instant::now();
                     copy_mapped(dst as *mut u8, src as *const u8, len, true);
                     len
                 }
@@ -1631,6 +1634,10 @@ impl HostList {
                 Step::Run(work) | Step::Host(work) => {
                     if matches!(step, Step::Run(_)) {
                         batch.title_written();
+                        // As for a copy: the flush's time is its own
+                        // (unconditional, so the preparing total is the same
+                        // in both feature builds).
+                        started = std::time::Instant::now();
                     }
                     work();
                     #[cfg(feature = "diagnostics")]
