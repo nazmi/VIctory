@@ -409,6 +409,7 @@ static FUNCTIONS: Table<160> = {
     f[36] = fence::create as *const (); // 0x120
     f[38] = resource::copyable_footprints as *const (); // 0x130
     f[39] = query::create as *const (); // 0x138
+    f[40] = object::ignore as *const (); // 0x140 SetStablePowerState: a profiling setting
     f[41] = signature::create as *const (); // 0x148
     f[48] = queue::create_x as *const (); // 0x180
     f[61] = descriptor::create_sampler_x as *const (); // 0x1e8
@@ -597,5 +598,14 @@ mod tests {
         let device = device();
         let evict = slot::<Evict>(device, 0x118);
         assert_eq!(evict(device, 0, std::ptr::null()), S_OK);
+    }
+
+    #[test]
+    fn set_stable_power_state_is_accepted() {
+        type SetStablePowerState = extern "system" fn(This, i32) -> HRESULT;
+        let device = device();
+        let set = slot::<SetStablePowerState>(device, 0x140);
+        assert_eq!(set(device, 1), S_OK);
+        assert_eq!(set(device, 0), S_OK);
     }
 }
