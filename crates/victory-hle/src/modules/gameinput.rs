@@ -105,6 +105,32 @@ struct KeyState {
 
 const _: () = assert!(size_of::<KeyState>() == 12 && size_of::<PadState>() == 28);
 
+/// Motor speeds a title asks for, 0 (off) to `u16::MAX` (full).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Motors {
+    /// Low frequency (left grip).
+    low: u16,
+    /// High frequency (right grip).
+    high: u16,
+    left_trigger: u16,
+    right_trigger: u16,
+}
+
+impl Motors {
+    /// From the title's four levels in `[0, 1]`, in its order: low, high,
+    /// left trigger, right trigger. Out-of-range levels are clamped.
+    fn from_levels(levels: [f32; 4]) -> Motors {
+        let speed = |level: f32| (level.clamp(0.0, 1.0) * f32::from(u16::MAX)) as u16;
+        let [low, high, left_trigger, right_trigger] = levels.map(speed);
+        Motors {
+            low,
+            high,
+            left_trigger,
+            right_trigger,
+        }
+    }
+}
+
 /// Host input, or a fake in tests.
 trait Source: Send {
     /// The pad in host slot `slot`, `None` when the slot is empty.
@@ -116,8 +142,9 @@ trait Source: Send {
     fn scripted_keys(&mut self) -> Vec<KeyState> {
         Vec::new()
     }
-    /// Motor speeds: low frequency (left), high frequency (right).
-    fn rumble(&mut self, slot: usize, low: u16, high: u16);
+    /// Sets the motors of the pad in host slot `slot`. A host without some
+    /// motors (XInput has no trigger motors) ignores those speeds.
+    fn rumble(&mut self, slot: usize, motors: Motors);
 }
 
 fn fallback(keys: &[KeyState]) -> PadState {
@@ -590,7 +617,7 @@ fn host() -> Box<dyn Source> {
         fn keys(&mut self) -> Vec<KeyState> {
             Vec::new()
         }
-        fn rumble(&mut self, _: usize, _: u16, _: u16) {}
+        fn rumble(&mut self, _: usize, _: Motors) {}
     }
     Box::new(Nothing)
 }
@@ -987,24 +1014,21 @@ extern "system" fn device_status(this: *const Device) -> u32 {
         0
     }
 }
-// shortcut: trigger motors are dropped (XInput has none). The host API that
-// drives them without a redistributable is Windows.Gaming.Input (WinRT
-// `Gamepad.Vibration`), which needs WinRT bindings this crate lacks outside
-// diagnostics builds; Grand Theft Auto VI sends trigger levels in slot 0x50.
+/// Grand Theft Auto VI sends trigger levels here too; they reach the host
+/// [`Source`], which drops what it cannot drive.
 extern "system" fn set_rumble(this: *const Device, params: *const [f32; 4]) {
     // SAFETY: one of our devices.
     let device = unsafe { &*this };
     if device.index >= PADS {
         return;
     }
-    let [low, high, ..] = if params.is_null() {
+    let levels = if params.is_null() {
         [0.0; 4]
     } else {
         // SAFETY: checked non-null; four motor levels.
         unsafe { *params }
     };
-    let speed = |level: f32| (level.clamp(0.0, 1.0) * f32::from(u16::MAX)) as u16;
-    lock(&device.hub().source).rumble(device.index, speed(low), speed(high));
+    lock(&device.hub().source).rumble(device.index, Motors::from_levels(levels));
 }
 extern "system" fn unsupported<const SLOT: usize>(_: *const c_void) -> HRESULT {
     tracing::warn!(
@@ -1290,10 +1314,14 @@ mod host {
             }
         }
 
-        fn rumble(&mut self, slot: usize, low: u16, high: u16) {
+        // shortcut: trigger motors are dropped (XInput has none). The host
+        // API that drives them without a redistributable is
+        // Windows.Gaming.Input (WinRT `Gamepad.Vibration`), which needs WinRT
+        // bindings this crate lacks outside diagnostics builds.
+        fn rumble(&mut self, slot: usize, motors: Motors) {
             let speeds = XINPUT_VIBRATION {
-                wLeftMotorSpeed: low,
-                wRightMotorSpeed: high,
+                wLeftMotorSpeed: motors.low,
+                wRightMotorSpeed: motors.high,
             };
             // SAFETY: a valid vibration; an empty slot just fails.
             unsafe { XInputSetState(slot as u32, &speeds) };
@@ -1489,7 +1517,7 @@ mod tests {
         pads: [Option<PadState>; PADS],
         keys: Vec<KeyState>,
         scripted: Vec<KeyState>,
-        rumble: Vec<(usize, u16, u16)>,
+        rumble: Vec<(usize, Motors)>,
     }
 
     struct Fake(Arc<Mutex<FakeHost>>);
@@ -1504,8 +1532,8 @@ mod tests {
         fn scripted_keys(&mut self) -> Vec<KeyState> {
             self.0.lock().unwrap().scripted.clone()
         }
-        fn rumble(&mut self, slot: usize, low: u16, high: u16) {
-            self.0.lock().unwrap().rumble.push((slot, low, high));
+        fn rumble(&mut self, slot: usize, motors: Motors) {
+            self.0.lock().unwrap().rumble.push((slot, motors));
         }
     }
 
@@ -1986,10 +2014,35 @@ mod tests {
 
         type Rumble = extern "system" fn(*const Device, *const [f32; 4]);
         let rumble = slot::<Rumble, _>(device, 0x50);
-        rumble(device, &[0.5, 1.0, 1.0, 1.0]);
+        rumble(device, &[0.5, 1.0, 0.25, 0.75]);
         rumble(&hub.devices[FALLBACK], &[1.0; 4]);
         rumble(device, std::ptr::null());
-        assert_eq!(host.lock().unwrap().rumble, [(2, 32767, 65535), (2, 0, 0)]);
+        let all = Motors {
+            low: 32767,
+            high: 65535,
+            left_trigger: 16383,
+            right_trigger: 49151,
+        };
+        assert_eq!(
+            host.lock().unwrap().rumble,
+            [(2, all), (2, Motors::default())]
+        );
+    }
+
+    #[test]
+    fn motor_levels_are_clamped_and_kept_in_order() {
+        let motors = Motors::from_levels([-1.0, 2.0, 0.0, 1.0]);
+        assert_eq!(
+            motors,
+            Motors {
+                low: 0,
+                high: u16::MAX,
+                left_trigger: 0,
+                right_trigger: u16::MAX,
+            }
+        );
+        // NaN clamps to NaN, which `as u16` turns into 0: a motor stays off.
+        assert_eq!(Motors::from_levels([f32::NAN; 4]), Motors::default());
     }
 
     #[test]
