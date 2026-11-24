@@ -3869,8 +3869,17 @@ impl<'a> Lower<'a> {
             && matches!(kind, Some(u) if u.kind == ResourceType::Uav)
             && matches!(src, Source::Built { address, .. }
                 if self.x.native.layout.get(address.param).is_some_and(|p| p.root == RootType::Descriptor));
-        if srv || root_uav {
-            let (h, addr) = self.raw_view(site, src, addr, 4 * count, (11, 0), false, None)?;
+        // A raw view, read only or not; a constant buffer otherwise. (A UAV
+        // read through a constant buffer handle removes the device.)
+        let raw = if srv || root_uav {
+            Some((11, 0))
+        } else if matches!(kind, Some(u) if u.kind == ResourceType::Uav) {
+            Some((11 | 0x1000, 0))
+        } else {
+            None
+        };
+        if let Some(props) = raw {
+            let (h, addr) = self.raw_view(site, src, addr, 4 * count, props, false, None)?;
             let c = self.cur;
             for k in 0..count {
                 let off = self.s.m.i32(4 * k);
