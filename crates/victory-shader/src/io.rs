@@ -358,7 +358,11 @@ pub fn raise(p: &Program, native: &NativeProgram) -> Result<Io, ShaderError> {
                     }
                 }
                 Fields::Valu(v) if name.starts_with("v_interp_") => match name {
-                    "v_interp_p1ll_f16" => {}
+                    // First halves: `v_interp_p2_f16` pairs with them
+                    // below. `v_interp_p1lv_f16`'s P0 comes from a lane
+                    // VGPR (`v.src[2]`) instead of the local data share, but
+                    // the pair only needs its site, attribute and I.
+                    "v_interp_p1ll_f16" | "v_interp_p1lv_f16" => {}
                     "v_interp_p2_f16" => {
                         let attribute = attribute(inst, &v.src[0])?;
                         let read = |k: usize| match v.src.get(k) {
@@ -490,10 +494,14 @@ impl Halves<'_> {
                     attr,
                     ..
                 } if inst.name() == "v_interp_p1_f32" => (*attr, inst.read(Reg::V(*reg))),
-                Fields::Valu(v) if inst.name() == "v_interp_p1ll_f16" => match v.src.get(1) {
-                    Some(&Operand::Vector { reg, .. }) => (v.src[0], inst.read(Reg::V(reg))),
-                    _ => return Err("an interpolation without its first half"),
-                },
+                Fields::Valu(v)
+                    if inst.name() == "v_interp_p1ll_f16" || inst.name() == "v_interp_p1lv_f16" =>
+                {
+                    match v.src.get(1) {
+                        Some(&Operand::Vector { reg, .. }) => (v.src[0], inst.read(Reg::V(reg))),
+                        _ => return Err("an interpolation without its first half"),
+                    }
+                }
                 _ => return Err("an interpolation without its first half"),
             };
             if a != *attr {
@@ -622,6 +630,38 @@ mod tests {
             (Target::Color(0), true, false)
         );
         assert_eq!(e.values[0], p.blocks[0].insts[1].write(Reg::V(2)));
+    }
+
+    #[test]
+    fn lane_value_first_half_pairs_with_f16_second() {
+        // v_interp_p1lv_f16 v4, v0, attr0.x, v3 — the I coordinate in v0
+        // (the perspective-center i), the lane's P0 in v3 — then
+        // v_interp_p2_f16 v5, v1, attr0.x, v4 — the j in v1, the first
+        // half's result in v4.
+        let p = program(&[
+            0xD743_0004,
+            0x040E_0000, // v_interp_p1lv_f16 v4, v0, attr0.x, v3
+            0xD75A_0005,
+            0x0412_0200, // v_interp_p2_f16 v5, v1, attr0.x, v4
+            S_ENDPGM,
+        ]);
+        let io = raise(&p, &pixel(vec![TEXCOORD], 2)).unwrap();
+        assert_eq!(
+            io.interps,
+            [(
+                (0, 1),
+                Interp::Interpolated {
+                    attribute: Attribute {
+                        usage: Usage::Generic,
+                        row: 1,
+                        channel: 0,
+                        high: false
+                    },
+                    barycentric: Barycentric::PerspectiveCenter,
+                    first: vec![(0, 0)],
+                }
+            )]
+        );
     }
 
     #[test]
