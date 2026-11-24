@@ -1,6 +1,7 @@
 //! A DXIL vertex, pixel, compute or mesh shader under construction: the module,
 //! the `dx.op` declarations it calls, its signatures and bound resources,
-//! and the metadata and container that wrap it up (SM 6.6, validator 1.6).
+//! and the metadata and container that wrap it up (SM 6.6; validator 1.6,
+//! or 1.8 for compute derivatives).
 
 use super::bitcode::{Attr, Md, Module, Ty, V};
 use super::container::{self, Binding, Psv, SigElement};
@@ -78,6 +79,8 @@ pub(crate) struct Shader {
     pub threads: Option<[u32; 3]>,
     /// The wave size a compute shader requires (`WaveSize`).
     pub wave_size: Option<u32>,
+    /// Compute derivatives require validator 1.8 rather than 1.6 or 1.7.
+    compute_derivatives: bool,
     /// Thread-group shared memory, in dwords.
     pub lds_dwords: u32,
     lds: Option<V>,
@@ -133,6 +136,7 @@ impl Shader {
             nonuniform_handles: 0,
             threads: None,
             wave_size: None,
+            compute_derivatives: false,
             lds_dwords: 0,
             lds: None,
             main,
@@ -162,6 +166,12 @@ impl Shader {
         opcode: u32,
         args: &[V],
     ) -> V {
+        if self.threads.is_some()
+            && self.mesh.is_none()
+            && matches!(opcode, 53..=56 | 60 | 61 | 64 | 81)
+        {
+            self.compute_derivatives = true;
+        }
         let mut params = vec![self.t.i32];
         params.extend(args.iter().map(|&a| self.m.type_of(a)));
         let fty = self.m.func_ty(ret, params);
@@ -618,7 +628,10 @@ impl Shader {
         let six = i32c(&mut self, 6);
         let version = self.m.md_node(vec![Some(one), Some(six)]);
         self.m.named_md("dx.version", vec![version]);
-        self.m.named_md("dx.valver", vec![version]);
+        let val_minor = if self.compute_derivatives { 8 } else { 6 };
+        let val_minor = i32c(&mut self, val_minor);
+        let val_version = self.m.md_node(vec![Some(one), Some(val_minor)]);
+        self.m.named_md("dx.valver", vec![val_version]);
         // Program kinds: 0 pixel, 1 vertex, 5 compute, 13 mesh.
         let (name, kind) = match (self.threads, self.pixel) {
             _ if self.mesh.is_some() => ("ms", 13u32),
@@ -678,6 +691,7 @@ impl Shader {
             bindings: &bindings,
             threads: self.threads.unwrap_or_default(),
             wave_size: self.wave_size,
+            validator18: self.compute_derivatives,
         });
         let hash = [0u8; 20];
         let psg1 = container::signature(&self.prims, false);
@@ -737,5 +751,38 @@ impl Shader {
             list.push(Some(self.m.md_node(ops)));
         }
         Some(self.m.md_node(list))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::super::bitcode::Term;
+    use super::super::validator;
+    use super::*;
+
+    #[test]
+    fn compute_implicit_sample_validates() {
+        let mut s = Shader::new(false);
+        s.threads = Some([32, 1, 1]);
+        s.wave_size = Some(32);
+        s.samplers = 1;
+        let block = s.entry;
+        let index = s.m.i32(0);
+        let texture = s.heap_handle(block, index, false, false, (2, 1033));
+        let sampler = s.sampler_handle(block, 0);
+        let zero = s.m.f32(0);
+        let fu = s.m.undef(s.t.f32);
+        let iu = s.m.undef(s.t.i32);
+        let args = [texture, sampler, zero, zero, fu, fu, iu, iu, iu, fu];
+        let ret = s.t.res_ret;
+        s.op(block, "sample.f32", Attr::ReadOnly, ret, 60, &args);
+        s.m.terminate(block, Term::Ret);
+        let mut dxil = s.finish();
+        let path = validator::Validator::default_path();
+        let Ok(mut validator) = validator::Validator::load(path.as_deref()) else {
+            eprintln!("no dxil.dll; skipped");
+            return;
+        };
+        validator.validate(&mut dxil).unwrap();
     }
 }
