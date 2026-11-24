@@ -205,7 +205,13 @@ pub fn build(code: &[u8], wave64: bool, vgprs: u16) -> Result<Program, ShaderErr
                 Flow::Stop => Exit::End,
             };
         }
-        if let Some((reads, writes)) = effects(&machine, &fields, name, lanes, vgprs)? {
+        if let Some((mut reads, writes)) = effects(&machine, &fields, name, lanes, vgprs)? {
+            // Lanes disabled in EXEC keep the old value.
+            for w in writes.iter().filter(|w| matches!(w, Reg::V(_))) {
+                if !reads.contains(w) {
+                    reads.push(*w);
+                }
+            }
             let unset = |regs: Vec<Reg>| regs.into_iter().map(|r| (r, NONE)).collect();
             blocks[b].insts.push(Inst {
                 machine,
@@ -676,6 +682,16 @@ const DROPPED: &[&str] = &[
 /// Registers read, registers written.
 type Effects = (Vec<Reg>, Vec<Reg>);
 
+/// The registers `inst` of `p` reads as operands: its reads without the old
+/// value of a VGPR it only writes.
+pub(crate) fn operand_reads(p: &Program, inst: &Inst) -> Vec<Reg> {
+    let lanes = 1 + u8::from(p.wave64);
+    effects(&inst.machine, &inst.fields, inst.name(), lanes, p.vgprs)
+        .ok()
+        .flatten()
+        .map_or_else(Vec::new, |e| e.0)
+}
+
 /// Registers an instruction reads and writes, one per dword, or `None` if
 /// the IR drops it.
 fn effects(
@@ -944,8 +960,6 @@ fn effects(
     }
     if vector {
         r.extend(mask(EXEC));
-        // Lanes disabled in EXEC keep the old value.
-        r.extend(w.iter().filter(|w| matches!(w, Reg::V(_))));
     }
     let mut seen = Vec::with_capacity(r.len());
     r.retain(|reg| {
