@@ -1,8 +1,11 @@
-//! Media Foundation is the host's (`mfplat.dll` passes through), except for
-//! the source resolver: the host's would fetch `http`, `rtsp` and other
-//! URLs over the network, past `modules::net`. Titles get a proxy that
-//! opens local files only, with paths on our virtual drives rewritten to
-//! their host folders, and forwards everything else to the host's resolver.
+//! Media Foundation is the host's (`mfplat.dll` and `mfreadwrite.dll` pass
+//! through), except for the source resolver: the host's would fetch
+//! `http`, `rtsp` and other URLs over the network, past `modules::net`.
+//! Titles get a proxy that opens local files only, with paths on our
+//! virtual drives rewritten to their host folders, and forwards everything
+//! else to the host's resolver. The other exports that take a URL or path
+//! (source reader, sink writer, file byte streams) get the same check: the
+//! host's use its own resolver and file calls, which never see the proxy.
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
@@ -167,6 +170,16 @@ fn checked(url: *const u16) -> Result<Vec<u16>, HRESULT> {
     })
 }
 
+/// `checked`, clearing the title's out pointer on a refusal.
+fn checked_out(url: *const u16, out: *mut Unknown) -> Result<Vec<u16>, HRESULT> {
+    checked(url).inspect_err(|_| {
+        if !out.is_null() {
+            // SAFETY: the title's out parameter.
+            unsafe { out.write(std::ptr::null_mut()) };
+        }
+    })
+}
+
 // The proxy resolver.
 
 /// The host's resolver, called through its method table.
@@ -314,15 +327,9 @@ extern "system" fn create_from_url(
     kind: *mut u32,
     object: *mut Unknown,
 ) -> HRESULT {
-    let url = match checked(url) {
+    let url = match checked_out(url, object) {
         Ok(url) => url,
-        Err(error) => {
-            if !object.is_null() {
-                // SAFETY: the title's out parameter.
-                unsafe { object.write(std::ptr::null_mut()) };
-            }
-            return error;
-        }
+        Err(error) => return error,
     };
     let host = host(this);
     // SAFETY: slot 3 is `CreateObjectFromURL`.
@@ -476,11 +483,121 @@ pub extern "system" fn MFCreateSourceResolver(out: *mut *mut Resolver) -> HRESUL
     S_OK
 }
 
+// The other exports that take a URL or path: checked, then the host's.
+
+pub extern "system" fn MFCreateSourceReaderFromURL(
+    url: *const u16,
+    attributes: Unknown,
+    reader: *mut Unknown,
+) -> HRESULT {
+    let url = match checked_out(url, reader) {
+        Ok(url) => url,
+        Err(error) => return error,
+    };
+    let Some(f) = crate::host::function("mfreadwrite.dll", "MFCreateSourceReaderFromURL") else {
+        return UNSUPPORTED_SCHEME;
+    };
+    // SAFETY: the host's `MFCreateSourceReaderFromURL(LPCWSTR,
+    // IMFAttributes*, IMFSourceReader**)`.
+    let f: extern "system" fn(*const u16, Unknown, *mut Unknown) -> HRESULT =
+        unsafe { std::mem::transmute(f) };
+    f(url.as_ptr(), attributes, reader)
+}
+
+pub extern "system" fn MFCreateSinkWriterFromURL(
+    url: *const u16,
+    stream: Unknown,
+    attributes: Unknown,
+    writer: *mut Unknown,
+) -> HRESULT {
+    // With a byte stream the URL only names the container type, as in
+    // `create_from_stream`; without one it is the file to create.
+    let path = if stream.is_null() {
+        match checked_out(url, writer) {
+            Ok(path) => Some(path),
+            Err(error) => return error,
+        }
+    } else {
+        None
+    };
+    let Some(f) = crate::host::function("mfreadwrite.dll", "MFCreateSinkWriterFromURL") else {
+        return UNSUPPORTED_SCHEME;
+    };
+    // SAFETY: the host's `MFCreateSinkWriterFromURL(LPCWSTR, IMFByteStream*,
+    // IMFAttributes*, IMFSinkWriter**)`.
+    let f: extern "system" fn(*const u16, Unknown, Unknown, *mut Unknown) -> HRESULT =
+        unsafe { std::mem::transmute(f) };
+    f(
+        path.as_ref().map_or(url, |p| p.as_ptr()),
+        stream,
+        attributes,
+        writer,
+    )
+}
+
+pub extern "system" fn MFCreateFile(
+    access: u32,
+    open: u32,
+    flags: u32,
+    path: *const u16,
+    stream: *mut Unknown,
+) -> HRESULT {
+    let path = match checked_out(path, stream) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    let Some(f) = crate::host::function("mfplat.dll", "MFCreateFile") else {
+        return UNSUPPORTED_SCHEME;
+    };
+    // SAFETY: the host's `MFCreateFile(MF_FILE_ACCESSMODE, MF_FILE_OPENMODE,
+    // MF_FILE_FLAGS, LPCWSTR, IMFByteStream**)`.
+    let f: extern "system" fn(u32, u32, u32, *const u16, *mut Unknown) -> HRESULT =
+        unsafe { std::mem::transmute(f) };
+    f(access, open, flags, path.as_ptr(), stream)
+}
+
+pub extern "system" fn MFBeginCreateFile(
+    access: u32,
+    open: u32,
+    flags: u32,
+    path: *const u16,
+    callback: Unknown,
+    state: Unknown,
+    cookie: *mut Unknown,
+) -> HRESULT {
+    let path = match checked_out(path, cookie) {
+        Ok(path) => path,
+        Err(error) => return error,
+    };
+    let Some(f) = crate::host::function("mfplat.dll", "MFBeginCreateFile") else {
+        return UNSUPPORTED_SCHEME;
+    };
+    // SAFETY: the host's `MFBeginCreateFile(MF_FILE_ACCESSMODE,
+    // MF_FILE_OPENMODE, MF_FILE_FLAGS, LPCWSTR, IMFAsyncCallback*, IUnknown*,
+    // IUnknown**)`.
+    let f: extern "system" fn(
+        u32,
+        u32,
+        u32,
+        *const u16,
+        Unknown,
+        Unknown,
+        *mut Unknown,
+    ) -> HRESULT = unsafe { std::mem::transmute(f) };
+    f(access, open, flags, path.as_ptr(), callback, state, cookie)
+}
+
 pub(crate) fn module() -> HleModule {
     HleModule {
         name: "media",
-        dlls: &["mfplat.dll"],
-        exports: vec![hle_export!(MFCreateSourceResolver)],
+        dlls: &["mfplat.dll", "mfreadwrite.dll"],
+        exports: vec![
+            hle_export!(MFCreateSourceResolver),
+            hle_export!(MFCreateFile),
+            hle_export!(MFBeginCreateFile),
+            hle_export!(MFCreateSourceReaderFromURL),
+            hle_export!(MFCreateSinkWriterFromURL),
+        ],
     }
 }
 
@@ -631,6 +748,44 @@ mod tests {
         );
         assert_eq!(host_path("file:////C:/Windows/a.wav"), r"C:\Windows\a.wav");
         assert_eq!(host_path("file:///movies/a.mp4"), r"\movies\a.mp4");
+    }
+
+    #[test]
+    /// The host's Media Foundation resolves these URLs and paths with its
+    /// own resolver and file calls, past the proxy and `files`: a network
+    /// URL is fetched and a virtual-drive path is not rewritten.
+    #[test]
+    fn every_media_foundation_url_entry_point_is_ours() {
+        for (dll, name) in [
+            ("mfreadwrite.dll", "MFCreateSourceReaderFromURL"),
+            ("mfreadwrite.dll", "MFCreateSinkWriterFromURL"),
+            ("mfplat.dll", "MFCreateFile"),
+            ("mfplat.dll", "MFBeginCreateFile"),
+        ] {
+            assert!(
+                crate::registry::lookup(dll, name).is_some(),
+                "{dll}!{name} reaches the host unchecked"
+            );
+        }
+    }
+
+    /// A refusal returns before the host is asked and leaves no stale
+    /// pointer in the title's out parameter.
+    #[test]
+    fn url_entry_points_refuse_what_is_not_a_local_file() {
+        let url = with_nul(&wide("https://cdn.example.com/a.mp4"));
+        let share = with_nul(&wide(r"\\server\share\a.mp4"));
+        let null = std::ptr::null_mut();
+        let stale = || std::ptr::dangling_mut::<c_void>();
+        let (mut a, mut b, mut c, mut d) = (stale(), stale(), stale(), stale());
+        let results = [
+            MFCreateSourceReaderFromURL(url.as_ptr(), null, &mut a),
+            MFCreateSinkWriterFromURL(share.as_ptr(), null, null, &mut b),
+            MFCreateFile(1, 1, 0, share.as_ptr(), &mut c),
+            MFBeginCreateFile(1, 1, 0, url.as_ptr(), null, null, &mut d),
+        ];
+        assert_eq!(results, [UNSUPPORTED_SCHEME; 4]);
+        assert!([a, b, c, d].iter().all(|out| out.is_null()));
     }
 
     #[test]
