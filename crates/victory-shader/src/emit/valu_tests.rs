@@ -977,6 +977,71 @@ fn v_cvt_u16_and_i16_f16_saturate() {
 }
 
 #[test]
+fn integer_add_sub_and_mul_lower_as_their_unsigned_twins() {
+    // The low 32 bits of a sum, difference or product do not depend on the
+    // sign, so the _i32 forms are bit-identical to the _u32 forms; the ISA
+    // says the same ("No carry-in or carry-out", D.i = S0.i + S1.i).
+    let cases: &[[u32; 4]] = &[
+        [0x7FFF_FFFF, 1, 0, 0],
+        [0xFFFF_FFFF, 0xFFFF_FFFF, 0, 0],
+        [0x8000_0000, 1, 0, 0],
+    ];
+    for (op, name) in [(0x37Fu16, "v_add_nc_i32"), (0x16B, "v_mul_lo_i32")] {
+        let shader = build_valu_cs(&vop3(op, 0, vgpr(1), vgpr(2), vgpr(0)));
+        run_cases(&shader, cases, |backend, _, inp, got| {
+            let want = if name == "v_mul_lo_i32" {
+                inp[0].wrapping_mul(inp[1])
+            } else {
+                inp[0].wrapping_add(inp[1])
+            };
+            assert_eq!(got, want, "{backend}: {name}({:#x}, {:#x})", inp[0], inp[1]);
+        });
+    }
+    // Subtraction: the sign matters for the operand order, not the encoding.
+    let sub = build_valu_cs(&vop3(0x376, 0, vgpr(1), vgpr(2), vgpr(0)));
+    run_cases(
+        &sub,
+        &[[1, 2, 0, 0], [0x8000_0000, 1, 0, 0]],
+        |backend, i, inp, got| {
+            assert_eq!(
+                got,
+                inp[0].wrapping_sub(inp[1]),
+                "{backend}: v_sub_nc_i32 case {i}"
+            );
+        },
+    );
+}
+
+#[test]
+fn signed_16_bit_add_and_sub_wrap_like_the_unsigned_forms() {
+    // v_add_nc_i16 / v_sub_nc_i16: the mantissa is 16 bits either way, so the
+    // low half is the same as the unsigned form.
+    for (op, add) in [(0x30Du16, true), (0x30E, false)] {
+        let shader = build_valu_cs(&vop3(op, 0, vgpr(1), vgpr(2), vgpr(0)));
+        let cases: &[(u32, u32)] = &[
+            (0x0000_7FFF, 0x0000_0001), // 32767 + 1 wraps to -32768
+            (0xFFFF_8000, 0xFFFF_0002), // -32768 + 2
+            (0x0000_1234, 0x0000_0001),
+        ];
+        let inputs: Vec<[u32; 4]> = cases.iter().map(|&(a, b)| [a, b, 0, 0]).collect();
+        run_cases(&shader, &inputs, |backend, i, inp, got| {
+            let (a, b) = (inp[0] as u16, inp[1] as u16);
+            let want = if add {
+                a.wrapping_add(b)
+            } else {
+                a.wrapping_sub(b)
+            };
+            assert_eq!(
+                got as u16,
+                want,
+                "{backend}: {} case {i} ({a:#06x}, {b:#06x})",
+                if add { "v_add_nc_i16" } else { "v_sub_nc_i16" }
+            );
+        });
+    }
+}
+
+#[test]
 fn v_swap_b32_exchanges_two_vgprs_and_copies_from_anything_else() {
     // ISA 101 V_SWAP_B32, "tmp = D.u; D.u = S0.u; S0.u = tmp": both VGPRs
     // change. Integer constant n is operand code 128 + n.

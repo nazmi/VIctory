@@ -5488,6 +5488,8 @@ impl<'a> Lower<'a> {
         const INT: &[&str] = &[
             "v_add_nc_u16",
             "v_sub_nc_u16",
+            "v_add_nc_i16",
+            "v_sub_nc_i16",
             "v_subrev_nc_u16",
             "v_mul_lo_u16",
             "v_lshlrev_b16",
@@ -5690,8 +5692,8 @@ impl<'a> Lower<'a> {
             }
             let k15 = self.s.m.i32(15);
             match name {
-                "v_add_nc_u16" => self.s.m.bin(c, Bin::Add, a, b),
-                "v_sub_nc_u16" => self.s.m.bin(c, Bin::Sub, a, b),
+                "v_add_nc_u16" | "v_add_nc_i16" => self.s.m.bin(c, Bin::Add, a, b),
+                "v_sub_nc_u16" | "v_sub_nc_i16" => self.s.m.bin(c, Bin::Sub, a, b),
                 "v_subrev_nc_u16" => self.s.m.bin(c, Bin::Sub, b, a),
                 "v_mul_lo_u16" => self.s.m.bin(c, Bin::Mul, a, b),
                 "v_lshlrev_b16" | "v_lshrrev_b16" | "v_ashrrev_i16" => {
@@ -5992,15 +5994,16 @@ impl<'a> Lower<'a> {
             l.s.m.bin(c, Bin::And, x, k31)
         };
         Ok(match name {
-            "v_and_b32" | "v_or_b32" | "v_xor_b32" | "v_add_nc_u32" | "v_sub_nc_u32"
-            | "v_subrev_nc_u32" | "v_mul_lo_u32" => {
+            "v_and_b32" | "v_or_b32" | "v_xor_b32" | "v_add_nc_u32" | "v_add_nc_i32"
+            | "v_sub_nc_u32" | "v_sub_nc_i32" | "v_subrev_nc_u32" | "v_mul_lo_u32"
+            | "v_mul_lo_i32" => {
                 let (a, b) = (s(self, 0)?, s(self, 1)?);
                 let (op, a, b) = match name {
                     "v_and_b32" => (Bin::And, a, b),
                     "v_or_b32" => (Bin::Or, a, b),
                     "v_xor_b32" => (Bin::Xor, a, b),
-                    "v_add_nc_u32" => (Bin::Add, a, b),
-                    "v_sub_nc_u32" => (Bin::Sub, a, b),
+                    "v_add_nc_u32" | "v_add_nc_i32" => (Bin::Add, a, b),
+                    "v_sub_nc_u32" | "v_sub_nc_i32" => (Bin::Sub, a, b),
                     "v_subrev_nc_u32" => (Bin::Sub, b, a),
                     _ => (Bin::Mul, a, b),
                 };
