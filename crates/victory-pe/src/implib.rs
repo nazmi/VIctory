@@ -122,56 +122,54 @@ impl ImportLibrary {
             if consumed[index] {
                 continue;
             }
-            if let Some((_, size, ordinal, flags)) = import_header(member) {
-                if size == 0 {
-                    // Long-format descriptor. Its DLL and export names live
-                    // in the COFF object(s) that follow the null members.
-                    consumed[index] = true;
-                    lib.other_members += 1;
-                    let kind = import_kind(flags);
-                    let name_type = flags >> 2 & 0b111;
-                    let mut dll = None;
-                    let mut names = Vec::new();
-                    for (next, object) in contents.iter().enumerate().skip(index + 1) {
-                        if consumed[next] || import_header(object).is_some() {
-                            break;
-                        }
-                        let symbols = coff_symbols(object);
-                        if symbols.is_empty() {
-                            continue;
-                        }
-                        consumed[next] = true;
-                        lib.other_members += 1;
-                        for symbol in symbols {
-                            if let Some(d) = symbol.strip_prefix("__IMPORT_DESCRIPTOR_") {
-                                dll = Some(d.to_owned());
-                            } else if let Some(export) = symbol.strip_prefix("__imp_") {
-                                names.push(export.to_owned());
-                            }
-                        }
+            if let Some((_, 0, ordinal, flags)) = import_header(member) {
+                // Long-format descriptor. Its DLL and export names live
+                // in the COFF object(s) that follow the null members.
+                consumed[index] = true;
+                lib.other_members += 1;
+                let kind = import_kind(flags);
+                let name_type = flags >> 2 & 0b111;
+                let mut dll = None;
+                let mut names = Vec::new();
+                for (next, object) in contents.iter().enumerate().skip(index + 1) {
+                    if consumed[next] || import_header(object).is_some() {
+                        break;
                     }
-                    let Some(dll) = dll else {
+                    let symbols = coff_symbols(object);
+                    if symbols.is_empty() {
                         continue;
-                    };
-                    for name in names {
-                        let export = if name_type == NAME_ORDINAL {
-                            ImportSymbol::Ordinal(ordinal)
-                        } else if name_type == NAME_EXPORTAS {
-                            ImportSymbol::Name { hint: 0, name }
-                        } else {
-                            ImportSymbol::Name {
-                                hint: 0,
-                                name: strip_decoration(&name, name_type),
-                            }
-                        };
-                        lib.imports.push(LibImport {
-                            dll: dll.clone(),
-                            export,
-                            kind,
-                        });
                     }
-                    continue;
+                    consumed[next] = true;
+                    lib.other_members += 1;
+                    for symbol in symbols {
+                        if let Some(d) = symbol.strip_prefix("__IMPORT_DESCRIPTOR_") {
+                            dll = Some(d.to_owned());
+                        } else if let Some(export) = symbol.strip_prefix("__imp_") {
+                            names.push(export.to_owned());
+                        }
+                    }
                 }
+                let Some(dll) = dll else {
+                    continue;
+                };
+                for name in names {
+                    let export = if name_type == NAME_ORDINAL {
+                        ImportSymbol::Ordinal(ordinal)
+                    } else if name_type == NAME_EXPORTAS {
+                        ImportSymbol::Name { hint: 0, name }
+                    } else {
+                        ImportSymbol::Name {
+                            hint: 0,
+                            name: strip_decoration(&name, name_type),
+                        }
+                    };
+                    lib.imports.push(LibImport {
+                        dll: dll.clone(),
+                        export,
+                        kind,
+                    });
+                }
+                continue;
             }
             match ImportFile::parse(&member[..]) {
                 Ok(import) => {

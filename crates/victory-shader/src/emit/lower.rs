@@ -8811,12 +8811,22 @@ mod tests {
                 slot: 0,
             }]
         };
-        lower_with(&words, vec![root(RootType::Table, 0, 0)], used(ResourceType::Srv)).unwrap();
-        let err = lower_with(&words, vec![root(RootType::Table, 0, 0)], used(ResourceType::Cbv))
-            .err()
-            .expect("CBV descriptor read as data must be refused");
+        lower_with(
+            &words,
+            vec![root(RootType::Table, 0, 0)],
+            used(ResourceType::Srv),
+        )
+        .unwrap();
+        let err = lower_with(
+            &words,
+            vec![root(RootType::Table, 0, 0)],
+            used(ResourceType::Cbv),
+        )
+        .err()
+        .expect("CBV descriptor read as data must be refused");
         assert!(
-            err.to_string().contains("constant buffer's descriptor read as data"),
+            err.to_string()
+                .contains("constant buffer's descriptor read as data"),
             "unexpected error: {err}"
         );
     }

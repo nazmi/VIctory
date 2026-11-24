@@ -1191,13 +1191,18 @@ mod tests {
         for good in ["v0", "v1", "v10", "v18446744073709551615"] {
             assert!(version_number(good).is_some(), "{good}");
         }
-        for bad in ["v01", "v001", "v+1", "v-1", "v 1", "v", "1", "V1", "v1.new", "v1x"] {
+        for bad in [
+            "v01", "v001", "v+1", "v-1", "v 1", "v", "1", "V1", "v1.new", "v1x",
+        ] {
             assert_eq!(version_number(bad), None, "{bad}");
         }
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        assert_eq!(update(root, "one", &[("a", Some("old a")), ("b", Some("old b"))]), S_OK);
+        assert_eq!(
+            update(root, "one", &[("a", Some("old a")), ("b", Some("old b"))]),
+            S_OK
+        );
         let slot = container_dir(root, "Slot");
         assert!(slot.join("v1").is_dir());
         let strays = ["v01", "v001", "v+1"];
@@ -1213,7 +1218,10 @@ mod tests {
         // Updates still go on from the committed version.
         assert_eq!(update(root, "two", &[("a", Some("new a"))]), S_OK);
         assert!(slot.join("v2").is_dir() && !slot.join("v1").exists());
-        let new = ("two".into(), vec![("a".into(), "new a".into()), ("b".into(), "old b".into())]);
+        let new = (
+            "two".into(),
+            vec![("a".into(), "new a".into()), ("b".into(), "old b".into())],
+        );
         assert_eq!(state(root), Some(new));
     }
 
