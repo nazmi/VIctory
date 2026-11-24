@@ -1066,14 +1066,19 @@ extern "system" fn key_state(this: *const Reading, count: u32, out: *mut KeyStat
     n as u32
 }
 extern "system" fn gamepad_state(this: *const Reading, out: *mut PadState) -> bool {
-    match &reading(this).value {
-        Value::Pad(state) if !out.is_null() => {
-            // SAFETY: checked non-null.
-            unsafe { out.write(*state) };
-            true
-        }
-        _ => false,
+    if out.is_null() {
+        return false;
     }
+    let is_pad = matches!(reading(this).value, Value::Pad(_));
+    // GameInput writes at-rest values even for a reading with no gamepad, so
+    // a title reusing its buffer cannot keep a held button or moved stick.
+    let state = match &reading(this).value {
+        Value::Pad(state) => *state,
+        _ => PadState::default(),
+    };
+    // SAFETY: checked non-null.
+    unsafe { out.write(state) };
+    is_pad
 }
 /// Kinds our devices do not have: no count, no state.
 extern "system" fn nothing(_: *const c_void) -> usize {
@@ -1610,6 +1615,23 @@ mod tests {
         for r in order {
             release(r);
         }
+    }
+
+    #[test]
+    fn a_keyboard_reading_resets_the_gamepad_state_it_is_given() {
+        let (hub, _) = fake();
+        let reading = current(hub, KEYBOARD_KIND, KEYBOARD).unwrap();
+        let get =
+            slot::<extern "system" fn(*const Reading, *mut PadState) -> bool, _>(reading, 0xb0);
+        let mut state = PadState {
+            buttons: 0xffff_ffff,
+            ..Default::default()
+        };
+        state.left_x = 0.75;
+        state.right_y = -0.5;
+        assert!(!get(reading, &mut state), "a keyboard has no gamepad state");
+        assert_eq!(state, PadState::default(), "but the output is at rest");
+        release(reading);
     }
 
     #[test]
