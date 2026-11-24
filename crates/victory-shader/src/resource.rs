@@ -797,8 +797,29 @@ impl<'a> Tracer<'a> {
         let Some(v) = dynamic else {
             return "a constant address";
         };
-        if self.inputs[v.0 as usize].is_some() {
-            return "an address in an SGPR that is no root parameter";
+        if let Some(reg) = self.inputs[v.0 as usize] {
+            // The message names which case it is: a parameter's later dword is
+            // a different problem from a register that is no parameter at all,
+            // and the two need different fixes. A run of GTA VI refuses this
+            // 31 times at the world load, so the distinction is worth having.
+            return match self.param_of(reg) {
+                Some((p, _)) if self.layout[p].root == RootType::Descriptor => {
+                    "an address from a root descriptor's high half"
+                }
+                Some((p, _)) if self.layout[p].root == RootType::Constants => {
+                    "an address in a root constant past the parameter's first dword"
+                }
+                Some((p, _))
+                    if matches!(
+                        self.layout[p].root,
+                        RootType::ResourceHeap | RootType::SamplerHeap
+                    ) =>
+                {
+                    "an address in a descriptor heap index"
+                }
+                Some(_) => "an address from a root parameter's later dword",
+                None => "an address in an SGPR that is no root parameter",
+            };
         }
         if self
             .leaves(v)
