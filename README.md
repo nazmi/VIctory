@@ -217,6 +217,7 @@ The on/off switches below (`...=1`) are off when unset or set to `0`.
 | `VICTORY_SKIP_WAVE64=mesh,compute` | omit draws and dispatches whose pipeline has a program of a listed stage written for 64-lane waves (on hosts with 32-lane waves, such as NVIDIA's, these can hang the GPU) |
 | `VICTORY_GPU_TIMING=1` | each list of a submission run and timed on its own; slow lists are logged, and with `VICTORY_D3D12_DRED=1` their slowest commands are named too — the per-command notes come from that switch, so `VICTORY_GPU_TIMING` alone reports `commands=0` |
 | `VICTORY_D3D12_WARP=1` | host device on the software adapter (slow; cannot reset the driver); `=0` opts out like an unset variable |
+| `VICTORY_MODE=<width>x<height>` | report that display mode instead of the console's 3840x2160 (smaller render targets on smaller hosts) |
 | `VICTORY_SHADER_LOOP_LIMIT=<n>` | translated shader loops stop after `n` iterations per lane instead of 2^20 (own shader cache entries); if a lower `n` makes world frames much faster, loops hitting the limit are what makes them slow |
 | `VICTORY_AUDIO_CAPTURE=<file.wav>` | records what the title plays (our process only) |
 | `VICTORY_XMA_DUMP=<dir>` | saves the first 32 XMA voices' context and input |
