@@ -3248,4 +3248,100 @@ mod tests {
         unsafe { back.Unmap(0, None) };
         assert_eq!(wrong, 0, "the placed copy holds the writer's texels");
     }
+
+    /// An occlusion query around no draws reports zero samples, not the
+    /// million the stub used to: the heap measures on the host, the list
+    /// marks it, `ResolveQueryData` brings the count back, and the title's
+    /// buffer holds the number once the submission finished.
+    #[cfg(windows)]
+    #[test]
+    fn an_occlusion_query_reports_what_the_draws_passed() {
+        let Some(_host) = crate::host::host() else {
+            return; // no host GPU here
+        };
+        let null = std::ptr::null();
+        const OCCLUSION: u32 = 0;
+        const COUNT: u32 = 4;
+        let Some(heap) = crate::query::occlusion_for_test(OCCLUSION, COUNT) else {
+            return; // the host refused an occlusion heap
+        };
+        let mut results = null;
+        assert_eq!(
+            create_committed(
+                null,
+                &PROPERTIES,
+                0,
+                &buffer(64),
+                0,
+                null.cast(),
+                &RESOURCE_IIDS[0],
+                &mut results,
+            ),
+            S_OK
+        );
+        let queue_iid = guid(
+            0x0ec870a6,
+            0x5d7e,
+            0x4c22,
+            [0x8c, 0xfc, 0x5b, 0xaa, 0xe0, 0x76, 0x16, 0xed],
+        );
+        let allocator_iid = guid(
+            0x6102dee4,
+            0xaf59,
+            0x4b09,
+            [0xb9, 0x99, 0xb4, 0x4d, 0x73, 0xf0, 0x9b, 0x24],
+        );
+        let list_iid = guid(
+            0x5b160d0f,
+            0xac1b,
+            0x4185,
+            [0x8b, 0xa8, 0xb3, 0xae, 0x42, 0xa5, 0xa4, 0x55],
+        );
+        let (mut queue, mut allocator, mut list) = (null, null, null);
+        let queue_desc = [0u32; 4];
+        assert_eq!(
+            crate::queue::create(null, queue_desc.as_ptr().cast(), &queue_iid, &mut queue),
+            S_OK
+        );
+        assert_eq!(
+            crate::list::create_allocator(null, 0, &allocator_iid, &mut allocator),
+            S_OK
+        );
+        assert_eq!(
+            crate::list::create_list(null, 0, 0, allocator, null, &list_iid, &mut list),
+            S_OK
+        );
+        // Four queries marked around nothing: every count is zero.
+        for index in 0..COUNT {
+            crate::list::query_begin(list, heap, OCCLUSION, index);
+            crate::list::query_end(list, heap, OCCLUSION, index);
+        }
+        crate::list::resolve_queries(list, heap, OCCLUSION, 0, COUNT, results, 0);
+        assert_eq!(
+            slot::<extern "system" fn(This) -> HRESULT>(list, 0x48)(list),
+            S_OK
+        );
+        slot::<extern "system" fn(This, u32, *const This)>(queue, 0x50)(queue, 1, &list);
+
+        let (data, size) = buffer_bytes(results).unwrap();
+        assert_eq!(size, 64);
+        // SAFETY: the submission was waited for; 64 bytes of title memory.
+        let counts = unsafe { std::slice::from_raw_parts(data.cast::<u64>(), 8) };
+        assert_eq!(
+            &counts[..COUNT as usize],
+            &[0u64; COUNT as usize],
+            "nothing was drawn, so nothing passed"
+        );
+        assert!(
+            counts[COUNT as usize..].iter().all(|&c| c == 0),
+            "the rest of the buffer stays untouched"
+        );
+
+        let release = |o: This| slot::<extern "system" fn(This) -> u32>(o, 0x10)(o);
+        assert_eq!(release(list), 0);
+        assert_eq!(release(allocator), 0);
+        assert_eq!(release(queue), 0);
+        assert_eq!(release(heap), 0);
+        assert_eq!(release(results), 0);
+    }
 }

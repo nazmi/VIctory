@@ -699,6 +699,10 @@ struct Readback {
     total: usize,
 }
 
+/// A piece of a query result: the title's address, the offset it has in
+/// the read-back buffer, and its width.
+type Target = (usize, u64, usize);
+
 /// What a list does on the CPU when it is submitted: copies between host
 /// memory regions (title buffers, upload buffers and buffer copies), and
 /// the upload/readback buffers its GPU commands name, kept until reset.
@@ -724,6 +728,15 @@ struct Deferred {
     /// Bottom-of-pipe writes, done once the list has run: address, what,
     /// bytes.
     writes: Vec<(usize, crate::queue::Written, usize)>,
+    /// Query results the list resolved into a read-back buffer, written to
+    /// the title's memory once the list has run: the buffer (kept alive),
+    /// its mapped data, then each (destination, offset in the buffer,
+    /// bytes).
+    resolves: Vec<(
+        windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+        usize,
+        Vec<Target>,
+    )>,
     /// Whether a step zeroes the indirect-work budget.
     budget_zeroed: bool,
 }
@@ -994,6 +1007,28 @@ impl Host {
         }
         COPY_BACK[0].fetch_add(copying.elapsed().as_micros() as u64, Ordering::Relaxed);
         for list in runs {
+            // Query results first: a bottom-of-pipe write may name the same
+            // memory (a buffer the title both resolves into and advances).
+            for (readback, data, targets) in &list.deferred().resolves {
+                // The buffer is mapped for its life (see
+                // `Host::readback_buffer`), and the list holds it.
+                let _ = readback;
+                let data = *data as *const u8;
+                for &(at, offset, bytes) in targets {
+                    // SAFETY: reading a u64 at a checked offset of a
+                    // read-back buffer the finished submission resolved
+                    // into, and writing into title memory.
+                    unsafe {
+                        let value =
+                            std::ptr::read_unaligned(data.add(offset as usize).cast::<u64>());
+                        if bytes == 4 {
+                            (at as *mut u32).write_unaligned(value as u32);
+                        } else {
+                            (at as *mut u64).write_unaligned(value);
+                        }
+                    }
+                }
+            }
             for &(at, what, bytes) in &list.deferred().writes {
                 what.write(at as *mut u8, bytes);
             }
@@ -1632,6 +1667,22 @@ impl HostList {
             row_bytes,
             total,
         });
+    }
+
+    /// Records that the list resolved query results into `readback`, whose
+    /// mapped `data` each (destination, offset, bytes) of `targets` is read
+    /// from once the list has run. The buffer is kept until the list is
+    /// reset: its contents are only valid after the wait, and a reset means
+    /// the list is recorded again.
+    pub(crate) fn defer_resolve(
+        &self,
+        readback: windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+        data: *const u8,
+        targets: Vec<Target>,
+    ) {
+        self.deferred()
+            .resolves
+            .push((readback, data as usize, targets));
     }
 
     /// A mapped upload buffer of `size` bytes, alive until the list is
