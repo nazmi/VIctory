@@ -193,6 +193,7 @@ mod tests {
             dll_characteristics: 0,
             image_base: 0,
             size_of_image: 0,
+            size_of_headers: 0,
             entry_rva: 0,
             stack_reserve: 0,
             stack_commit: 0,

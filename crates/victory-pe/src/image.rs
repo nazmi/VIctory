@@ -3,6 +3,7 @@ use object::Object;
 use object::pe::{self, ImageNtHeaders64};
 use object::read::pe::{
     ImageNtHeaders, ImageOptionalHeader, Import, ImportTable, ImportThunkList, PeFile64,
+    SectionTable,
 };
 
 use crate::layout::{self, dir};
@@ -20,6 +21,9 @@ pub struct ImageInfo {
     pub dll_characteristics: u16,
     pub image_base: u64,
     pub size_of_image: u32,
+    /// `IMAGE_OPTIONAL_HEADER64::SizeOfHeaders`. The headers occupy RVA
+    /// `0..size_of_headers` and are stored one-to-one at the file start.
+    pub size_of_headers: u32,
     pub entry_rva: u32,
     pub stack_reserve: u64,
     pub stack_commit: u64,
@@ -144,6 +148,16 @@ impl ImageInfo {
             )));
         }
 
+        // The headers live at the start of the file, so a declared header
+        // region larger than the file is truncated. Reject it here: the mapper
+        // and the TLS reader rely on every header RVA being file-backed.
+        let size_of_headers = opt.size_of_headers();
+        if u64::from(size_of_headers) > data.len() as u64 {
+            return Err(PeError::Malformed(format!(
+                "SizeOfHeaders {size_of_headers:#x} extends beyond the file"
+            )));
+        }
+
         let sections = file
             .section_table()
             .iter()
@@ -168,7 +182,7 @@ impl ImageInfo {
         };
         let delay_imports = parse_delay_imports(&file, opt.size_of_image())?;
         let exports = parse_exports(&file, opt.image_base())?;
-        let tls = parse_tls(&file, data, opt.image_base())?;
+        let tls = parse_tls(&file, data, opt.image_base(), size_of_headers)?;
         let codeview = file.pdb_info()?.map(|cv| CodeViewInfo {
             pdb_path: String::from_utf8_lossy(cv.path()).into_owned(),
             guid: cv.guid(),
@@ -183,6 +197,7 @@ impl ImageInfo {
             dll_characteristics: opt.dll_characteristics().0,
             image_base: opt.image_base(),
             size_of_image: opt.size_of_image(),
+            size_of_headers,
             entry_rva: opt.address_of_entry_point(),
             stack_reserve: opt.size_of_stack_reserve(),
             stack_commit: opt.size_of_stack_commit(),
@@ -208,6 +223,10 @@ impl ImageInfo {
 
     /// Maps an RVA to an offset in the file, if it is backed by file data.
     pub fn rva_to_file_offset(&self, rva: u32) -> Option<u32> {
+        // The headers are stored one-to-one at the start of the file.
+        if rva < self.size_of_headers {
+            return Some(rva);
+        }
         self.sections.iter().find_map(|s| {
             let delta = rva.checked_sub(s.rva)?;
             // Raw data may be padded past the virtual size; that padding is
@@ -372,6 +391,7 @@ fn parse_tls(
     file: &PeFile64<'_>,
     data: &[u8],
     image_base: u64,
+    size_of_headers: u32,
 ) -> Result<Option<TlsInfo>, PeError> {
     let Some(dd) = file.data_directory(pe::IMAGE_DIRECTORY_ENTRY_TLS) else {
         return Ok(None);
@@ -381,18 +401,16 @@ fn parse_tls(
         return Ok(None);
     }
     let sections = file.section_table();
-    let tls = sections
-        .pe_data_at(data, directory_rva)
-        .ok_or_else(|| PeError::Malformed("TLS directory outside of sections".into()))?;
+    let tls = file_data_at(data, size_of_headers, &sections, directory_rva)
+        .ok_or_else(|| PeError::Malformed("TLS directory outside the image".into()))?;
     let callbacks_va = layout::read_u64(tls, layout::TLS64_ADDRESS_OF_CALLBACKS)
         .ok_or_else(|| PeError::Malformed("truncated TLS directory".into()))?;
 
     let mut callback_rvas = Vec::new();
     if callbacks_va != 0 {
         let array_rva = va_to_rva(callbacks_va, image_base)?;
-        let array = sections
-            .pe_data_at(data, array_rva)
-            .ok_or_else(|| PeError::Malformed("TLS callback array outside of sections".into()))?;
+        let array = file_data_at(data, size_of_headers, &sections, array_rva)
+            .ok_or_else(|| PeError::Malformed("TLS callback array outside the image".into()))?;
         let mut terminated = false;
         for slot in array.as_chunks::<8>().0 {
             let va = u64::from_le_bytes(*slot);
@@ -416,6 +434,20 @@ fn parse_tls(
         callbacks_va,
         callback_rvas,
     }))
+}
+
+/// The file bytes backing `rva`. The headers map one-to-one at the start of
+/// the file; sections map through their raw offset.
+fn file_data_at<'data>(
+    data: &'data [u8],
+    size_of_headers: u32,
+    sections: &SectionTable<'data>,
+    rva: u32,
+) -> Option<&'data [u8]> {
+    if rva < size_of_headers {
+        return data.get(rva as usize..size_of_headers as usize);
+    }
+    sections.pe_data_at(data, rva)
 }
 
 fn va_to_rva(va: u64, image_base: u64) -> Result<u32, PeError> {
@@ -550,6 +582,14 @@ mod tests {
         data
     }
 
+    /// `synthetic_image` points its export directory at the (zero) body; clear
+    /// it so a test can exercise another directory without export parsing.
+    fn without_exports(mut data: Vec<u8>) -> Vec<u8> {
+        let export = layout::data_directory_offset(&data, 0).unwrap();
+        data[export..export + 8].fill(0);
+        data
+    }
+
     #[test]
     fn tls_probe_accepts_terminated_callbacks() {
         let info = ImageInfo::parse(&synthetic_tls(true)).unwrap();
@@ -602,6 +642,63 @@ mod tests {
     fn tls_probe_rejects_callbacks_over_limit() {
         let data = synthetic_tls_many(MAX_TLS_CALLBACKS + 1);
 
+        assert!(matches!(
+            ImageInfo::parse(&data),
+            Err(PeError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn rva_to_file_offset_maps_headers() {
+        let data = without_exports(synthetic_image(&vec![0u8; 0x200]));
+        let info = ImageInfo::parse(&data).unwrap();
+        assert_eq!(info.size_of_headers, 0x200);
+        assert_eq!(info.rva_to_file_offset(0), Some(0));
+        assert_eq!(info.rva_to_file_offset(0x188), Some(0x188));
+        assert_eq!(info.rva_to_file_offset(0x1FF), Some(0x1FF));
+        // The gap between the headers and the first section is not file-backed.
+        assert_eq!(info.rva_to_file_offset(0x200), None);
+        // Sections still map through their raw offset.
+        assert_eq!(info.rva_to_file_offset(0x1000), Some(0x200));
+    }
+
+    #[test]
+    fn tls_directory_and_callbacks_in_headers() {
+        let mut data = without_exports(synthetic_image(&vec![0u8; 0x200]));
+        let base = 0x1_8000_0000u64;
+        let directory_rva = 0x188u32;
+        let array_rva = 0x1C0u32;
+        let callback_rva = 0x1200u32;
+
+        let dd = layout::data_directory_offset(&data, pe::IMAGE_DIRECTORY_ENTRY_TLS).unwrap();
+        data[dd..dd + 4].copy_from_slice(&directory_rva.to_le_bytes());
+        data[dd + 4..dd + 8].copy_from_slice(&40u32.to_le_bytes());
+
+        let at = directory_rva as usize + layout::TLS64_ADDRESS_OF_CALLBACKS;
+        data[at..at + 8].copy_from_slice(&(base + u64::from(array_rva)).to_le_bytes());
+
+        let at = array_rva as usize;
+        data[at..at + 8].copy_from_slice(&(base + u64::from(callback_rva)).to_le_bytes());
+        data[at + 8..at + 16].fill(0);
+
+        let info = ImageInfo::parse(&data).unwrap();
+        let tls = info.tls.as_ref().expect("TLS directory in the headers");
+        assert_eq!(tls.directory_rva, directory_rva);
+        assert_eq!(tls.callbacks_va, base + u64::from(array_rva));
+        assert_eq!(tls.callback_rvas, [callback_rva]);
+        assert_eq!(info.rva_to_file_offset(directory_rva), Some(directory_rva));
+    }
+
+    #[test]
+    fn bounds_size_of_headers_by_the_file() {
+        let mut data = synthetic_image(&vec![0u8; 0x200]);
+        let opt = layout::optional_header_offset(&data).unwrap();
+        let file_len = data.len() as u32;
+        // Exactly the whole file is the largest header region that can be
+        // backed; one byte more is truncated.
+        data[opt + 60..opt + 64].copy_from_slice(&file_len.to_le_bytes());
+        assert!(ImageInfo::parse(&data).is_ok());
+        data[opt + 60..opt + 64].copy_from_slice(&(file_len + 1).to_le_bytes());
         assert!(matches!(
             ImageInfo::parse(&data),
             Err(PeError::Malformed(_))
