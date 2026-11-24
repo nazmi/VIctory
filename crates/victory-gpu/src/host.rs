@@ -870,25 +870,59 @@ impl Host {
         // What shaders wrote goes back before the bottom-of-pipe writes,
         // which tell the title the GPU is done; each range once per
         // submission, however many dispatches declared it (the world's
-        // passes declare the same big ranges dozens of times).
+        // passes declare the same big ranges dozens of times). Deduplicated
+        // by identity in a set, not by scanning what is already there: a
+        // submission declares thousands of ranges.
         let copying = std::time::Instant::now();
         // One list's lock at a time: a submission may name a list twice.
+        let mut seen = std::collections::HashSet::new();
         let mut back: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize)> = Vec::new();
         for list in runs {
             for step in &list.deferred().copies {
-                if let Step::GpuWrite(shadow, address, len) = step
-                    && !back.iter().any(|(s, a, l)| {
-                        std::sync::Arc::ptr_eq(s, shadow) && (*a, *l) == (*address, *len)
-                    })
-                {
-                    back.push((shadow.clone(), *address, *len));
+                if let Step::GpuWrite(shadow, address, len) = step {
+                    let key = (std::sync::Arc::as_ptr(shadow) as usize, *address, *len);
+                    if seen.insert(key) {
+                        back.push((shadow.clone(), *address, *len));
+                    }
                 }
             }
         }
-        for (shadow, address, len) in &back {
-            let (address, len) = (*address, *len);
-            let written = shadow.copy_back(address, len);
+        // The copy-back is spread over threads: it is kernel reads and writes
+        // of title memory, and one thread is a fifth of the machine.
+        // `VICTORY_COPY_THREADS=1` puts it back on one thread, for an A/B of
+        // the frame line. Ranges of one buffer are not required to be
+        // disjoint, so a shadow named twice serialises on its own snapshot
+        // lock rather than running concurrently; that is why the ranges are
+        // split by position in the list, not by buffer.
+        let threads = copy_threads().min(back.len().max(1));
+        if threads > 1 {
+            let per = back.len().div_ceil(threads);
+            let written: usize = std::thread::scope(|s| {
+                let handles: Vec<_> = back
+                    .chunks(per)
+                    .map(|part| {
+                        s.spawn(move || {
+                            part.iter()
+                                .map(|(shadow, address, len)| shadow.copy_back(*address, *len))
+                                .sum::<usize>()
+                        })
+                    })
+                    .collect();
+                // A worker that panics must not turn into a partial write-back
+                // that the frame then continues past: the panic goes up, as it
+                // did when this ran on one thread.
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+                    .sum()
+            });
             COPY_BACK[1].fetch_add(written as u64, Ordering::Relaxed);
+        } else {
+            for (shadow, address, len) in &back {
+                let (address, len) = (*address, *len);
+                let written = shadow.copy_back(address, len);
+                COPY_BACK[1].fetch_add(written as u64, Ordering::Relaxed);
+            }
         }
         for list in runs {
             for rb in &list.deferred().readbacks {
@@ -1727,6 +1761,24 @@ impl Batch {
             PREPARING[1].fetch_add(copied as u64, Ordering::Relaxed);
         }
     }
+}
+
+/// Threads the copy-back of a submission is spread over: the machine's, at
+/// most eight, or `VICTORY_COPY_THREADS`.
+fn copy_threads() -> usize {
+    static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THREADS.get_or_init(|| {
+        let asked = std::env::var("VICTORY_COPY_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
+        asked
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map_or(1, |n| n.get())
+                    .min(8)
+            })
+            .clamp(1, 64)
+    })
 }
 
 /// Copies title memory at submission. The ranges were checked against their
