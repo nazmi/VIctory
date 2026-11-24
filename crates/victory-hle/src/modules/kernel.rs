@@ -172,6 +172,7 @@ pub extern "system" fn GetProcAddress(module: *mut c_void, name: *const u8) -> *
             Some(e) => e.address as *mut c_void,
             None => {
                 tracing::warn!(module = m.name, %ordinal, "GetProcAddress: not implemented");
+                host::set_last_error(ERROR_PROC_NOT_FOUND);
                 std::ptr::null_mut()
             }
         };
@@ -182,6 +183,7 @@ pub extern "system" fn GetProcAddress(module: *mut c_void, name: *const u8) -> *
         Some(e) => e.address as *mut c_void,
         None => {
             tracing::warn!(module = m.name, %name, "GetProcAddress: not implemented");
+            host::set_last_error(ERROR_PROC_NOT_FOUND);
             std::ptr::null_mut()
         }
     }
@@ -361,6 +363,7 @@ fn refuse(file: &str) {
 }
 
 const ERROR_MOD_NOT_FOUND: u32 = 126;
+const ERROR_PROC_NOT_FOUND: u32 = 127;
 
 pub(crate) fn module() -> HleModule {
     HleModule {
@@ -774,6 +777,40 @@ mod tests {
             // SAFETY: reads this thread's last error.
             let last = unsafe { windows_sys::Win32::Foundation::GetLastError() };
             assert_eq!(last, ERROR_INSUFFICIENT_BUFFER);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn missing_pseudo_module_exports_set_proc_not_found() {
+        use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
+
+        let kernel32 = GetModuleHandleW(w("kernel32.dll").as_ptr());
+        assert!(!kernel32.is_null());
+        // SAFETY: clears and reads this thread's Win32 last-error slot.
+        let host_err = unsafe {
+            SetLastError(0);
+            assert!(GetProcAddress(kernel32, c"NoSuchHostExport".as_ptr().cast()).is_null());
+            GetLastError()
+        };
+        assert_eq!(host_err, ERROR_PROC_NOT_FOUND);
+
+        let runtime = LoadLibraryA(c"xgameruntime.dll".as_ptr().cast());
+        assert!(!runtime.is_null());
+        assert!(!GetProcAddress(runtime, c"XGameRuntimeInitialize".as_ptr().cast()).is_null());
+
+        for missing in [
+            c"NoSuchPseudoExport".as_ptr().cast::<u8>(),
+            9999usize as *const u8,
+            std::ptr::null(),
+        ] {
+            // SAFETY: clears and reads this thread's Win32 last-error slot.
+            let err = unsafe {
+                SetLastError(0);
+                assert!(GetProcAddress(runtime, missing).is_null());
+                GetLastError()
+            };
+            assert_eq!(err, ERROR_PROC_NOT_FOUND);
         }
     }
 }
