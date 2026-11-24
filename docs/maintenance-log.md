@@ -80,6 +80,7 @@ Rows below record completed decisions; unreviewed items remain queued.
 | [#689](https://github.com/Marvisak/VIctory/pull/689) | e1c3557bdc67f31e13d04a00d2d9ad1ebc65c7e3 | Standalone test correction | Coordinator and economical worker: 1/1 file reviewed, no skips/findings; clock permits skipped ticks | 5 targeted repeats; both Clippy gates; full workspace 342 passes, 6 ignored; policy, all exit 0 | integrated-local; reproduced baseline failure fixed without changing production code | f137b30 | 2026-11-24 |
 | [#699](https://github.com/Marvisak/VIctory/pull/699) | db0257e2c133ccdcb4605f0a90bcf03cb1847cad | Superseded by merged #612 | Compared tip algorithm and synthetic two-join test to upstream; 3dd467c is ancestor of ffe310e, and same regression exists at lower.rs:7301 | Existing regression included in passing 342-test workspace run | already-present; no import of mixed branch or duplicate fix | Upstream 3dd467c | 2026-11-24 |
 | [#708](https://github.com/Marvisak/VIctory/pull/708) | a9698e7488ab2a7d1bdbf0e6b736ab689b6b2ca2 | Narrow save/cache default fix; differs from JMAN's broader config rewrite | Coordinator plus medium worker, 1/1 file reviewed, no skips/blockers | Source core 15 passes and Clippy; integrated both Clippy gates, workspace 346 passes/6 ignored, policy all exit 0 | integrated-local; no automatic migration of old XDG saves; VICTORY_DATA_DIR retains old data location with this change | 79381585 | 2026-11-24 |
+| [#449](https://github.com/Marvisak/VIctory/pull/449) | f625cc508c0d3a1b3f124cd3714dde681440d8c4 | Standalone null-output guard for AnalyticsInfo | Coordinator and economical worker reviewed 1/1 file, no skips/findings; ABI unchanged | Source xsystem tests 4/4; candidate HLE tests 94/94; both workspace Clippy gates, workspace 346 passes/6 ignored, policy 161 files, diff check all exit 0 on fresh candidate target | integrated-local; null output is refused before writing | c64f8aab | 2026-11-24 |
 
 ## Issue outcomes
 
@@ -224,10 +225,6 @@ SHA do not validate later code changes.
 
 ### Pending bounded PR candidates
 
-- #449 at `f625cc5`: 1/1 file reviewed; source-head targeted xsystem tests
-  passed 4/4, including the actual vtable null-output regression. Full
-  candidate integration gate is pending. Its patch also occurs in JMAN's
-  history, but that does not require importing the rest of that fork.
 - #480 at `75fe6c0`: 1/1 file reviewed; corrected source-head media run
   passed 3/3, including strict percent-escape regression. Full candidate
   integration gate pending; its patch occurs in JMAN's history too.
@@ -241,10 +238,22 @@ SHA do not validate later code changes.
   no skips/blockers; source and integration tests pending. #363 overlaps
   #241's broader config change; #337 needs all four source commits or its
   reviewed net patch, not just its initially uncompilable first commit.
-- Next PR integration order: #449, #480, then #396, refreshing exact heads
+- Next PR integration order: #480, then #396, refreshing exact heads
   before each candidate. JMAN's wholesale batch is deferred by reproduced
   failures. Remaining inventoried PRs are still queued; the issue and gap
   passes have not started. This is an ongoing sweep, not a completed audit.
+
+### PR #449 integration validation: 2026-11-24
+
+- Refreshed upstream PR state: open, head unchanged at
+  `f625cc508c0d3a1b3f124cd3714dde681440d8c4`.
+- Candidate `candidate/pr-449` was based on `5c90d9cef85fd584b562517e79cbec81952859c6` and integrated with the original author and `-x` source reference.
+- Targeted `cargo test -p victory-hle --locked`: 94 passed; no failures.
+- On a new isolated external target with Rust 1.98.1 x86_64 Windows MSVC:
+  both required Clippy commands passed; `cargo test --workspace --locked`
+  passed 346 tests with 6 ignored; `cargo xtask policy` passed with 161 files;
+  `git diff --check` passed.
+- Local integration commit: `c64f8aab`. No upstream PR action was taken.
 
 ### Authoritative final integration gate: 2026-11-24
 
