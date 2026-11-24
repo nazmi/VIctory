@@ -81,6 +81,8 @@ Rows below record completed decisions; unreviewed items remain queued.
 | [#699](https://github.com/Marvisak/VIctory/pull/699) | db0257e2c133ccdcb4605f0a90bcf03cb1847cad | Superseded by merged #612 | Compared tip algorithm and synthetic two-join test to upstream; 3dd467c is ancestor of ffe310e, and same regression exists at lower.rs:7301 | Existing regression included in passing 342-test workspace run | already-present; no import of mixed branch or duplicate fix | Upstream 3dd467c | 2026-11-24 |
 | [#708](https://github.com/Marvisak/VIctory/pull/708) | a9698e7488ab2a7d1bdbf0e6b736ab689b6b2ca2 | Narrow save/cache default fix; differs from JMAN's broader config rewrite | Coordinator plus medium worker, 1/1 file reviewed, no skips/blockers | Source core 15 passes and Clippy; integrated both Clippy gates, workspace 346 passes/6 ignored, policy all exit 0 | integrated-local; no automatic migration of old XDG saves; VICTORY_DATA_DIR retains old data location with this change | 79381585 | 2026-11-24 |
 | [#449](https://github.com/Marvisak/VIctory/pull/449) | f625cc508c0d3a1b3f124cd3714dde681440d8c4 | Standalone null-output guard for AnalyticsInfo | Coordinator and economical worker reviewed 1/1 file, no skips/findings; ABI unchanged | Source xsystem tests 4/4; candidate HLE tests 94/94; both workspace Clippy gates, workspace 346 passes/6 ignored, policy 161 files, diff check all exit 0 on fresh candidate target | integrated-local; null output is refused before writing | c64f8aab | 2026-11-24 |
+| [#480](https://github.com/Marvisak/VIctory/pull/480) | 75fe6c02b278f18eab33ad893bda1dd68d176287 | Standalone decoder fix; its patch also occurs in JMAN's history | Coordinator reviewed 1/1 file and the decoder's callers; no ABI change; source-head media run 3/3 | Candidate media tests 3/3; both workspace Clippy gates, workspace 347 passes/6 ignored, policy 161 files, diff check all exit 0 on fresh candidate target | integrated-local; malformed escapes are copied verbatim | 06daf0f7 | 2026-11-24 |
+| [#396](https://github.com/Marvisak/VIctory/pull/396) | 10e9f56a50214df67dca98b19daac0d8e9b04075 | Standalone PE bounds fix; not in JMAN's fork | Coordinator reviewed 1/1 file, PR discussion, and every `data_directory_offset` caller in `prepare.rs`/`image.rs`; malformed headers now yield `None` instead of an out-of-bounds offset | Candidate PE tests 8/8 and loader tests 25/25 (22 unit + `load_probe` + `title_dlls`); both workspace Clippy gates, workspace 348 passes/6 ignored, policy 161 files, diff check all exit 0 on fresh candidate target | integrated-local; malformed/truncated optional header is refused before any offset is returned | 27dd4a73 | 2026-11-24 |
 
 ## Issue outcomes
 
@@ -225,23 +227,67 @@ SHA do not validate later code changes.
 
 ### Pending bounded PR candidates
 
-- #480 at `75fe6c0`: 1/1 file reviewed; corrected source-head media run
-  passed 3/3, including strict percent-escape regression. Full candidate
-  integration gate pending; its patch occurs in JMAN's history too.
 - #629 at `350f91c`: coordinator reviewed the full changed file, discussion,
   and surrounding layout logic; source tests 21 passed, 3 ignored. Full
   candidate gate pending.
-- #396 at `10e9f56`: coordinator reviewed the full changed file, discussion,
-  and loader callers; source tests 8 passed, 0 ignored. Full candidate gate
-  pending. JMAN's fork does not supply this bounds fix.
 - #363 at `4874c3f` and #337 at `5cf259e`: static reviews 1/1 file each,
   no skips/blockers; source and integration tests pending. #363 overlaps
   #241's broader config change; #337 needs all four source commits or its
   reviewed net patch, not just its initially uncompilable first commit.
-- Next PR integration order: #480, then #396, refreshing exact heads
-  before each candidate. JMAN's wholesale batch is deferred by reproduced
-  failures. Remaining inventoried PRs are still queued; the issue and gap
-  passes have not started. This is an ongoing sweep, not a completed audit.
+- Next PR integration order: #629, refreshing its exact head first, then
+  #363/#337. JMAN's wholesale batch is deferred by reproduced failures.
+  Remaining inventoried PRs are still queued; the issue and gap passes have
+  not started. This is an ongoing sweep, not a completed audit.
+
+### PR #396 integration validation: 2026-11-24
+
+- Refreshed upstream PR state: open, head unchanged at
+  `10e9f56a50214df67dca98b19daac0d8e9b04075`; one commit, `mergeable` true
+  against base `main`.
+- Review: `data_directory_offset` in `crates/victory-pe/src/layout.rs` only.
+  It checked `index < NumberOfRvaAndSizes` but never that the 8-byte entry
+  fits the declared `SizeOfOptionalHeader` or the file. The patch reads the
+  size from the file header, bounds the optional header to it, and requires
+  both `OPT_NUMBER_OF_RVA_AND_SIZES` and the requested entry to lie inside
+  that slice. Valid images are unaffected: PE32+ writers declare 240 bytes,
+  so all 16 entries still resolve.
+- Callers were checked one by one: `prepare.rs` treats `None` as "directory
+  absent" for IMPORT, BOUND_IMPORT and BASERELOC, and `image.rs` parses the
+  header itself first, so a refused offset means a malformed image rather
+  than a silent loss of relocations on a valid one.
+- Candidate `candidate/pr-396` was based on `06daf0f7` and integrated with
+  the original author and `-x` source reference.
+- Targeted on the candidate target: `cargo test -p victory-pe --locked`
+  8 passed, including
+  `layout::tests::directory_entries_must_fit_in_the_optional_header_and_file`;
+  `cargo test -p victory-loader --locked` 25 passed (22 unit, 2 `load_probe`,
+  1 `title_dlls`).
+- Full workspace gate on the same isolated target with Rust 1.98.1 x86_64
+  Windows MSVC: both required Clippy commands passed; workspace tests 348
+  passed with 6 ignored (347 plus the new layout regression); `cargo xtask
+  policy` 161 files ok; `git diff --check` passed.
+- Local integration commit: `27dd4a73`. No upstream PR action was taken.
+
+### PR #480 integration validation: 2026-11-24
+
+- Refreshed upstream PR state: open, head unchanged at
+  `75fe6c02b278f18eab33ad893bda1dd68d176287`; one commit, `mergeStateStatus`
+  CLEAN on base `main`.
+- Review: `percent_decode` in `crates/victory-hle/src/modules/media.rs` only.
+  `u8::from_str_radix` accepts a leading sign, so `%+1` decoded to a control
+  byte; the patch requires both escape characters to be ASCII hex digits
+  before parsing, leaving malformed escapes literal. Behaviour for valid
+  escapes is unchanged and the decoder is local, not part of a public ABI.
+- Candidate `candidate/pr-480` was based on `65fc7c2d` and integrated with
+  the original author and `-x` source reference.
+- Targeted `cargo test -p victory-hle --locked --lib media::`: 3 passed,
+  including `percent_decode_requires_two_hex_digits`.
+- On a new isolated external target with Rust 1.98.1 x86_64 Windows MSVC:
+  both required Clippy commands passed; `cargo test --workspace --locked`
+  passed 347 tests with 6 ignored (baseline 346 plus the new regression),
+  with `load_probe` and `title_dlls` executed; `cargo xtask policy` passed
+  with 161 files; `git diff --check` passed.
+- Local integration commit: `06daf0f7`. No upstream PR action was taken.
 
 ### PR #449 integration validation: 2026-11-24
 
