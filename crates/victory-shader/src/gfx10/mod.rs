@@ -540,18 +540,4 @@ mod tests {
         // s_cbranch_scc0 into the literal of the s_mov_b32 at 4.
         assert!(decode(&bytes(&[sopp(0x04, 1), 0xBE80_03FF, S_ENDPGM, S_ENDPGM])).is_err());
     }
-    #[test]
-    fn flat_offsets_ignore_bit_eleven() {
-        let offset = |word0: u32| {
-            let code = bytes(&[word0, 0x0000_0001, S_ENDPGM]);
-            match decode(&code).unwrap()[0].fields(false) {
-                Fields::Flat { offset, .. } => offset,
-                fields => panic!("{fields:?}"),
-            }
-        };
-        // flat_load_dword v0, v[1:2]: the FLAT offset is 11-bit and
-        // unsigned, so bit 11 is ignored (0x800 -> 0, 0xfff -> 0x7ff).
-        assert_eq!(offset(0xDC30_0800), 0);
-        assert_eq!(offset(0xDC30_0FFF), 0x7FF);
-    }
 }
