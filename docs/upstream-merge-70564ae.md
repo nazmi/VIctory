@@ -105,3 +105,28 @@ the merged tree, then checking behaviour rather than names.
 
 Re-applied features were each verified by their own test, and the tests are
 non-vacuous where a negative control was possible.
+
+## The measurement that settles the trade: the BVH builder
+
+Everything above argues from code. This is from behaviour, on the one archive
+that motivated the whole spilled-user-data investigation:
+
+```bash
+victory translate --jobs 4 <game_dir>/xboxbvhbuilder.dll
+```
+
+| | Programs emitted | Top refusal |
+| --- | --- | --- |
+| before the merge (our `spill.rs`) | **0 of 52** | the spill refusal was gone, but every program then failed later |
+| after the merge (upstream's `resource::USER_DATA`) | **36 of 52** | 8 "a select on an untracked mask", 8 "a whole-wave section step" |
+
+Upstream's mechanism, which resolves a spilled root parameter *inside* tracking
+rather than rewriting the IR first, is **substantially better** than the module
+this branch had taken from the third-party fork: it takes the same 52 programs
+from none to thirty-six. That is the strongest evidence available here that
+taking upstream's design was right, and it answers the question the merge left
+open without needing a title run.
+
+The remaining 16 are named, offline-reproducible gaps — the same "a select on
+an untracked mask" and "a whole-wave section step" families the full census
+ranks first and tenth.
