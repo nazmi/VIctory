@@ -638,6 +638,7 @@ impl State {
         if crate::pipeline::is_skipped(self.pipeline as This) {
             DROPPED.fetch_add(1, Ordering::Relaxed);
             crate::pipeline::note_drop(self.pipeline as This);
+            self.frame_op(&format!("dispatch {x}x{y}x{z}"), true, false);
             return;
         }
         let Some(p) = crate::pipeline::host_pipeline(self.pipeline as This) else {
@@ -648,21 +649,83 @@ impl State {
             DROPPED.fetch_add(1, Ordering::Relaxed);
             #[cfg(feature = "diagnostics")]
             crate::pipeline::note_drop(self.pipeline as This);
+            #[cfg(feature = "diagnostics")]
+            self.frame_op(&format!("dispatch {x}x{y}x{z}"), true, false);
             return;
         };
         if !p.compute {
             once!("a dispatch with a graphics pipeline");
+            #[cfg(feature = "diagnostics")]
+            self.frame_op_why(
+                &format!("dispatch {x}x{y}x{z}"),
+                true,
+                false,
+                Some("a graphics pipeline"),
+            );
             return;
         }
         if !self.bind(list, p, true) {
             DROPPED.fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "diagnostics")]
+            self.frame_op_why(
+                &format!("dispatch {x}x{y}x{z}"),
+                true,
+                false,
+                Some("a table it reads could not be made"),
+            );
             return;
         }
         #[cfg(feature = "diagnostics")]
         list.note_op(|| self.op_text(format!("dispatch {x}x{y}x{z}"), true));
+        #[cfg(feature = "diagnostics")]
+        self.frame_op(&format!("dispatch {x}x{y}x{z}"), true, true);
         // SAFETY: an open list with everything set.
         unsafe { list.list.Dispatch(x, y, z) };
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// In frames listed for capture, at debug level: one line per draw or
+    /// dispatch with its render targets and depth (named as in
+    /// `VICTORY_DUMP_TARGETS` files) and whether it ran, else why it was
+    /// dropped (diagnostics builds).
+    #[cfg(feature = "diagnostics")]
+    fn frame_op(&self, kind: &str, compute: bool, ran: bool) {
+        self.frame_op_why(kind, compute, ran, None);
+    }
+
+    /// [`State::frame_op`] with the reason a drop happened before a pipeline
+    /// was looked at (else the pipeline's).
+    #[cfg(feature = "diagnostics")]
+    fn frame_op_why(&self, kind: &str, compute: bool, ran: bool, why: Option<&str>) {
+        if !tracing::enabled!(tracing::Level::DEBUG)
+            || !crate::capture::listed(crate::queue::presented() + 1)
+        {
+            return;
+        }
+        let targets: Vec<String> = if compute {
+            Vec::new()
+        } else {
+            self.targets.iter().map(|t| format!("{t:#x}")).collect()
+        };
+        let outcome = if ran {
+            "ran".to_owned()
+        } else {
+            match why {
+                Some(why) => format!("DROPPED: {why}"),
+                None => format!(
+                    "DROPPED: {}",
+                    crate::pipeline::drop_reason(self.pipeline as This)
+                ),
+            }
+        };
+        let text = self.op_text(kind.to_owned(), compute);
+        tracing::debug!(
+            "frame {} op: pipeline {:#x} topology {} targets {targets:?} depth {:#x} -> {outcome} || {text}",
+            crate::queue::presented() + 1,
+            self.pipeline,
+            self.topology,
+            self.depth
+        );
     }
 
     /// What a draw or dispatch runs, for the device-removed report
@@ -727,6 +790,8 @@ impl State {
                 }
                 Err(_) => false,
             };
+        #[cfg(feature = "diagnostics")]
+        self.frame_op("mesh", false, ran);
         if !ran {
             DROPPED.fetch_add(1, Ordering::Relaxed);
             #[cfg(feature = "diagnostics")]
@@ -898,8 +963,9 @@ impl State {
         if !tracing::enabled!(tracing::Level::DEBUG) {
             return;
         }
+        // Listed frames: `frame_op` logs every operation instead.
         let listed = crate::capture::listed(crate::queue::presented() + 1);
-        let logged = listed || TRACED.fetch_add(1, Ordering::Relaxed) < 64;
+        let logged = !listed && TRACED.fetch_add(1, Ordering::Relaxed) < 64;
         let targets: Vec<String> = self
             .targets
             .iter()
@@ -985,6 +1051,8 @@ impl State {
             };
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
+        #[cfg(feature = "diagnostics")]
+        self.frame_op("draw", false, ran);
         if !ran {
             DROPPED.fetch_add(1, Ordering::Relaxed);
             #[cfg(feature = "diagnostics")]
@@ -1082,6 +1150,8 @@ impl State {
             };
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
+        #[cfg(feature = "diagnostics")]
+        self.frame_op("draw_indexed", false, ran);
         if !ran {
             DROPPED.fetch_add(1, Ordering::Relaxed);
             #[cfg(feature = "diagnostics")]
@@ -1108,6 +1178,7 @@ impl State {
         #[cfg(feature = "diagnostics")]
         if crate::pipeline::is_skipped(self.pipeline as This) {
             crate::pipeline::note_drop(self.pipeline as This);
+            self.frame_op(&format!("indirect kind {kind}"), kind == 2, false);
             return false;
         }
         const DRAW: u32 = 0;
@@ -1121,6 +1192,13 @@ impl State {
         let len = u64::from(stride) * u64::from(max.max(1));
         let Some(args) = crate::shadow::find(arguments, len) else {
             why("arguments outside title buffers");
+            #[cfg(feature = "diagnostics")]
+            self.frame_op_why(
+                &format!("indirect kind {kind}"),
+                kind == DISPATCH,
+                false,
+                Some("arguments outside title buffers"),
+            );
             return false;
         };
         let counter = match count {
@@ -1128,6 +1206,13 @@ impl State {
                 Some(s) => Some((s, at)),
                 None => {
                     why("count outside title buffers");
+                    #[cfg(feature = "diagnostics")]
+                    self.frame_op_why(
+                        &format!("indirect kind {kind}"),
+                        kind == DISPATCH,
+                        false,
+                        Some("count outside title buffers"),
+                    );
                     return false;
                 }
             },
@@ -1138,6 +1223,13 @@ impl State {
             .flatten()
         else {
             why("no host signature");
+            #[cfg(feature = "diagnostics")]
+            self.frame_op_why(
+                &format!("indirect kind {kind}"),
+                kind == DISPATCH,
+                false,
+                Some("no host signature"),
+            );
             return false;
         };
         args.refresh(list, arguments, len);
@@ -1147,6 +1239,13 @@ impl State {
         // Bounded first: the clamp binds a compute pipeline of its own.
         if !crate::indirect::bound(list, &args.buffer, args.gpu(arguments), (kind, stride, max)) {
             why("not bounded (no clamp, or arguments not 4-byte aligned)");
+            #[cfg(feature = "diagnostics")]
+            self.frame_op_why(
+                &format!("indirect kind {kind}"),
+                kind == DISPATCH,
+                false,
+                Some("not bounded (no clamp, or arguments not 4-byte aligned)"),
+            );
             return false;
         }
         self.host_pipeline = 0;
@@ -1160,6 +1259,8 @@ impl State {
             },
             _ => false,
         };
+        #[cfg(feature = "diagnostics")]
+        self.frame_op("indirect", kind == DISPATCH, ran);
         if !ran {
             crate::indirect::done(list, &args.buffer);
             #[cfg(feature = "diagnostics")]
