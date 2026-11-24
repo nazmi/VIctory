@@ -233,7 +233,10 @@ pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
             offset: 0,
             what: "a container without a vertex, pixel, compute or mesh program",
         })?;
-    let p = ir::build(&native.patched_code(), native.wave64, native.vgprs)?;
+    // A compute program may keep its root parameters in a spilled user-data
+    // table rather than in registers; `spill::build` rewrites those loads
+    // first, so tracking sees ordinary parameters (see `spill`).
+    let p = crate::spill::build(&native)?;
     // Structurisation first: tracing per-lane descriptors needs it (its
     // failure is reported after the earlier stages').
     let st = structure::structure(&p);
