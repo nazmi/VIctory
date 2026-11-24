@@ -245,8 +245,11 @@ mod dialog {
                     0 // focus set here
                 }
                 wm::WM_COMMAND => {
-                    let entry =
-                        &mut *(wm::GetWindowLongPtrW(dialog, wm::GWLP_USERDATA) as *mut Entry);
+                    let user_data = wm::GetWindowLongPtrW(dialog, wm::GWLP_USERDATA);
+                    if user_data == 0 {
+                        return 0;
+                    }
+                    let entry = &mut *(user_data as *mut Entry);
                     match (wparam & 0xffff) as i32 {
                         wm::IDOK => {
                             let mut buffer =
@@ -266,6 +269,19 @@ mod dialog {
                 }
                 _ => 0,
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn command_before_init_is_ignored() {
+            assert_eq!(
+                procedure(std::ptr::null_mut(), wm::WM_COMMAND, wm::IDOK as WPARAM, 0,),
+                0
+            );
         }
     }
 }

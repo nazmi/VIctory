@@ -42,7 +42,7 @@ pub fn run(
     strict: bool,
     execute: bool,
     console: Console,
-) -> Result<()> {
+) -> Result<u32> {
     use std::sync::Arc;
     use victory_hle::{HleResolver, HostPolicy};
     use victory_loader::{BindReport, UnimplementedPolicy, WithTitleDlls};
@@ -145,7 +145,7 @@ pub fn run(
     show(&exe_name, image.bind_imports(&with_dlls, policy)?);
     if !execute {
         println!("not executing (pass --execute to start the title)");
-        return Ok(());
+        return Ok(0);
     }
     report_commit();
     victory_loader::report_crashes();
@@ -170,7 +170,7 @@ pub fn run(
         .join()
         .map_err(|_| anyhow::anyhow!("title main thread panicked"))??;
     println!("title exited with {code}");
-    Ok(())
+    Ok(code)
 }
 
 /// The bytes the title asks Windows for in one mapping on its first boot:
@@ -492,7 +492,7 @@ mod cpu_check_tests {
 }
 
 #[cfg(not(windows))]
-pub fn run(_: &Path, _: Unimplemented, _: bool, _: bool, _: Console) -> Result<()> {
+pub fn run(_: &Path, _: Unimplemented, _: bool, _: bool, _: Console) -> Result<u32> {
     anyhow::bail!("running titles requires Windows")
 }
 

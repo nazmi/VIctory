@@ -791,22 +791,24 @@ fn write_address(data: usize, index: usize, view: Option<&View>) {
 /// The title memory a buffer shader or unordered access view reads: its
 /// address and length.
 pub(crate) fn buffer_range(view: &View) -> Option<(u64, u64)> {
-    let (base, words): (u64, &[u32; 10]) = match view {
-        View::Shader(r, Some(desc)) => (
-            crate::resource::buffer_bytes(*r as crate::object::This)?.0 as u64,
-            desc,
-        ),
+    let (base, bytes, words): (u64, u64, &[u32; 10]) = match view {
+        View::Shader(r, Some(desc)) => {
+            let (at, bytes) = crate::resource::buffer_bytes(*r as crate::object::This)?;
+            (at as u64, bytes, desc)
+        }
         View::Placed(false, resource, desc) if resource[0] == 1 => (
             u64::from(desc[10]) | u64::from(desc[11]) << 32,
+            u64::from(resource[4]) | u64::from(resource[5]) << 32,
             desc[..10].try_into().ok()?,
         ),
         View::Unordered(r, _, Some(desc)) => {
-            let base = crate::resource::buffer_bytes(*r as crate::object::This)?.0 as u64;
-            return unordered_range(base, desc);
+            let (at, bytes) = crate::resource::buffer_bytes(*r as crate::object::This)?;
+            return unordered_range(at as u64, bytes, desc);
         }
         View::Placed(true, resource, desc) if resource[0] == 1 => {
             let base = u64::from(desc[10]) | u64::from(desc[11]) << 32;
-            return unordered_range(base, desc[..10].try_into().ok()?);
+            let bytes = u64::from(resource[4]) | u64::from(resource[5]) << 32;
+            return unordered_range(base, bytes, desc[..10].try_into().ok()?);
         }
         _ => return None,
     };
@@ -814,10 +816,24 @@ pub(crate) fn buffer_range(view: &View) -> Option<(u64, u64)> {
     let element = element_size(&desc);
     // SAFETY: a buffer view's union member.
     let buffer = unsafe { desc.Anonymous.Buffer };
+    let count = counted(buffer.NumElements, buffer.FirstElement, element, bytes);
     Some((
         base + buffer.FirstElement * element,
-        u64::from(buffer.NumElements) * element,
+        u64::from(count) * element,
     ))
+}
+
+/// A buffer view's element count, with a zero count read as the console
+/// reads it: to the end of the buffer (from its first element), at least
+/// one element. The host refuses a view of no elements, and removes the
+/// device for it, so a title's zero count is filled from the buffer's
+/// bytes wherever a host view (or the range it reads) is made.
+fn counted(count: u32, first: u64, element: u64, bytes: u64) -> u32 {
+    if count != 0 || element == 0 {
+        return count;
+    }
+    let first = first * element;
+    (bytes.saturating_sub(first) / element).clamp(1, u64::from(u32::MAX)) as u32
 }
 
 /// The host copy a buffer view's bytes are in (the one its host view
@@ -828,8 +844,9 @@ pub(crate) fn view_copy(view: &View) -> Option<(std::sync::Arc<crate::shadow::Sh
     Some((shadow, address, len))
 }
 
-/// [`buffer_range`] of an unordered access view of memory at `base`.
-fn unordered_range(base: u64, words: &[u32; 10]) -> Option<(u64, u64)> {
+/// [`buffer_range`] of an unordered access view of memory at `base`, in a
+/// buffer of `bytes`.
+fn unordered_range(base: u64, bytes: u64, words: &[u32; 10]) -> Option<(u64, u64)> {
     let desc = uav_desc(words);
     // SAFETY: a buffer view's union member.
     let buffer = unsafe { desc.Anonymous.Buffer };
@@ -840,9 +857,10 @@ fn unordered_range(base: u64, words: &[u32; 10]) -> Option<(u64, u64)> {
     } else {
         crate::resource::element(desc.Format.0 as u32)?.0
     };
+    let count = counted(buffer.NumElements, buffer.FirstElement, element, bytes);
     Some((
         base + buffer.FirstElement * element,
-        u64::from(buffer.NumElements) * element,
+        u64::from(count) * element,
     ))
 }
 
@@ -871,6 +889,9 @@ fn buffer_srv(
         once!(len, "buffer view of elements without a size");
         return None;
     }
+    // A zero count reads to the end of the buffer on the console; the host
+    // would refuse the view (and remove the device for it).
+    buffer.NumElements = counted(buffer.NumElements, buffer.FirstElement, element, len);
     // The copy its own bytes are in, its first element counted from there.
     let start = address + buffer.FirstElement * element;
     let Some((shadow, own)) =
@@ -958,6 +979,8 @@ fn buffer_uav(
         once!(len, "unordered buffer view of elements without a size");
         return None;
     }
+    // As for a shader view: a zero count reads to the end of the buffer.
+    buffer.NumElements = counted(buffer.NumElements, buffer.FirstElement, element, len);
     let start = address + buffer.FirstElement * element;
     let (shadow, own) =
         crate::shadow::for_view(start, u64::from(buffer.NumElements) * element, element)?;
@@ -1455,6 +1478,60 @@ mod tests {
         assert!(!within(64, 0, 0, 16));
         assert!(!within(64, 3, 2, 16));
         assert!(!within(64, u64::MAX, 1, 16));
+    }
+
+    /// A zero element count is the console's "to the end of the buffer". The
+    /// host removes the device for a view of no elements, so the count is
+    /// filled from the buffer's bytes, and the view reads that far.
+    #[test]
+    fn a_zero_element_count_reads_to_the_end_of_the_buffer() {
+        assert_eq!(counted(0, 0, 16, 64), 4);
+        assert_eq!(counted(0, 3, 16, 64), 1, "from the first element");
+        assert_eq!(counted(0, 5, 16, 64), 1, "at least one, if past the end");
+        assert_eq!(counted(0, 0, 16, 0), 1);
+        assert_eq!(counted(7, 0, 16, 64), 7, "a count the title gave stands");
+        assert_eq!(counted(0, 0, 0, 64), 0, "no element size");
+        let Some(heap) = HostHeap::new(false, 4) else {
+            return; // no host GPU
+        };
+        // Four 456-byte elements, the view counted 0: title-placed buffer
+        // and view descriptions, as device 0x230/0x238 take them.
+        let address = 0x1_0000_0000u64;
+        let resource: [u32; 14] = [1, 0, 0, 0, 4 * 456, 0, 1, 1 | 1 << 16, 0, 1, 0, 1, 0, 0];
+        let placed = |unordered: bool| {
+            // The two descriptions' unions start at different words: the
+            // shader view's after its 4-component mapping (word 2), the
+            // unordered one's after the format and dimension. The count
+            // (zero: to the end) is word 6 of a shader view, word 4 of an
+            // unordered one; the stride follows it.
+            let mut words = [0u32; 10];
+            words[1] = 1; // buffer
+            if unordered {
+                words[5] = 456;
+            } else {
+                words[2] = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                words[7] = 456;
+            }
+            let mut desc = [0u32; 16];
+            desc[..10].copy_from_slice(&words);
+            (desc[10], desc[11]) = (address as u32, (address >> 32) as u32);
+            View::Placed(unordered, resource, desc)
+        };
+        for unordered in [false, true] {
+            let view = placed(unordered);
+            assert!(
+                make_view(&view, heap.cpu(u32::from(unordered))).is_some(),
+                "a zero count is not a view of no elements: {view:?}"
+            );
+            // The empty view was what removed the device (the world's).
+            // SAFETY: a plain device query.
+            assert!(unsafe { host().unwrap().device.GetDeviceRemovedReason() }.is_ok());
+            assert_eq!(
+                buffer_range(&view),
+                Some((address, 4 * 456)),
+                "reads to the end of the buffer"
+            );
+        }
     }
 
     /// A null texture UAV keeps the title's dimension (3D for the world's

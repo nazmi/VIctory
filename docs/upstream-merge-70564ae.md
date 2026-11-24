@@ -66,3 +66,42 @@ tried to interleave them is preserved outside the repository at
 compiled in an isolated scratch, but had 40 semantic errors in the combined
 tree, mostly `requested`/`d`/`original` bindings that the two designs name
 differently.
+
+## Documented switches the merge dropped (found 2026-11-25)
+
+Four switches are still listed in `README.md` but no longer exist in the code,
+so setting them silently does nothing. Each was verified by grepping the
+workspace for the variable name and by checking the README row:
+
+| Switch | README | Code | Recovery commit | Cost to re-apply |
+| --- | --- | --- | --- | --- |
+| `VICTORY_MODE=<w>x<h>` | documented | **re-applied here** | `5c61aa48` | small: `dxgi.rs` parse + `mode_size()` |
+| `VICTORY_SKIP_WAVE64` | documented | **absent** | `13008f98` | medium: needs a diagnostics-only `wave64` field on `Shader`, which upstream restructured |
+| `VICTORY_SHOW_TARGET` | documented | **absent** | `98231399`, `fed90c5d`, `49ab3532` | large: three commits over `capture.rs`, which upstream replaced |
+| `VICTORY_CAPTURE_DRAWS` | documented | **absent** | see `git log --all --grep=VICTORY_CAPTURE_DRAWS` | large: same file |
+
+Also lost, not documented but user-visible: `VICTORY_COPY_THREADS` (with the
+threaded copy-back) and the shadow-buffer state tracking.
+
+**Until these are re-applied the README overstates the build.** That is a
+documentation defect, not a code one, and it is recorded here rather than
+quietly deleted from the README so the features are not forgotten.
+
+## Lost features found by audit after the merge
+
+Found by comparing the 329 pre-merge commits' introduced declarations against
+the merged tree, then checking behaviour rather than names.
+
+| Feature | Evidence it is gone | Recovery | Re-applied? |
+| --- | --- | --- | --- |
+| `f32_to_half` NaN guard + ties-to-even (#843) | upstream turned NaN into infinity and rounded half-up | `67b24154` | **yes**, with its test |
+| unique-temp pipeline-library writes (#1660) | upstream still stages to a shared `<file>.tmp` | `d32efcd9` | **yes**, with its test |
+| `VICTORY_PIPELINE_WORKERS` (#1728) | upstream hardcodes 2..8 | `16a5924d` | **yes**, with its test |
+| `VICTORY_MODE` (#1701) | README documented it; no code | `5c61aa48` | **yes**, with its test |
+| **depth bounds** (`9a6d9e67`, 462 lines + a 304-line test) | `set_depth_bounds`, `depth_bounds_supported`, the `0x220` list slot and `mod depth_bounds_test` all gone; the test file was left orphaned and has now been deleted | `9a6d9e67` | **no**: needs re-deriving against upstream's rewritten `draw.rs`/`host.rs`/`list.rs`. Upstream's README lists depth bounds as missing, so code and docs agree meanwhile. |
+| threaded span-limited copy-back (#1656) | upstream's `goes_back` design | `e08c93e0` | no: design replacement |
+| shadow-buffer state tracking (#1691) | upstream's `tracked`/`keep_writes` | `76adf6a1` | no: design replacement |
+| `VICTORY_SKIP_WAVE64`, `VICTORY_SHOW_TARGET`, `VICTORY_CAPTURE_DRAWS` | README documents all three; no code | see the switch table above | no: depend on upstream's rewritten `capture.rs` and `Shader` |
+
+Re-applied features were each verified by their own test, and the tests are
+non-vacuous where a negative control was possible.

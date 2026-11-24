@@ -252,7 +252,7 @@ pub(crate) fn family(format: u32) -> u32 {
         (44, 47),
         (48, 52),
         (53, 59),
-        (60, 65),
+        (60, 64),
         (70, 72),
         (73, 75),
         (76, 78),
@@ -1201,6 +1201,8 @@ fn make_texture(d: &ResourceDesc, state: u32, clear: *const c_void) -> Option<Ho
         value[0] = pc_format(value[0]);
         value
     });
+    // The format the clear value names, for the failure note below.
+    let clear_format = clear_value.as_ref().map(|v| v[0]);
     let clear_value = clear_value
         .as_ref()
         .map(|v| std::ptr::from_ref(v).cast::<D3D12_CLEAR_VALUE>());
@@ -1282,7 +1284,17 @@ fn make_texture(d: &ResourceDesc, state: u32, clear: *const c_void) -> Option<Ho
             )
         };
         if let Err(e) = made {
-            tracing::warn!(error = %e, desc = ?d, "no host texture");
+            // What the host was asked for: the state the title's maps to
+            // (the failure is often a state the resource's flags forbid) and
+            // the clear value's format.
+            tracing::warn!(
+                error = %e,
+                desc = ?d,
+                initial = format_args!("{initial:#x}"),
+                title_state = format_args!("{state:#x}"),
+                clear_format,
+                "no host texture"
+            );
         }
     }
     let texture = texture?;
@@ -1865,6 +1877,22 @@ static RESOURCE_FUNCTIONS: Table<32> = {
 mod tests {
     use super::*;
     use crate::object::slot;
+
+    #[test]
+    fn a8_unorm_is_not_in_the_r8_typeless_family() {
+        // DXGI_FORMAT values: 60 R8_TYPELESS, 61 R8_UNORM, 62 R8_UINT,
+        // 63 R8_SNORM, 64 R8_SINT, 65 A8_UNORM. The R8 typeless family is
+        // 60..=64; A8_UNORM has no typeless family and cannot be cast to R8,
+        // so it must stand alone rather than fold into R8_TYPELESS.
+        assert_eq!(family(60), 60);
+        for f in 61..=64 {
+            assert_eq!(family(f), 60);
+        }
+        assert_eq!(family(65), 65);
+        // Boundaries: 59 belongs to the preceding family, 66 is unmapped.
+        assert_eq!(family(59), 53);
+        assert_eq!(family(66), 66);
+    }
 
     type Release = extern "system" fn(This) -> u32;
     type Map = extern "system" fn(This, u32, *const c_void, *mut *mut u8) -> HRESULT;

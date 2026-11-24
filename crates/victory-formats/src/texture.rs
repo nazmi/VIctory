@@ -433,7 +433,11 @@ impl Layout {
             let mut sizes = vec![];
             for i in 0..d.mips {
                 let (w, h) = padded(i);
-                if w <= fixed[0] && h <= fixed[1] && d.mips - i <= max_in_tail {
+                if w <= fixed[0]
+                    && h <= fixed[1]
+                    && (!thick || mip_depth(i) <= fixed[2])
+                    && d.mips - i <= max_in_tail
+                {
                     first_tail_mip = i;
                     slice_size += block_bytes / u64::from(block[2]);
                     break;
@@ -1284,5 +1288,29 @@ mod tests {
             Err(Error::TooSmall)
         );
         assert_eq!(l.offset(0, 64, 0, 0), Err(Error::Invalid));
+    }
+    /// A thick (3D) mip tail holds mips whose depth also fits the tail block.
+    /// A mip deeper than that gets its own storage: admitting it to the tail
+    /// under-allocates the surface, so sampling the deeper mip reads past the
+    /// end of the resource.
+    #[test]
+    fn deep_3d_mips_stay_out_of_the_thick_tail() {
+        let d = Desc {
+            dimension: Dimension::Tex3d,
+            width: 64,
+            height: 64,
+            depth: 256,
+            mips: 7,
+            element_bytes: 4,
+            block: 1,
+            samples: 1,
+            swizzle: Swizzle::SW_4KB_S,
+        };
+        let l = Layout::new(&d).unwrap();
+        // Mip 3 is 8x8x32 and mip 4 is 4x4x16; the 4 KiB thick block is only
+        // a few texels deep, so neither may join the tail. Before this rule
+        // the tail started at mip 3 and the layout was 5,636,096 bytes.
+        assert_eq!(l.first_tail_mip, 5);
+        assert_eq!(l.size, 5_898_240);
     }
 }
