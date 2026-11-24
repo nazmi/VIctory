@@ -6,7 +6,10 @@
 //!    shaders' code, which changes when a translation does, our root
 //!    signature, the graphics state). The library is saved under the cache
 //!    folder; the host refuses a library of another adapter or driver, and
-//!    an entry whose description differs, so neither is ever used.
+//!    an entry whose description differs, so neither is ever used. A kind
+//!    of pipeline the library refuses to load right after storing it (as
+//!    D3D12's does mesh pipelines) is kept no more: each is compiled when
+//!    made.
 //! 2. The title pipelines a run drew or dispatched with are listed by a key
 //!    known when the title creates them (their shader containers and
 //!    graphics state); the next run hands those to the workers at
@@ -21,7 +24,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -129,15 +132,39 @@ pub(crate) fn name(kind: &str, root: &[u8], code: &[&[u8]], state: &str) -> Stri
     h.finalize().to_hex()[..32].to_owned()
 }
 
-/// The pipeline named `name`: loaded from the library by `load` if it is
-/// there with the same description, else made by `create` and stored.
+/// Whether the library keeps a kind of pipeline ("compute", "graphics",
+/// "mesh"), as the first of the kind stored shows when loaded back at once.
+const UNKNOWN: u8 = 0;
+const YES: u8 = 1;
+const NO: u8 = 2;
+static KEPT: [AtomicU8; 3] = [
+    AtomicU8::new(UNKNOWN),
+    AtomicU8::new(UNKNOWN),
+    AtomicU8::new(UNKNOWN),
+];
+
+fn kind_index(kind: &str) -> usize {
+    match kind {
+        "compute" => 0,
+        "graphics" => 1,
+        _ => 2,
+    }
+}
+
+/// The pipeline named `name`, of `kind`: loaded from the library by `load`
+/// if it is there with the same description, else made by `create` and
+/// stored. The first of a kind stored is loaded back at once: refused, the
+/// library gets no more of the kind (and says so once).
 pub(crate) fn pipeline(
     name: &str,
-    load: impl FnOnce(&ID3D12PipelineLibrary1, PCWSTR) -> windows::core::Result<ID3D12PipelineState>,
+    kind: &str,
+    load: impl Fn(&ID3D12PipelineLibrary1, PCWSTR) -> windows::core::Result<ID3D12PipelineState>,
     create: impl FnOnce() -> windows::core::Result<ID3D12PipelineState>,
 ) -> windows::core::Result<ID3D12PipelineState> {
     let wide = HSTRING::from(name);
-    let Some(library) = library() else {
+    let kept = &KEPT[kind_index(kind)];
+    let library = library().filter(|_| kept.load(Ordering::Relaxed) != NO);
+    let Some(library) = library else {
         MADE.fetch_add(1, Ordering::Relaxed);
         return create();
     };
@@ -158,6 +185,16 @@ pub(crate) fn pipeline(
     // differs) is refused, which leaves the library as it was.
     if unsafe { library.library.StorePipeline(PCWSTR(wide.as_ptr()), &pso) }.is_ok() {
         library.added.fetch_add(1, Ordering::Relaxed);
+    }
+    if kept.load(Ordering::Relaxed) == UNKNOWN {
+        let again = load(&library.library, PCWSTR(wide.as_ptr()));
+        kept.store(if again.is_ok() { YES } else { NO }, Ordering::Relaxed);
+        if let Err(e) = again {
+            tracing::warn!(
+                error = %e,
+                "host pipeline library refuses a {kind} pipeline it just stored: {kind} pipelines are compiled every run, none kept"
+            );
+        }
     }
     Ok(pso)
 }
@@ -368,6 +405,13 @@ mod tests {
         assert_ne!(a, name("mesh", b"root", &[b"vs", b"ps"], "state"));
         // Parts do not run into each other.
         assert_ne!(a, name("graphics", b"root", &[b"vsp", b"s"], "state"));
+    }
+
+    /// Each kind of pipeline has a verdict of its own.
+    #[test]
+    fn kinds_are_told_apart() {
+        let kinds = ["compute", "graphics", "mesh"].map(kind_index);
+        assert_eq!(kinds, [0, 1, 2]);
     }
 
     #[test]

@@ -533,6 +533,7 @@ impl HostPipeline {
             let name = super::library::name("compute", &root_blob, &[&code_bytes(&code(0))], "");
             let made = super::library::pipeline(
                 &name,
+                "compute",
                 // SAFETY: the description points at live data.
                 |library, name| unsafe { library.LoadComputePipeline(name, &desc) },
                 // SAFETY: as above.
@@ -576,6 +577,7 @@ impl HostPipeline {
                 Some(depth) => stream_pipeline(
                     &host.device,
                     &root,
+                    "mesh",
                     ms,
                     code(1),
                     g,
@@ -585,6 +587,7 @@ impl HostPipeline {
                 None => stream_pipeline(
                     &host.device,
                     &root,
+                    "mesh",
                     ms,
                     code(1),
                     g,
@@ -665,6 +668,7 @@ impl HostPipeline {
             stream_pipeline(
                 &host.device,
                 &root,
+                "graphics",
                 vertex,
                 desc.PS,
                 g,
@@ -674,6 +678,7 @@ impl HostPipeline {
         } else {
             super::library::pipeline(
                 &name,
+                "graphics",
                 // SAFETY: the description points at live data.
                 |library, name| unsafe { library.LoadGraphicsPipeline(name, &desc) },
                 // SAFETY: as above.
@@ -775,9 +780,11 @@ impl ClearPadding for D3D12_DEPTH_STENCIL_DESC1 {
 }
 
 /// The stream form used by mesh pipelines and vertex pipelines with depth bounds.
+#[allow(clippy::too_many_arguments)] // the stream's parts, then where it goes
 fn stream_pipeline<S: ClearPadding, D: ClearPadding>(
     device: &ID3D12Device,
     root: &ID3D12RootSignature,
+    kind: &str,
     stages: S,
     ps: D3D12_SHADER_BYTECODE,
     g: &GraphicsState,
@@ -844,6 +851,7 @@ fn stream_pipeline<S: ClearPadding, D: ClearPadding>(
     let device = device.cast::<ID3D12Device2>()?;
     super::library::pipeline(
         name,
+        kind,
         // SAFETY: the stream holds whole subobjects pointing at live data.
         |library, name| unsafe { library.LoadPipeline(name, &desc) },
         // SAFETY: as above.
