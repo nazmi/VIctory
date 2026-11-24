@@ -1062,3 +1062,52 @@ evidence only.
 
 Gate at `98e720e0`: fmt 0 differing, both Clippy commands exit 0, workspace
 **709 passed / 16 ignored / 0 failed**, policy 200 files.
+
+### Wave 7 batch three and an integration audit: 2026-11-25
+
+**GPU batch: five PRs, seven commits, all in.**
+
+| Local commit | PR | Subject |
+| --- | --- | --- |
+| `42ba51eb`, `ed7413fa` | #1725 | GPU: placed copies take the bytes a GPU write leaves in their memory |
+| `6f2255bd` | #1727 | GPU: 1D textures are 2D on the host, one texel high |
+| `3a26c01b` | #1731 | GPU: occlusion queries measure on the host |
+| `e88c5752` | #1728 | Pipelines: VICTORY_PIPELINE_WORKERS sets the worker count |
+| `ea8b7f31` | #1734 | Shaders: wait for a test's fence on an event, not in a spin |
+
+Two carry risk that unit tests cannot see, recorded rather than smoothed over:
+
+- **#1731** changes what a culling title hides. Draws the host drops contribute
+  no samples, so an occlusion count can now read low where the old stub answered
+  "everything visible" — geometry that used to be drawn can disappear. There is
+  no switch back to the stub. That is a visual-regression risk on a real run,
+  not something a test can settle here.
+- **#1725** takes one snapshot per placed copy per list, so a UAV write landing
+  between two reads of the same placed copy inside one list leaves the second
+  read stale.
+
+**The audit that mattered.** A question exposed a real gap: were the workers'
+branches actually in the integrated branch? They were not, all at once — the
+GPU worker's seven commits were verified but not yet cherry-picked when the
+question arrived.
+
+The reason the question is hard to answer by inspection is worth writing down:
+cherry-picking creates a **new SHA**, so searching this branch's log for a
+worker's commit SHA always fails and reads as "the work was never taken". The
+correct test is patch-id equivalence:
+
+```bash
+git cherry HEAD <worker-branch>    # '-' applied, '+' not applied
+```
+
+Run across every worker branch, that now reports `+` only for commits that were
+carried across as resolved tree state or reformatted — each of those verified
+separately by grepping for its distinctive lines and by diffing HEAD against the
+branch, where every remaining difference is *newer* work in HEAD rather than
+missing work. The method and its results are in
+[worker-accounting.md](worker-accounting.md), and the rule it leaves behind is:
+after every worker, require `+` to be empty or explain each `+`; never infer
+integration from a worker's summary.
+
+Gate at `ed526231`: fmt 0 differing, both Clippy commands exit 0, workspace
+**717 passed / 16 ignored / 0 failed**, policy 200 files.
