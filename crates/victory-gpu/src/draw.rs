@@ -619,8 +619,10 @@ impl State {
 
     /// What a draw or dispatch runs, for the device-removed report
     /// (diagnostics): the pipeline, then per stage the user data it gets
-    /// (with the view at that heap index, if one is), the host addresses
-    /// of its root views and the views its tables name.
+    /// (`table` values with the view the table starts at; `const` values
+    /// with the view at that heap index, if one is, since dynamic resources
+    /// may index the heap with one, though most are plain numbers), the
+    /// host addresses of its root views and the views its tables name.
     #[cfg(feature = "diagnostics")]
     fn op_text(&self, kind: String, compute: bool) -> String {
         use std::fmt::Write;
@@ -636,10 +638,16 @@ impl State {
             let _ = write!(text, " | {}:", stage.shader.hash);
             for u in &t.host.user_data {
                 let v = self.user_value(compute, u.slot, u.root, u.dword);
-                let _ = write!(text, " u{}={v:#x}", u.index);
-                let index = if u.root == RootType::Table { v / 32 } else { v };
+                let table = u.root == RootType::Table;
+                let (root, index) = if table {
+                    ("table", v / 32)
+                } else {
+                    ("const", v)
+                };
+                let _ = write!(text, " u{}={v:#x} {root}", u.index);
                 if let Some(slot) = views.and_then(|h| h.describe_slot(index)) {
-                    let _ = write!(text, " [heap {index}: {slot}]");
+                    let at = if table { "heap" } else { "as heap index" };
+                    let _ = write!(text, " [{at} {index}: {slot}]");
                 }
             }
             for &(slot, _) in stage.root_cbvs.iter().chain(&stage.root_srvs) {
