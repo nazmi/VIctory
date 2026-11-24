@@ -175,7 +175,7 @@ fn create() -> windows::core::Result<Host> {
         // Diagnostics: the software adapter, on which a shader's wild access
         // is an access violation in this process (a crash report with the
         // address and instruction) instead of a GPU fault and driver reset.
-        if cfg!(feature = "diagnostics") && crate::switch::on("VICTORY_D3D12_WARP") {
+        if warp_selected() {
             let adapter = warp_adapter()?;
             D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device)?;
             tracing::info!("host device on the software adapter (WARP)");
@@ -225,6 +225,18 @@ fn create() -> windows::core::Result<Host> {
     }
 }
 
+/// Diagnostics: whether the host device goes on the software adapter.
+/// `VICTORY_D3D12_WARP=0` opts out like an unset variable; `1` is the
+/// documented on, and any other value keeps the historical
+/// presence-means-on behavior.
+fn warp_selected() -> bool {
+    warp_selected_at(std::env::var_os("VICTORY_D3D12_WARP").as_deref())
+}
+
+fn warp_selected_at(value: Option<&std::ffi::OsStr>) -> bool {
+    cfg!(feature = "diagnostics") && value.is_some_and(|value| value != "0")
+}
+
 /// DXGI may return hardware for `EnumWarpAdapter` (notably under Proton).
 /// Reject it before creating a device in diagnostics' software-only mode.
 fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
@@ -250,6 +262,17 @@ fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warp_env_gate() {
+        // Unset and `0` never select WARP; `1` and any other value do, in
+        // diagnostics builds only.
+        let on = cfg!(feature = "diagnostics");
+        assert!(!warp_selected_at(None));
+        assert!(!warp_selected_at(Some(std::ffi::OsStr::new("0"))));
+        assert_eq!(warp_selected_at(Some(std::ffi::OsStr::new(""))), on);
+        assert_eq!(warp_selected_at(Some(std::ffi::OsStr::new("1"))), on);
+    }
 
     #[test]
     fn warp_adapter_accepts_only_software() {
