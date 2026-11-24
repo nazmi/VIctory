@@ -1256,3 +1256,55 @@ branch (`git diff wave8/review HEAD` empty).
 
 Gate at `27ebc64d`: fmt 0 differing, both Clippy gates 0 errors, policy 220
 files, workspace **662 passed / 0 failed** with the 10 documented GPU skips.
+
+### Wave 9: more PRs, and re-applying what the merge dropped: 2026-11-25
+
+Merged into `integration/maintenance` with `--no-ff` as `309fd8d0` (parents
+`3ba9a1ac` and `efda2c5e`), pushed as a fast-forward. Tree identical to the
+reviewed branch.
+
+**The merge's cost, made concrete.** Comparing the 329 pre-merge commits'
+introduced declarations against the merged tree, then checking behaviour
+rather than names, found these genuinely gone:
+
+| Feature | After the merge | Now |
+| --- | --- | --- |
+| `f32_to_half` NaN guard and ties-to-even (#843) | upstream turned NaN into infinity and rounded half-up | **re-applied** with its test |
+| unique-temp pipeline-library writes (#1660) | upstream stages to a shared `<file>.tmp` | **re-applied** with its test |
+| `VICTORY_PIPELINE_WORKERS` (#1728) | hardcoded 2..8 | **re-applied** with its test |
+| `VICTORY_MODE` (#1701) | README documented it, no code | **re-applied** with its test |
+| depth bounds (`9a6d9e67`, 462 lines + 304-line test) | helpers and list slot gone; the test file left **orphaned** and uncompiled | file removed; feature still lost, recoverable from `9a6d9e67` |
+| threaded span copy-back, shadow-buffer states | upstream's own designs | not re-applied |
+| `VICTORY_SKIP_WAVE64`, `VICTORY_SHOW_TARGET`, `VICTORY_CAPTURE_DRAWS` | documented, absent | not re-applied; depend on upstream's rewritten `capture.rs` |
+
+The orphaned test file was the giveaway: a 304-line module nothing declared,
+so nothing compiled it, so nothing noticed the implementation it tested was
+gone. `docs/upstream-merge-70564ae.md` carries the full table with recovery
+commits.
+
+**PRs integrated this wave.** #1394 (XUserCompare was `a != b`, returning only
+0/1 where the contract needs an ordering), #1390 (A8_UNORM folded into the R8
+typeless family, permitting R8↔A8 views), #1499 (deep 3D mips admitted to a
+thick tail and under-allocating the surface — the PR had no test, one was
+written and proved non-vacuous by reverting the fix), #1366 (mesh stage I/O
+parsed VS *inputs* from an offset that means something else for mesh),
+#1594 (the title's exit status never reached the shell), #1299, #1515, #1424,
+#1144, #1129, #1564/#1565/#1566, #1250, #1628.
+
+**Refused:** #1099 — it writes `0` for an unpaired `v_interp_p1` half, which
+computes wrong pixels rather than refusing. Two reviewers upstream had already
+said so; the worker and the coordinator reached the same conclusion
+independently from the code.
+
+**Duplicates, checked against the tree:** #1217, #529, #531, #590, #1102,
+#398, #1150, #1220.
+
+**An operational problem worth recording.** The disk reached 1.2 GB free of
+953 GB, enough to make builds fail with `os error 112`. Cause: 21 separate
+`CARGO_TARGET_DIR` trees, one per worker, totalling about 49 GB — the isolation
+this workflow requires costs disk. Removing the finished workers' targets freed
+48 GB. Future sweeps should delete a worker's target when its branch is merged.
+
+Gate at `efda2c5e`/`309fd8d0`: fmt 0 differing, both Clippy gates 0 errors,
+policy 219 files, workspace **674 passed / 0 failed** with the 10 documented
+GPU skips (all of which fail identically on a clean `upstream/main`).
