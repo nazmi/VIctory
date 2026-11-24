@@ -11,6 +11,8 @@ pub const MAGIC: &[u8; 4] = b"SGD5";
 const MARKER: [u8; 4] = 0x000D_DCE7_u32.to_le_bytes();
 /// Containers are at most a few MiB; refuse to allocate for absurd sizes.
 const MAX_UNPACKED: usize = 64 << 20;
+/// A DXBC header: magic, 16-byte digest, version, total size, part count.
+const DXBC_HEADER: usize = 0x20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Record<'a> {
@@ -32,6 +34,36 @@ impl Record<'_> {
         miniz_oxide::inflate::decompress_to_vec_with_limit(self.packed, self.unpacked_size)
             .ok()
             .filter(|out| out.len() == self.unpacked_size)
+    }
+
+    /// The unpacked bytes when they are a structurally valid DXBC shader
+    /// container. `unpack` only checks the deflate stream; a record can hold
+    /// anything, so callers that need a container should use this instead of
+    /// repeating the header checks.
+    pub fn container(&self) -> Option<Vec<u8>> {
+        let bytes = self.unpack()?;
+        if !bytes.starts_with(b"DXBC") || bytes.len() < DXBC_HEADER {
+            return None;
+        }
+        let u32_at = |at: usize| {
+            bytes
+                .get(at..at + 4)
+                .and_then(|b| b.try_into().ok())
+                .map(u32::from_le_bytes)
+        };
+        let total = u32_at(0x18)? as usize;
+        let parts = u32_at(0x1c)? as usize;
+        if total < DXBC_HEADER || total > bytes.len() || parts > (total - DXBC_HEADER) / 4 {
+            return None;
+        }
+        Some(bytes)
+    }
+
+    /// The 16-byte DXBC container digest from the header, when the record
+    /// holds a container. This is the hash used in shader names and cache
+    /// keys, so callers can identify a shader without unpacking it twice.
+    pub fn digest(&self) -> Option<[u8; 16]> {
+        self.container()?.get(4..20).and_then(|d| d.try_into().ok())
     }
 }
 
@@ -132,5 +164,64 @@ mod tests {
         file[27] = 0xFF; // first packed byte: reserved block type
         let r = records(&file).next().unwrap();
         assert_eq!(r.unpack(), None);
+    }
+
+    /// A container with no parts, just the header. The digest is arbitrary
+    /// synthetic data, not taken from any title.
+    fn dxbc_bytes(digest: [u8; 16], parts: u32) -> Vec<u8> {
+        let mut out = b"DXBC".to_vec();
+        out.extend(digest);
+        out.extend(0u32.to_le_bytes()); // version
+        out.extend(((DXBC_HEADER + 4 * parts as usize) as u32).to_le_bytes());
+        out.extend(parts.to_le_bytes());
+        out.resize(DXBC_HEADER + 4 * parts as usize, 0);
+        out
+    }
+
+    #[test]
+    fn records_expose_validated_containers_and_digests() {
+        let digest = [0x5a; 16];
+        let payload = dxbc_bytes(digest, 2);
+        let file = record_bytes("VS_x_5a_Wrapped", 0x32, &payload);
+        let r = records(&file).next().unwrap();
+        assert_eq!(r.unpack(), Some(payload.clone()));
+        assert_eq!(r.container(), Some(payload));
+        assert_eq!(r.digest(), Some(digest));
+
+        // A deflate stream can hold any bytes; those are not containers.
+        let file = record_bytes("other", 0x32, b"not a shader");
+        let r = records(&file).next().unwrap();
+        assert_eq!(r.unpack(), Some(b"not a shader".to_vec()));
+        assert_eq!(r.container(), None);
+        assert_eq!(r.digest(), None);
+    }
+
+    #[test]
+    fn malformed_dxbc_headers_are_not_containers() {
+        let digest = [1; 16];
+        let good = dxbc_bytes(digest, 1);
+
+        let mut bad_magic = good.clone();
+        bad_magic[0] = b'X';
+        let mut bad_total = good.clone();
+        bad_total[0x18..0x1c].copy_from_slice(&((good.len() + 1) as u32).to_le_bytes());
+        let mut short_total = good.clone();
+        short_total[0x18..0x1c].copy_from_slice(&((DXBC_HEADER - 1) as u32).to_le_bytes());
+        let mut bad_parts = good.clone();
+        bad_parts[0x1c..0x20].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        for payload in [bad_magic, bad_total, short_total, bad_parts] {
+            let file = record_bytes("VS_x", 0x32, &payload);
+            let r = records(&file).next().unwrap();
+            assert_eq!(r.unpack(), Some(payload), "deflate stream is still valid");
+            assert_eq!(r.container(), None);
+            assert_eq!(r.digest(), None);
+        }
+
+        // Truncated header.
+        let short = dxbc_bytes(digest, 0)[..DXBC_HEADER - 1].to_vec();
+        let file = record_bytes("VS_x", 0x32, &short);
+        let r = records(&file).next().unwrap();
+        assert_eq!(r.container(), None);
     }
 }
