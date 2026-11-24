@@ -181,7 +181,10 @@ mod tests {
         assert_eq!(path, racer.entry);
         assert_eq!(std::fs::read(&path).unwrap(), b"ABC");
         // No staging file is left behind.
-        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
     }
 
     #[test]

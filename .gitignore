@@ -79,3 +79,7 @@ Thumbs.db
 
 # Local maintenance progress report (never committed)
 /progress-report.html
+
+# Local run logs (never committed)
+/latest dump.txt
+*.crash.log
