@@ -3227,5 +3227,4 @@ mod tests {
         unsafe { back.Unmap(0, None) };
         assert_eq!(wrong, 0, "the placed copy holds the writer's texels");
     }
-
 }

@@ -406,7 +406,10 @@ fn place_sync(writer: &HostTexture, placed: &HostTexture, address: u64) -> Optio
     {
         return refuse("a format the host cannot copy as a texture");
     }
-    let key = (writer.texture.as_raw() as usize, placed.texture.as_raw() as usize);
+    let key = (
+        writer.texture.as_raw() as usize,
+        placed.texture.as_raw() as usize,
+    );
     {
         let map = PLACE_SYNCS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(cell) = map.as_ref().and_then(|m| m.get(&key))
@@ -573,14 +576,8 @@ pub(crate) fn sync_placed(list: &HostList, placed: This, view: &crate::descripto
         // SAFETY: an open list; both locations name live resources, and the
         // box is inside each subresource and the buffer (`placements`).
         unsafe {
-            list.list.CopyTextureRegion(
-                &staging,
-                0,
-                0,
-                0,
-                &source,
-                Some(&raw const sub.copy),
-            )
+            list.list
+                .CopyTextureRegion(&staging, 0, 0, 0, &source, Some(&raw const sub.copy))
         };
     }
     staging_barrier(list, &cell.buffer, COPY_DEST, COPY_SOURCE);
@@ -621,14 +618,8 @@ pub(crate) fn sync_placed(list: &HostList, placed: This, view: &crate::descripto
         // SAFETY: an open list; the staging buffer covers the subresource,
         // and the box is inside the placed copy's subresource.
         unsafe {
-            list.list.CopyTextureRegion(
-                &placed_at,
-                0,
-                0,
-                0,
-                &staging,
-                Some(&raw const sub.copy),
-            )
+            list.list
+                .CopyTextureRegion(&placed_at, 0, 0, 0, &staging, Some(&raw const sub.copy))
         };
     }
     staging_barrier(list, &cell.buffer, COPY_SOURCE, COPY_DEST);
@@ -1355,9 +1346,7 @@ mod tests {
         assert_eq!(subs[0].copy.bottom, 4);
         assert_eq!(subs[0].copy.back, 2);
         // The last row's bytes are inside the buffer, past the padded rows.
-        let last = subs[0].from.Offset
-            + 3 * u64::from(subs[0].from.Footprint.RowPitch)
-            + 8 * 4;
+        let last = subs[0].from.Offset + 3 * u64::from(subs[0].from.Footprint.RowPitch) + 8 * 4;
         assert!(last <= total, "{last} of {total}");
         // 8 bytes a texel (R16G16B16A16) does not hold the same texels.
         assert!(placements(&writer, &desc(10, 8, 4, 2, 1)).is_none());
@@ -1365,5 +1354,4 @@ mod tests {
         assert!(placements(&writer, &desc(67, 8, 4, 2, 2)).is_none());
         assert!(placements(&writer, &desc(67, 16, 4, 2, 1)).is_none());
     }
-
 }
