@@ -1132,7 +1132,8 @@ mod host {
 
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, MAPVK_VK_TO_VSC_EX, MapVirtualKeyW,
+        GetAsyncKeyState, GetKeyState, GetKeyboardLayout, HKL, MAPVK_VK_TO_VSC_EX, MapVirtualKeyW,
+        ToUnicodeEx,
     };
     use windows_sys::Win32::UI::Input::XboxController::{
         XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_BACK,
@@ -1231,6 +1232,7 @@ mod host {
                     .collect();
                 down.extend(held);
             }
+<<<<<<< ours
             down.into_iter().map(key_state).collect()
         }
 
@@ -1244,6 +1246,23 @@ mod host {
             {
                 Vec::new()
             }
+=======
+            let state = keyboard_state(&down, caps_lock());
+            let layout = layout();
+            down.iter()
+                .map(|&vk| {
+                    // SAFETY: plain query.
+                    let scan_code = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC_EX) };
+                    let (code_point, dead_key) = character(vk, scan_code, &state, layout);
+                    KeyState {
+                        scan_code,
+                        code_point,
+                        virtual_key: vk,
+                        dead_key,
+                    }
+                })
+                .collect()
+>>>>>>> theirs
         }
 
         fn rumble(&mut self, slot: usize, low: u16, high: u16) {
@@ -1295,6 +1314,82 @@ mod host {
             .collect()
     }
 
+    /// The keyboard state `ToUnicodeEx` reads with the keys `held` down:
+    /// each held key, the generic Shift, Ctrl and Alt from either side's key
+    /// (devices report sides only), and Caps Lock's toggle.
+    fn keyboard_state(held: &[u8], caps_lock: bool) -> [u8; 256] {
+        const DOWN: u8 = 0x80;
+        const TOGGLED: u8 = 1;
+        let mut state = [0u8; 256];
+        for &vk in held {
+            state[usize::from(vk)] = DOWN;
+            let generic = match vk {
+                0xA0 | 0xA1 => Some(0x10), // shift
+                0xA2 | 0xA3 => Some(0x11), // control
+                0xA4 | 0xA5 => Some(0x12), // alt
+                _ => None,
+            };
+            if let Some(g) = generic {
+                state[g] = DOWN;
+            }
+        }
+        if caps_lock {
+            state[0x14] |= TOGGLED;
+        }
+        state
+    }
+
+    fn caps_lock() -> bool {
+        // SAFETY: plain query.
+        let state = unsafe { GetKeyState(0x14) };
+        state & 1 != 0
+    }
+
+    /// The foreground window's keyboard layout (the title's while it has
+    /// focus; this thread's when there is no foreground window).
+    fn layout() -> HKL {
+        // SAFETY: plain queries; a null window gives thread 0, this thread.
+        unsafe {
+            GetKeyboardLayout(GetWindowThreadProcessId(
+                GetForegroundWindow(),
+                std::ptr::null_mut(),
+            ))
+        }
+    }
+
+    /// The character key `vk` types in `layout` with `state`: its code point
+    /// (0 when it types none, or several at once), and whether it is a dead
+    /// key, whose code point is then the accent's spacing form. Pending dead
+    /// keys are not combined: the thread's keyboard state is left alone.
+    fn character(vk: u8, scan_code: u32, state: &[u8; 256], layout: HKL) -> (u32, bool) {
+        /// `ToUnicodeEx` flag: keep the keyboard state (Windows 10 1607 on).
+        const KEEP_STATE: u32 = 4;
+        let mut text = [0u16; 8];
+        // SAFETY: the state is the 256 bytes the call reads; the buffer's
+        // length is passed with it.
+        let n = unsafe {
+            ToUnicodeEx(
+                u32::from(vk),
+                scan_code & 0xFF,
+                state.as_ptr(),
+                text.as_mut_ptr(),
+                text.len() as i32,
+                KEEP_STATE,
+                layout,
+            )
+        };
+        let units = match n {
+            0 => return (0, false),
+            ..0 => &text[..1],
+            n => &text[..(n as usize).min(text.len())],
+        };
+        let mut chars = char::decode_utf16(units.iter().copied());
+        match (chars.next(), chars.next()) {
+            (Some(Ok(c)), None) => (u32::from(c), n < 0),
+            _ => (0, false),
+        }
+    }
+
     /// The foreground window is one of ours (the title's or our fallback).
     fn focused() -> bool {
         let mut process = 0;
@@ -1325,6 +1420,32 @@ mod host {
             ),
             (1.0, -1.0, 1.0, 0.0)
         );
+    }
+
+    #[test]
+    fn either_sides_modifier_holds_the_generic_one() {
+        let state = keyboard_state(&[0xA1, 0xA2, 0x41], false);
+        for vk in [0xA1, 0x10, 0xA2, 0x11, 0x41] {
+            assert_eq!(state[vk], 0x80, "{vk:#x}");
+        }
+        for vk in [0xA0, 0xA3, 0x12, 0x14] {
+            assert_eq!(state[vk], 0, "{vk:#x}");
+        }
+        assert_eq!(keyboard_state(&[], true)[0x14], 1);
+    }
+
+    #[test]
+    fn keys_type_their_characters() {
+        // Space and Enter type the same in every layout; F1 types nothing.
+        let layout = layout();
+        let typed = |vk: u8, held: &[u8]| {
+            // SAFETY: plain query.
+            let scan = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC_EX) };
+            character(vk, scan, &keyboard_state(held, false), layout)
+        };
+        assert_eq!(typed(0x20, &[0x20]), (0x20, false));
+        assert_eq!(typed(0x0D, &[0x0D]), (0x0D, false));
+        assert_eq!(typed(0x70, &[0x70]), (0, false));
     }
 }
 
