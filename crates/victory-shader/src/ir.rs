@@ -189,8 +189,11 @@ pub fn build_bounded(
         let fallthrough = || block_at(next.ok_or(isa(machine.offset, "falls off the code"))?);
         // A conditional SOPP branch to fallthrough has no register effects
         // and contributes one edge to the join. Calls also use Flow::Branch
-        // but write a return address.
+        // but write a return address; the debug branches stay refused
+        // (`effects` has no lowering for them, and dropping one would accept
+        // an instruction we do not implement).
         if machine.encoding == gfx10::Encoding::Sopp
+            && !name.starts_with("s_cbranch_cdbg")
             && matches!(flow, Flow::Branch(target) if Some(target) == next)
         {
             blocks[b].exit = Exit::Jump(fallthrough()?);
@@ -1087,6 +1090,18 @@ mod tests {
 
     fn input(p: &Program, reg: Reg) -> Value {
         p.inputs.iter().find(|i| i.0 == reg).expect("input").1
+    }
+
+    #[test]
+    fn a_debug_branch_to_fallthrough_stays_refused() {
+        // s_cbranch_cdbgsys -> the next instruction; `effects` has no lowering
+        // for the debug branches, so the fold must not quietly drop it.
+        let code = [0xBF97_0000, S_ENDPGM];
+        let bytes: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
+        assert!(matches!(
+            build(&bytes, false, 256),
+            Err(ShaderError::Unsupported { .. })
+        ));
     }
 
     #[test]
