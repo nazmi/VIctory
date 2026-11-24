@@ -7411,30 +7411,26 @@ impl<'a> Lower<'a> {
                 regs.extend((0..dwords).map(|k| reg + k));
             }
         }
-        // With a16, two 16-bit components per VGPR, low half first, after
-        // the offset, bias and compare value, which keep a VGPR each (an f16
-        // bias in its low half).
-        let extra = name
-            .strip_prefix("image_sample")
-            .or_else(|| name.strip_prefix("image_gather4"))
-            .map_or(0, |rest| {
-                rest.split('_')
-                    .filter(|t| matches!(*t, "o" | "b" | "c"))
-                    .count()
-            });
-        let addr_val = |l: &mut Self, k: usize| -> Result<V, Why> {
-            let packed = *a16 && k >= extra;
+        // Full 32-bit address VGPR (offset, bias, reference, resinfo mip:
+        // always 32-bit even when `a16` is set).
+        let whole_val = |l: &mut Self, k: usize| -> Result<V, Why> {
+            let r = *regs.get(k).ok_or("an image address")?;
+            let v = inst.read(Reg::V(r)).ok_or("an image address")?;
+            l.i32_of(v)
+        };
+        // Component `k` starting at VGPR `base`: with `a16`, two 16-bit
+        // components per VGPR, low half first.
+        let packed_val = |l: &mut Self, base: usize, k: usize| -> Result<V, Why> {
             let r = *regs
-                .get(if packed { extra + (k - extra) / 2 } else { k })
+                .get(base + if *a16 { k / 2 } else { k })
                 .ok_or("an image address")?;
             let v = inst.read(Reg::V(r)).ok_or("an image address")?;
             let x = l.i32_of(v)?;
-            if !packed {
+            if !*a16 {
                 return Ok(x);
             }
             let c = l.cur;
-            let half = (k - extra) as u32 % 2;
-            let (sh, mask) = (l.s.m.i32(16 * half), l.s.m.i32(0xFFFF));
+            let (sh, mask) = (l.s.m.i32(16 * (k as u32 % 2)), l.s.m.i32(0xFFFF));
             let x = l.s.m.bin(c, Bin::LShr, x, sh);
             Ok(l.s.m.bin(c, Bin::And, x, mask))
         };
@@ -7484,7 +7480,7 @@ impl<'a> Lower<'a> {
             let iu = self.s.m.undef(self.s.t.i32);
             let mut cs = vec![iu; 3];
             for (k, slot) in cs.iter_mut().enumerate().take(coords) {
-                *slot = addr_val(self, k)?;
+                *slot = packed_val(self, 0, k)?;
             }
             let Operand::Vector { reg, .. } = *data else {
                 return Err("image atomic data");
@@ -7584,7 +7580,7 @@ impl<'a> Lower<'a> {
             let iu = self.s.m.undef(self.s.t.i32);
             let mut cs = vec![iu; 3];
             for (k, slot) in cs.iter_mut().enumerate().take(coords) {
-                *slot = addr_val(self, k)?;
+                *slot = packed_val(self, 0, k)?;
             }
             let Operand::Vector { reg, .. } = *data else {
                 return Err("image store data");
@@ -7648,7 +7644,7 @@ impl<'a> Lower<'a> {
             let mip = if uav {
                 self.s.m.undef(self.s.t.i32)
             } else {
-                addr_val(self, 0)?
+                whole_val(self, 0)?
             };
             let i32t = self.s.t.i32;
             let dims = self.s.m.named_struct("dx.types.Dimensions", vec![i32t; 4]);
@@ -7694,7 +7690,7 @@ impl<'a> Lower<'a> {
                 }
                 let n = 3 + usize::from(name.ends_with("_o"));
                 let a = (0..n)
-                    .map(|k| addr_val(self, k))
+                    .map(|k| whole_val(self, k))
                     .collect::<Result<Vec<_>, _>>()?;
                 let lod = inst.read(Reg::V(regs[n - 1])).ok_or("an image address")?;
                 return self.gather_at_level(inst, h, ss, &a, lod, guard);
@@ -7712,14 +7708,25 @@ impl<'a> Lower<'a> {
             let first =
                 usize::from(offset_word) + usize::from(name == "image_sample_b") + usize::from(cmp);
             // Coordinates the size divides (not the array slice); explicit
-            // gradients (x then y) come before the coordinates.
+            // gradients (x then y, each padded to whole VGPRs under a16) come
+            // after whole 32-bit words (`_o`, `_b`, `_c`) and before coordinates.
             let spatial = coords - usize::from(kind == 6 || kind == 7);
-            // (A cube's are two per direction, on the face.)
-            let grads = match op {
-                63 if kind == 5 => 4,
-                63 => 2 * spatial,
+            let deriv_stride = if *a16 { spatial.div_ceil(2) } else { spatial };
+            // `gfx10/fields.rs` pads each direction's gradients to whole
+            // VGPRs under a16; a cube's are two components per direction, on
+            // the face.
+            let derivs_regs = match op {
+                63 if kind == 5 => {
+                    if *a16 {
+                        2
+                    } else {
+                        4
+                    }
+                }
+                63 => 2 * deriv_stride,
                 _ => 0,
             };
+            let coords_base = first + derivs_regs;
             let mut cs = vec![fu; 4];
             // With a16, sampling coordinates and LOD are f16.
             let to_float = |l: &mut Self, x: V| {
@@ -7734,7 +7741,7 @@ impl<'a> Lower<'a> {
             // there, e.g. an unwritten register).
             let read = if op == 81 { spatial } else { coords };
             for (k, slot) in cs.iter_mut().enumerate().take(read) {
-                let x = addr_val(self, first + grads + k)?;
+                let x = packed_val(self, coords_base, k)?;
                 *slot = to_float(self, x);
             }
             if kind == 5 {
@@ -7796,7 +7803,7 @@ impl<'a> Lower<'a> {
                     if offset_word {
                         // DXIL takes immediate offsets in -8..=7; the
                         // console's are 6-bit and may be computed.
-                        let w = addr_val(self, 0)?;
+                        let w = whole_val(self, 0)?;
                         let w = self
                             .s
                             .m
@@ -7818,7 +7825,10 @@ impl<'a> Lower<'a> {
                         .op(c, "sample.f32", Attr::ReadOnly, self.s.t.res_ret, 60, &args)
                 }
                 61 => {
-                    let bias = addr_val(self, 0)?;
+                    // The bias is a whole VGPR (offset first with `_o`), an
+                    // f16 in its low half under a16: hardware samples at LOD
+                    // 1 from 0x3C00.
+                    let bias = whole_val(self, usize::from(offset_word))?;
                     let bias = to_float(self, bias);
                     args.extend(&os);
                     args.extend([bias, fu]);
@@ -7843,7 +7853,7 @@ impl<'a> Lower<'a> {
                     // a biased sampler meets a binding clamp.
                     let mut g = [fu; 4];
                     for (k, x) in g.iter_mut().enumerate() {
-                        let v = addr_val(self, first + k)?;
+                        let v = packed_val(self, first, k)?;
                         *x = to_float(self, v);
                     }
                     let i32t = self.s.t.i32;
@@ -7868,7 +7878,7 @@ impl<'a> Lower<'a> {
                     let l = self.unary(23, m);
                     let mut lod = self.s.m.bin(c, Bin::Mul, l, half);
                     if name.ends_with("_cl") {
-                        let x = addr_val(self, first + grads + coords)?;
+                        let x = packed_val(self, coords_base, coords)?;
                         let clamp = to_float(self, x);
                         lod = self.binary(35, lod, clamp);
                     }
@@ -7885,21 +7895,18 @@ impl<'a> Lower<'a> {
                 }
                 63 => {
                     // With a16 each direction's gradients start a VGPR.
-                    if *a16 && spatial % 2 == 1 {
-                        return Err("16-bit gradients of a 1D or 3D image");
-                    }
                     let mut g = vec![fu; 6];
                     for k in 0..spatial {
-                        let x = addr_val(self, first + k)?;
+                        let x = packed_val(self, first, k)?;
                         g[k] = to_float(self, x);
-                        let y = addr_val(self, first + spatial + k)?;
+                        let y = packed_val(self, first + deriv_stride, k)?;
                         g[3 + k] = to_float(self, y);
                     }
                     args.extend(&os);
                     args.extend(g);
                     // `_cl`: the least level of detail, after the coordinates.
                     let clamp = if name.ends_with("_cl") {
-                        let x = addr_val(self, first + grads + coords)?;
+                        let x = packed_val(self, coords_base, coords)?;
                         to_float(self, x)
                     } else {
                         fu
@@ -7915,7 +7922,7 @@ impl<'a> Lower<'a> {
                     )
                 }
                 64 | 65 => {
-                    let reference = addr_val(self, first - 1)?;
+                    let reference = whole_val(self, first - 1)?;
                     let reference = self.as_float(reference);
                     args.extend(&os);
                     args.push(reference);
@@ -7930,7 +7937,7 @@ impl<'a> Lower<'a> {
                 }
                 62 => {
                     let lod = if name == "image_sample_l" {
-                        let x = addr_val(self, coords)?;
+                        let x = packed_val(self, coords_base, coords)?;
                         to_float(self, x)
                     } else {
                         self.s.m.f32(0)
@@ -7954,7 +7961,7 @@ impl<'a> Lower<'a> {
                         return Err("a gather of several channels");
                     }
                     if offset_word {
-                        let w = addr_val(self, 0)?;
+                        let w = whole_val(self, 0)?;
                         for (k, at) in [(0, 26), (1, 18)] {
                             // Bits at..at+5 sign-extended: shift up, then down.
                             let left = self.s.m.i32(at);
@@ -7978,10 +7985,10 @@ impl<'a> Lower<'a> {
         } else {
             let mut cs = vec![iu; 3];
             for (k, slot) in cs.iter_mut().enumerate().take(coords) {
-                *slot = addr_val(self, k)?;
+                *slot = packed_val(self, 0, k)?;
             }
             let mip = if name == "image_load_mip" {
-                addr_val(self, coords)?
+                packed_val(self, 0, coords)?
             } else if uav {
                 // Our declarations have four channels.
                 self.s.flags |= flags::TYPED_UAV_LOADS;
