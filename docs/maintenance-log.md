@@ -228,6 +228,78 @@ SHA do not validate later code changes.
   Workflow now requires one Cargo target per worktree. A final fresh-target
   integration gate will replace any ambiguous shared-target evidence.
 
+### Wave 1 integrations: 2026-11-24 (35 PRs)
+
+Complete open-PR inventory re-run before this wave: 444 open PRs (13 drafts)
+across 5 REST pages, retrieved 2026-11-24; upstream `main` unchanged at
+`ffe310e`, so no PR is stale at its base. Every head fetched with
+`git fetch upstream '+refs/pull/*/head:refs/remotes/pr/*'` (612 refs).
+Trial merges with `git merge-tree --write-tree`: 328 apply cleanly, 116
+conflict.
+
+Each integration applies the PR's **net diff against its merge-base**
+(`git apply --3way`), runs `cargo test -p <affected crates> --locked` and
+`cargo xtask policy`, and commits with the original author plus a `-x`
+source trailer. Multi-commit PRs record every source SHA in the message.
+Four PRs needed hand merges; each is noted below.
+
+Wave gate at `aa370a59`: both required Clippy commands exit 0;
+`cargo test --workspace --locked` exit 0 with 394 passed, 9 ignored, 0 failed;
+`cargo xtask policy` 170 files ok; `git diff --check` exit 0. The ignored
+count rose from 6 to 9 because three PRs add `#[ignore]`d benchmarks; those
+are not counted as coverage.
+
+Dispositions in this wave: 35 `integrated-local`; 3 held as `deferred`
+(#132, #219, #312 — concrete review findings, listed under remainder).
+
+| PR | Source head | Local integration |
+| --- | --- | --- |
+| [#280](https://github.com/Marvisak/VIctory/pull/280) | `7ecc6209` | `25c43bc2` |
+| [#323](https://github.com/Marvisak/VIctory/pull/323) | `e08ac6a9` | `f71bd69d` |
+| [#345](https://github.com/Marvisak/VIctory/pull/345) | `177783ad` | `90a5dd2d` |
+| [#354](https://github.com/Marvisak/VIctory/pull/354) | `9f28f6b9` | `f2f21ab5` |
+| [#424](https://github.com/Marvisak/VIctory/pull/424) | `5b9a9b37` | `a751c8a3` |
+| [#494](https://github.com/Marvisak/VIctory/pull/494) | `0a96e1e0` | `d5a3f66e` |
+| [#532](https://github.com/Marvisak/VIctory/pull/532) | `aa50c7d6` | `f4d0697a` |
+| [#543](https://github.com/Marvisak/VIctory/pull/543) | `c9e5db87` | `95ee7d24` |
+| [#572](https://github.com/Marvisak/VIctory/pull/572) | `0a1a702b` | `34370fce` |
+| [#580](https://github.com/Marvisak/VIctory/pull/580) | `7ca84cc1` | `2db7897e` |
+| [#686](https://github.com/Marvisak/VIctory/pull/686) | `741d675c` | `aa0401c2` |
+| [#76](https://github.com/Marvisak/VIctory/pull/76) | `dea90ccc` | `f464bd96` |
+| [#96](https://github.com/Marvisak/VIctory/pull/96) | `ba42db64` | `bbf60d7f` |
+| [#114](https://github.com/Marvisak/VIctory/pull/114) | `0b729de6` | `5d8955e0` |
+| [#122](https://github.com/Marvisak/VIctory/pull/122) | `d01b1707` | `461c174f` |
+| [#133](https://github.com/Marvisak/VIctory/pull/133) | `01ae55a3` | `13e4e7fe` |
+| [#172](https://github.com/Marvisak/VIctory/pull/172) | `4eb0898b` | `5ba70891` |
+| [#182](https://github.com/Marvisak/VIctory/pull/182) | `18275322` | `aa370a59` |
+| [#183](https://github.com/Marvisak/VIctory/pull/183) | `d4d18220` | `a6df1a25` |
+| [#186](https://github.com/Marvisak/VIctory/pull/186) | `3c7d845b` | `791580b7` |
+| [#188](https://github.com/Marvisak/VIctory/pull/188) | `2a6e6a4b` | `85834d42` |
+| [#194](https://github.com/Marvisak/VIctory/pull/194) | `985d8d4b` | `7e18d623` |
+| [#197](https://github.com/Marvisak/VIctory/pull/197) | `64484b42` | `ade65f82` |
+| [#207](https://github.com/Marvisak/VIctory/pull/207) | `11ca3ce4` | `188340ae` |
+| [#214](https://github.com/Marvisak/VIctory/pull/214) | `9de712f5` | `ba88b6ef` |
+| [#221](https://github.com/Marvisak/VIctory/pull/221) | `acdcc416` | `18113a3c` |
+| [#228](https://github.com/Marvisak/VIctory/pull/228) | `09ff84b6` | `f53da6cc` |
+| [#247](https://github.com/Marvisak/VIctory/pull/247) | `5cff0007` | `2685c9ed` |
+| [#324](https://github.com/Marvisak/VIctory/pull/324) | `8fc3a1bb` | `f9eb3bf0` |
+| [#335](https://github.com/Marvisak/VIctory/pull/335) | `e3bef089` | `22309608` |
+| [#351](https://github.com/Marvisak/VIctory/pull/351) | `93a24b7c` | `e4b302b1` |
+| [#357](https://github.com/Marvisak/VIctory/pull/357) | `c6959acb` | `83bd896d` |
+| [#359](https://github.com/Marvisak/VIctory/pull/359) | `d549b639` | `e30d5d3b` |
+| [#361](https://github.com/Marvisak/VIctory/pull/361) | `3f5eff57` | `e9ca0d50` |
+| [#364](https://github.com/Marvisak/VIctory/pull/364) | `e5037565` | `6de0fa33` |
+
+Hand-merged:
+- #572 (README) and #323 (README + notes) conflicted with sections added
+  after their base; the PR text was preserved and the overlapping prose
+  merged by hand.
+- #182 conflicted with #133 in the same test module (`files.rs`); both tests
+  were kept, each in its own function, and `cargo test -p victory-hle` passed
+  afterwards (116 unit tests).
+- #345 was integrated as the net diff of its three commits, because its tip
+  commit edits a file an earlier commit in the same branch adds.
+
 ### Pending bounded PR candidates
 
 - The five curated candidates (#449, #480, #396, #629, #363, #337) are all
