@@ -1232,21 +1232,6 @@ mod host {
                     .collect();
                 down.extend(held);
             }
-<<<<<<< ours
-            down.into_iter().map(key_state).collect()
-        }
-
-        #[cfg(any(test, feature = "diagnostics"))]
-        fn scripted_keys(&mut self) -> Vec<KeyState> {
-            #[cfg(feature = "diagnostics")]
-            {
-                scripted().into_iter().map(key_state).collect()
-            }
-            #[cfg(not(feature = "diagnostics"))]
-            {
-                Vec::new()
-            }
-=======
             let state = keyboard_state(&down, caps_lock());
             let layout = layout();
             down.iter()
@@ -1262,7 +1247,18 @@ mod host {
                     }
                 })
                 .collect()
->>>>>>> theirs
+        }
+
+        #[cfg(any(test, feature = "diagnostics"))]
+        fn scripted_keys(&mut self) -> Vec<KeyState> {
+            #[cfg(feature = "diagnostics")]
+            {
+                scripted().into_iter().map(key_state).collect()
+            }
+            #[cfg(not(feature = "diagnostics"))]
+            {
+                Vec::new()
+            }
         }
 
         fn rumble(&mut self, slot: usize, low: u16, high: u16) {
