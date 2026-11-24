@@ -12,14 +12,14 @@ happened to each open PR". Per-worker accounting is in
 
 | Disposition | Count |
 | --- | --- |
-| integrated | 223 |
+| integrated | 229 |
 | rejected | 20 |
 | deferred | 8 |
 | held | 5 |
-| duplicate | 15 |
+| duplicate | 17 |
 | obsolete | 1 |
 | already-present | 1 |
-| not yet reviewed | 784 |
+| not yet reviewed | 776 |
 | total open | 1057 |
 
 A further 18 PRs are in the branch and no longer open upstream;
@@ -27,7 +27,7 @@ they are in [pr-integration-ledger.md](pr-integration-ledger.md).
 
 ## Read this before trusting a row
 
-**784 of 1057 have no reviewed disposition.** They are
+**776 of 1057 have no reviewed disposition.** They are
 listed rather than omitted so that silence is never read as approval.
 
 `integrated` means the change is in **this branch**, reviewed and tested when
@@ -166,7 +166,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1610 | `47a43871e562` | not yet reviewed | — |  | [BUNDLE] Eight more fixes carried from contributors' forks: #745 #776 #787 #8… |
 | #1609 | `1b9aad255916` | not yet reviewed | — |  | victory doctor: name the known problems a run shows, in plain words (stacked … |
 | #1608 | `ced51de047fe` | not yet reviewed | — |  | Shaders: single-round v_fma_mixlo_f16 and v_fma_mixhi_f16 to binary16 |
-| #1607 | `18c7561938da` | not yet reviewed | — |  | Formats: reject invalid GFX10 swizzle modes for 1D textures |
+| #1607 | `18c7561938da` | integrated | — |  | Formats: reject invalid GFX10 swizzle modes for 1D textures |
 | #1606 | `cc94388e2e2b` | not yet reviewed | — |  | Shaders: lower remaining 32-bit integer and bitwise LDS atomics |
 | #1604 | `e7134303bbb5` | not yet reviewed | — |  | GPU diagnostics: measure pipeline worker backlog during shared shader waits |
 | #1603 | `9ec15138f66e` | not yet reviewed | — |  | [BUNDLE] Four fixes carried from Peppacodes' fork: #762 #764 #765 #832 |
@@ -247,7 +247,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1493 | `cc0f47a4f4e5` | not yet reviewed | — |  | Shaders: key immediate samplers by comparison mode |
 | #1492 | `ea33d12b3f70` | not yet reviewed | — |  | [BUNDLE] Shader instruction lowering: 21 PRs, #98 #156 #162 #168 #169 #368 #3… |
 | #1491 | `28c91b91b015` | not yet reviewed | — |  | Shaders: the lane-condition search keeps the condition sets no lane meets |
-| #1490 | `7f01c33c966c` | not yet reviewed | — |  | HLE: recycle freed XMem page numbers |
+| #1490 | `7f01c33c966c` | integrated | — |  | HLE: recycle freed XMem page numbers |
 | #1489 | `e0a052c2bc07` | not yet reviewed | — |  | Shaders: lower image_gather4_c_lz and image_gather4_c_lz_o (MIMG 0x4f, 0x5f) |
 | #1488 | `62c4ded0ffba` | not yet reviewed | — |  | Shaders: lower ds_add{_rtn}_f32 and ds_cmpst{_rtn}_f32 LDS atomics |
 | #1487 | `1455884a28d7` | not yet reviewed | — |  | Shader tests: prefer high-performance hardware adapter in emit::host::Host::n… |
@@ -360,9 +360,9 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1365 | `a4c994bf574c` | not yet reviewed | — |  | Shaders: hardware test for s_bfm_b32 and s_bitset0/1_b32 |
 | #1364 | `26f70987e6ac` | not yet reviewed | — |  | Shaders: hardware test for s_mul_i32, s_mul_hi_u32 and s_mul_hi_i32 |
 | #1363 | `94874f2c8b08` | not yet reviewed | — |  | [BUNDLE] XAsync, kernel, lifecycle and DirectStorage HLE: #114 #122 #247 #109… |
-| #1362 | `c98c50f9c66e` | not yet reviewed | — |  | Shaders: hardware test for s_lshl1..4_add_u32 |
+| #1362 | `c98c50f9c66e` | integrated | — |  | Shaders: hardware test for s_lshl1..4_add_u32 |
 | #1361 | `8d6d06c342ef` | not yet reviewed | — |  | Shaders: hardware test for the scalar bit-scan, reverse and abs ops |
-| #1360 | `0e24b79ae220` | not yet reviewed | — |  | Shaders: hardware test for s_min_i32/u32 and s_max_i32/u32 |
+| #1360 | `0e24b79ae220` | integrated | — |  | Shaders: hardware test for s_min_i32/u32 and s_max_i32/u32 |
 | #1359 | `f2782f3d6319` | not yet reviewed | — |  | Shaders coalesce conditional branches to their fallthrough |
 | #1358 | `144b6203c05a` | not yet reviewed | — |  | [BUNDLE] XGameSave hardening: #228 #399 #570 #590 #1006 #1110 #1123 |
 | #1357 | `cdec26e9dd45` | not yet reviewed | — |  | HLE: native 4-motor Xbox impulse trigger haptics via Windows.Gaming.Input wit… |
@@ -423,7 +423,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1285 | `ac1a6e2a5181` | not yet reviewed | — |  | Shaders: fix 16-bit VALU SDWA placement/sext and inline float constants |
 | #1284 | `bea3a581e6ec` | not yet reviewed | — |  | Add experimental PC FSR upscaling |
 | #1283 | `b232b8838d52` | not yet reviewed | — |  | Clarify DRED reports when GPU progress is unknown |
-| #1282 | `1ed26e50d860` | not yet reviewed | — |  | Shaders: fold conditional branches to their fallthrough |
+| #1282 | `1ed26e50d860` | integrated | — |  | Shaders: fold conditional branches to their fallthrough |
 | #1281 | `72e794b6294c` | not yet reviewed | — |  | GPU/Shader: declare wave64 wave size and strip unsupported video-texture flags |
 | #1280 | `a93f1f12e0d2` | not yet reviewed | — |  | Shaders: gradient samples with a level clamp, and cube gradients in face space |
 | #1279 | `4dd4cfc8c006` | not yet reviewed | — |  | GPU: an argument clamp Wine's compiler builds too |
@@ -650,7 +650,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #975 | `78e2d19505bb` | integrated | `22e61383` | in the branch | HLE: add XGSuggestSwizzleMode TEXTURE_1D branch validation (fixes #868) |
 | #974 | `c1be75f7b799` | not yet reviewed | — |  | GPU: extend HostHeap wraparound search range to cursor bounds (fixes #871) |
 | #973 | `58ee9ad9e864` | not yet reviewed | — |  | Core: fix policy resolve trailing and verbatim dotdot folding (fixes #793) |
-| #972 | `886a867661bc` | not yet reviewed | — |  | HLE: enforce XSystemXboxLiveSandboxId minimum buffer size (fixes #862) |
+| #972 | `886a867661bc` | duplicate | — | already present: xsystem.rs:6 imports E_NOT_SUFFICIENT_BUFFER and :70 guards 16 bytes, with a test | HLE: enforce XSystemXboxLiveSandboxId minimum buffer size (fixes #862) |
 | #970 | `60222b335719` | not yet reviewed | — |  | GPU: aspect-aware concrete format resolution for typeless views (fixes #882, … |
 | #969 | `f3457f8350e9` | not yet reviewed | — |  | GPU: load the Agility SDK through ID3D12SDKConfiguration1 (#749) |
 | #968 | `34114063dce1` | not yet reviewed | — |  | GPU: load the DirectX 12 Agility SDK, and map the console's packed 16… |
@@ -823,7 +823,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #515 | `d9cb9085689f` | rejected | — | new tests reuse probe addresses against a process-global journal | GPU: ask for written pages allocation by allocation when a range spans several |
 | #514 | `8540a0ec3423` | not yet reviewed | — |  | fix(gpu): recheck uncommitted blocks before skipping writes |
 | #513 | `13aac0844da2` | obsolete | — | run::run() no longer takes title_args; the target block does not exist | App: forward title command-line arguments to run command |
-| #512 | `829f774722a6` | not yet reviewed | — |  | HLE: resolve ordinals on pseudo-module handles |
+| #512 | `829f774722a6` | duplicate | — | already at kernel.rs:166-176 for ordinals and pseudo-module resolution | HLE: resolve ordinals on pseudo-module handles |
 | #511 | `ff96ffe9644c` | not yet reviewed | — |  | Shaders: coalesce aligned constant-buffer loads |
 | #509 | `bfc60cfab5fb` | not yet reviewed | — |  | GPU: add an opt-in execution performance census |
 | #506 | `e80778cffa94` | not yet reviewed | — |  | CLI: reject zero shader translation workers |
@@ -919,7 +919,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #373 | `c000581df2cf` | integrated | `3fdb9879` | in the branch | Kernel: GetModuleFileName of a title image into a null buffer |
 | #370 | `936e5e51c91c` | integrated | `099c2f65` | in the branch | XGameUi: a text entry's limit is the console's |
 | #369 | `341782191c55` | not yet reviewed | — |  | Shaders: eliminate heap allocations during CFG traversal |
-| #368 | `f47ebd83f314` | not yet reviewed | — |  | Shaders: lower buffer cache invalidations as no-ops |
+| #368 | `f47ebd83f314` | integrated | — |  | Shaders: lower buffer cache invalidations as no-ops |
 | #364 | `e503756597ca` | integrated | `6de0fa33` | in the branch | XMA: accelerate VLC decoding with an eight-bit prefix lookup |
 | #363 | `fd44561ea118` | integrated | `4dbc5a71` | in the branch | Config: ignore an empty VICTORY_CONFIG |
 | #362 | `1e33e8838ca6` | not yet reviewed | — |  | Shader tests: use the Agility SDK runtime on Windows 10 (stacked on #175) |
