@@ -149,35 +149,51 @@ impl Shadow {
     /// 174 MB heap dozens of times), in reused memory (fresh snapshots cost
     /// ~2.3 million page faults per world frame).
     pub(crate) fn writing(&self, address: usize, len: usize) {
-        self.pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((address, address + len));
         let (from, to) = self.inside(address, len);
+        // The parts no earlier range of the submission declared: their
+        // refresh was free to bring the title's bytes into the copy (a
+        // refresh leaves declared ranges alone), and may just have.
+        let fresh = {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            let declared = pending.iter().map(|&(a, e)| self.inside(a, e - a));
+            let fresh = outside(from, to, declared.collect());
+            pending.push((address, address + len));
+            fresh
+        };
         // SAFETY: inside the mapping.
         let host = |a: usize, b: usize| unsafe { std::slice::from_raw_parts(self.data.add(a), b - a) };
         let mut before = self.before.lock().unwrap_or_else(|e| e.into_inner());
-        let (start, end) = match &*before {
-            Some((at, bytes)) => ((*at).min(from), (at + bytes.len()).max(to)),
-            None => (from, to),
+        let old = match &*before {
+            Some((at, bytes)) => (*at, at + bytes.len()),
+            None => (from, from),
         };
-        if let Some((at, bytes)) = &*before
-            && (*at, at + bytes.len()) == (start, end)
-        {
-            return;
-        }
-        // Parts newly covered from the copy, the rest as it was taken.
-        let mut grown = pooled(end - start);
-        match before.take() {
-            Some((at, bytes)) => {
-                grown.extend_from_slice(host(start, at));
-                grown.extend_from_slice(&bytes);
-                grown.extend_from_slice(host(at + bytes.len(), end));
-                give_back(bytes);
+        let (start, end) = (old.0.min(from), old.1.max(to));
+        if (start, end) != old {
+            // Parts newly covered from the copy, the rest as it was taken.
+            let mut grown = pooled(end - start);
+            match before.take() {
+                Some((at, bytes)) => {
+                    grown.extend_from_slice(host(start, at));
+                    grown.extend_from_slice(&bytes);
+                    grown.extend_from_slice(host(at + bytes.len(), end));
+                    give_back(bytes);
+                }
+                None => grown.extend_from_slice(host(start, end)),
             }
-            None => grown.extend_from_slice(host(start, end)),
+            *before = Some((start, grown));
         }
-        *before = Some((start, grown));
+        // What the snapshot already held of the fresh parts (it spans the
+        // gaps between the ranges declared so far) was taken before their
+        // refresh: taken again, or the refresh would pass for a shader's
+        // write and go back over what the title writes meanwhile.
+        if let Some((at, bytes)) = &mut *before {
+            for (a, e) in fresh {
+                let (a, e) = (a.max(old.0), e.min(old.1));
+                if a < e {
+                    bytes[a - *at..e - *at].copy_from_slice(host(a, e));
+                }
+            }
+        }
     }
 
     /// After the submission ran: copies the bytes its shaders wrote back
@@ -192,12 +208,12 @@ impl Shadow {
         let mut written = 0;
         let (from, to) = self.inside(address, len);
         let start = self.start as usize;
-        if let Some((taken, before)) = &*snapshot
+        if let Some((taken, before)) = &mut *snapshot
             && *taken <= from
-            && to <= taken + before.len()
+            && to <= *taken + before.len()
             && from < to
         {
-            let before = &before[from - taken..to - taken];
+            let before = &mut before[from - *taken..to - *taken];
             // By 64 KiB piece: the copy compared with its bytes before the
             // submission, title memory read only where the GPU wrote.
             const PIECE: usize = 64 << 10;
@@ -209,11 +225,13 @@ impl Shadow {
                 // SAFETY: inside the mapping; only the submitting thread
                 // writes it.
                 let host = unsafe { std::slice::from_raw_parts_mut(self.data.add(at), n) };
-                let old = &before[at - from..at - from + n];
+                let old = &mut before[at - from..at - from + n];
                 let title = &mut title[..n];
                 if host != old && crate::host::read_into((start + at) as *const u8, title) {
                     // Title memory with the GPU's bytes put in; the copy
-                    // takes the title's bytes in turn.
+                    // takes the title's bytes in turn, and so does the
+                    // snapshot: to a later range that overlaps this one,
+                    // they are not a shader's write to put back.
                     let mut changed = false;
                     for ((t, h), o) in title.iter_mut().zip(host.iter_mut()).zip(old) {
                         if *h != *o && *t != *h {
@@ -221,6 +239,7 @@ impl Shadow {
                             changed = true;
                         }
                         *h = *t;
+                        *o = *t;
                     }
                     if changed {
                         crate::watch::writing(start + at, n);
@@ -365,6 +384,22 @@ impl Shadow {
     }
 }
 
+/// The parts of `[from, to)` outside every range in `ranges`, in order.
+fn outside(from: usize, to: usize, mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    ranges.sort_unstable();
+    let (mut at, mut parts) = (from, Vec::new());
+    for (a, e) in ranges {
+        if at < to && a > at {
+            parts.push((at, a.min(to)));
+        }
+        at = at.max(e);
+    }
+    if at < to {
+        parts.push((at, to));
+    }
+    parts
+}
+
 struct Entry {
     end: u64,
     shadow: Option<Arc<Shadow>>,
@@ -496,4 +531,95 @@ pub(crate) fn near(va: u64) -> String {
         ));
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Three pages of title memory on page bounds (plain heap memory, so
+    /// not write-watched: refreshes copy whole ranges) and their host
+    /// copy; `None` without a host GPU. Returns the memory's owner, the
+    /// address of the first page and the copy.
+    fn title() -> Option<(Vec<u8>, usize, Shadow)> {
+        let memory = vec![0u8; 4 * PAGE];
+        let base = (memory.as_ptr() as usize).next_multiple_of(PAGE);
+        let (buffer, data) = host()?.shared_buffer(3 * PAGE as u64)?;
+        // SAFETY: a live buffer.
+        let gpu = unsafe { buffer.GetGPUVirtualAddress() };
+        let shadow = Shadow::new(buffer, data, gpu, base as u64, 3 * PAGE as u64);
+        Some((memory, base, shadow))
+    }
+
+    /// A write of one byte: the title's into its memory, or a shader's
+    /// into the copy.
+    fn poke(at: usize, value: u8) {
+        // SAFETY: the tests pass addresses inside the memory or the copy.
+        unsafe { (at as *mut u8).write_volatile(value) }
+    }
+
+    fn peek(at: usize) -> u8 {
+        // SAFETY: as in `poke`.
+        unsafe { (at as *const u8).read_volatile() }
+    }
+
+    /// A range declared after ranges on both sides of it, once the snapshot
+    /// already spans it: what its refresh brought into the copy is not a
+    /// shader's write, and does not go back over what the title wrote since.
+    #[test]
+    fn a_range_between_earlier_ones_keeps_the_titles_newer_bytes() {
+        let Some((_memory, base, s)) = title() else {
+            return; // no host GPU here
+        };
+        let (a, b, c) = (base, base + PAGE, base + 2 * PAGE);
+        let copy = |at: usize| s.data as usize + (at - base);
+        // An earlier submission read the middle page; the title has written
+        // it since.
+        s.update(b, PAGE);
+        poke(b + 5, 1);
+        poke(b + 6, 3);
+        // This submission's shaders write the outer pages, then the middle
+        // one: each range refreshed, then declared.
+        for at in [a, c, b] {
+            s.update(at, PAGE);
+            s.writing(at, PAGE);
+        }
+        assert_eq!(peek(copy(b + 5)), 1, "the refresh");
+        // While the GPU runs: a shader writes two bytes, the title one.
+        poke(copy(a + 7), 9);
+        poke(copy(b + 9), 7);
+        poke(b + 5, 2);
+        for at in [a, c, b] {
+            s.copy_back(at, PAGE);
+        }
+        assert_eq!(peek(b + 5), 2, "the title's newer byte");
+        assert_eq!(peek(b + 6), 3, "the title's byte from before");
+        // What the shader wrote does go back, in either kind of range.
+        assert_eq!((peek(a + 7), peek(b + 9)), (9, 7));
+        assert!(s.before.lock().unwrap().is_none(), "the snapshot is done");
+    }
+
+    /// Two declared ranges that overlap: the first one's copy-back gives
+    /// the copy the title's bytes, which the second must not take for a
+    /// shader's and put back over what the title wrote in between.
+    #[test]
+    fn overlapping_ranges_keep_the_titles_newer_bytes() {
+        let Some((_memory, base, s)) = title() else {
+            return; // no host GPU here
+        };
+        let copy = |at: usize| s.data as usize + (at - base);
+        s.update(base, 2 * PAGE);
+        s.writing(base, PAGE);
+        s.writing(base, 2 * PAGE);
+        // While the GPU runs: a shader's byte and the title's, in one page.
+        poke(copy(base + 3), 9);
+        poke(base + 8, 1);
+        s.copy_back(base, PAGE);
+        assert_eq!((peek(base + 3), peek(base + 8)), (9, 1));
+        // The title writes its byte again before the second range's turn.
+        poke(base + 8, 2);
+        s.copy_back(base, 2 * PAGE);
+        assert_eq!(peek(base + 8), 2, "the title's newer byte");
+        assert_eq!(peek(base + 3), 9, "the shader's byte");
+    }
 }
