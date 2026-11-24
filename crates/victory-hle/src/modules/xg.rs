@@ -693,6 +693,18 @@ mod tests {
         d.flags = ALLOW_DEPTH_STENCIL;
         XGSuggestSwizzleMode(&d, 0, &mut out);
         assert_eq!(out, 0x118);
+
+        // TEXTURE_1D -> LINEAR (0x100) regardless of flags.
+        let mut d1d = desc(256, 1, 1, 10, 0);
+        d1d.dimension = TEXTURE_1D;
+        assert_eq!(XGSuggestSwizzleMode(&d1d, 0, &mut out), S_OK);
+        assert_eq!(out, 0x100);
+        d1d.flags = ALLOW_RENDER_TARGET;
+        assert_eq!(XGSuggestSwizzleMode(&d1d, 0, &mut out), S_OK);
+        assert_eq!(out, 0x100);
+        d1d.flags = ALLOW_DEPTH_STENCIL;
+        assert_eq!(XGSuggestSwizzleMode(&d1d, 0, &mut out), S_OK);
+        assert_eq!(out, 0x100);
     }
 
     /// The title's calls: layout, then a copy in and out of each mip.
