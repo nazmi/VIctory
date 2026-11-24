@@ -56,12 +56,16 @@ pub struct Instruction {
     pub opcode: u16,
     /// Every dword of the instruction, including literals and extra dwords.
     pub words: Vec<u32>,
+    /// [`name`] of `encoding` and `opcode`, resolved once at decode time.
+    /// The translator asks about every instruction eight times; the table is
+    /// a binary search.
+    name: Option<&'static str>,
 }
 
 impl Instruction {
     /// AMD's name for the opcode, if it is in our table.
     pub fn name(&self) -> Option<&'static str> {
-        name(self.encoding, self.opcode)
+        self.name
     }
 }
 
@@ -282,11 +286,13 @@ fn instruction(code: &[u8], offset: usize) -> Result<Instruction, ShaderError> {
             _ => return Err(isa(offset, "unknown encoding")),
         }
     };
+    let opcode = opcode as u16;
     Ok(Instruction {
         offset,
         encoding,
-        opcode: opcode as u16,
+        opcode,
         words: (0..len).map(word).collect::<Result<_, _>>()?,
+        name: name(encoding, opcode),
     })
 }
 
@@ -406,6 +412,32 @@ mod tests {
                 (44, 1, "s_endpgm"),
             ]
         );
+    }
+
+    #[test]
+    fn the_cached_name_is_the_table_entry() {
+        let code = [
+            0xBE80_03FF,
+            0x3F80_0000, // s_mov_b32 s0, literal
+            0x0600_0000, // v_add_f32 v0, s0, v0
+            0xD54B_0000,
+            0x03FE_0000,
+            0x4000_0000, // v_fma_f32 with a literal src2
+            0xF080_0F0A,
+            0,
+            0, // image_sample (2D) with one extra address dword
+            0xF800_080F,
+            0, // exp
+            S_ENDPGM,
+        ];
+        // The name is resolved once, from the fields it derives from: after
+        // that it is a field, and must still be the table's answer for the
+        // instruction's own encoding and opcode.
+        let program = decode(&bytes(&code)).unwrap();
+        assert_eq!(program.len(), 6);
+        for i in program {
+            assert_eq!(i.name(), name(i.encoding, i.opcode), "{:#x}", i.offset);
+        }
     }
 
     #[test]

@@ -185,15 +185,18 @@ pub(crate) fn bound(
     true
 }
 
-/// After the execution: the buffer back to unordered access, where the
-/// title's passes keep using it.
+/// After the execution: the buffer back to the common state, which title
+/// buffers' host copies are kept in, so the list's later uses of it (vertex
+/// data, shader reads and writes) promote it again. Left in unordered
+/// access, a later vertex or shader-resource read in the list would find it
+/// in a state that does not allow that read.
 pub(crate) fn done(list: &HostList, buffer: &ID3D12Resource) {
     // SAFETY: an open list and a live buffer.
     unsafe {
         list.list.ResourceBarrier(&[transition(
             buffer,
             D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_COMMON,
         )])
     };
 }

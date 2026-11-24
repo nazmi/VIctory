@@ -97,7 +97,7 @@ export VICTORY_GAME_DIR='/d/Xbox Titles/My Game'
 cargo xtask install-hooks                # asset-policy check on every commit
 cp victory.example.toml victory.toml     # then set your paths (outside the repo)
 cargo build --release -p victory
-cargo test --workspace                   # needs no game data
+cargo test --workspace -- --test-threads=1 # serializes D3D12 tests; no game data
 ./target/release/victory.exe config      # check your paths
 ./target/release/victory.exe translate --cache --pipelines "$VICTORY_GAME_DIR/shaders.rpf" "$VICTORY_GAME_DIR/game_scarlett_master.exe" "$VICTORY_GAME_DIR/XboxBvhBuilder.dll" "$VICTORY_GAME_DIR/amd_fidelityfx_upscaler_xbox.dll"
 ./target/release/victory.exe run "$VICTORY_GAME_DIR/game_scarlett_master.exe" --execute
