@@ -17,9 +17,18 @@ jobs:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      # Installs the toolchain that rust-toolchain.toml gives, with its
-      # components, so CI uses the same rustfmt as local builds.
-      - name: Install the toolchain
-        run: rustup toolchain install
+      # `rust-toolchain.toml` pins the host triple (…-pc-windows-msvc), which
+      # cannot run on this runner. Install the same release with this host's
+      # triple instead, so the rustfmt version still matches local builds.
+      - name: Install rustfmt
+        run: |
+          version="$(grep -oE '^channel = "[0-9]+\.[0-9]+\.[0-9]+' rust-toolchain.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+          if [ -z "$version" ]; then
+            echo "no release version in rust-toolchain.toml"
+            exit 1
+          fi
+          echo "using rustfmt from $version"
+          rustup toolchain install "$version" --profile minimal --component rustfmt
+          echo "RUSTFMT_VERSION=$version" >> "$GITHUB_ENV"
       - name: Check the formatting
-        run: cargo fmt --all -- --check
+        run: cargo +"$RUSTFMT_VERSION" fmt --all -- --check
