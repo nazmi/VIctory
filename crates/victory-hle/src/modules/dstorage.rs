@@ -118,7 +118,7 @@ extern "system" fn open_file(_: Factory, path: *const u16, iid: *const Guid, out
     const GENERIC_READ: u32 = 0x8000_0000;
     const FILE_SHARE_READ: u32 = 1;
     const OPEN_EXISTING: u32 = 3;
-    if path.is_null() {
+    if path.is_null() || out.is_null() {
         return E_INVALIDARG;
     }
     // Goes through `files`, so paths on our virtual drives work too.
@@ -156,6 +156,9 @@ extern "system" fn create_status_array(
     iid: *const Guid,
     out: Out,
 ) -> HRESULT {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
     tracing::info!(
         capacity,
         name = text(name),
@@ -187,6 +190,9 @@ extern "system" fn create_queue(
     iid: *const Guid,
     out: Out,
 ) -> HRESULT {
+    if out.is_null() {
+        return E_INVALIDARG;
+    }
     // SAFETY: the title passes its description (null tolerated).
     let Some(desc) = (unsafe { desc.as_ref() }) else {
         return E_INVALIDARG;
@@ -368,7 +374,7 @@ struct Lane {
     unsubmitted: Vec<Command>,
     /// Submitted, by sequence number: reads not started, status entries
     /// not written, reads running, and failures not yet reported.
-    reads: VecDeque<(u64, Request)>,
+    reads: VecDeque<(u64, QueuedRead)>,
     statuses: VecDeque<(u64, Status)>,
     running: BTreeSet<u64>,
     failures: BTreeMap<u64, HRESULT>,
@@ -376,15 +382,15 @@ struct Lane {
 }
 
 // SAFETY: requests point into title memory and our own objects, which stay
-// valid until the title has seen them complete; status arrays count their
-// references atomically.
+// valid until the title has seen them complete; file objects and status
+// arrays count their references atomically.
 unsafe impl Send for Lane {}
 
 /// A read a worker runs.
 struct Job {
     lane: u64,
     seq: u64,
-    request: Request,
+    read: QueuedRead,
     staging: u64,
 }
 
@@ -444,13 +450,16 @@ impl Scheduler {
 fn work(scheduler: &'static Scheduler) {
     let mut lanes = scheduler.lock();
     loop {
-        let Some(job) = lanes.start() else {
+        let Some(mut job) = lanes.start() else {
             lanes = scheduler.work.wait(lanes).unwrap_or_else(|e| e.into_inner());
             continue;
         };
         drop(lanes);
         let started = std::time::Instant::now();
-        let result = execute(&job.request);
+        let result = execute(&job.read.request);
+        // Release the file reference outside the lock and before signalling
+        // completion on the status array.
+        job.read.release_file();
         lanes = scheduler.lock();
         lanes.finish(&job, result);
         lanes.count(&job, started);
@@ -466,10 +475,10 @@ impl Lanes {
     fn count(&mut self, job: &Job, started: std::time::Instant) {
         let (requests, bytes, busy) = &mut self.done;
         *requests += 1;
-        *bytes += u64::from(job.request.destination_size);
+        *bytes += u64::from(job.read.request.destination_size);
         *busy += started.elapsed();
-        if job.request.options & BCPACK != 0 {
-            self.bcpack.0 += u64::from(job.request.destination_size);
+        if job.read.request.options & BCPACK != 0 {
+            self.bcpack.0 += u64::from(job.read.request.destination_size);
             self.bcpack.1 += started.elapsed();
         }
         let since = *self.since.get_or_insert(started);
@@ -506,17 +515,17 @@ impl Lanes {
             .filter_map(|(&id, l)| Some((l.clock, l.reads.front()?.0, id)))
             .min()?;
         let lane = self.lanes.get_mut(&id)?;
-        let &(seq, request) = lane.reads.front()?;
-        let staging = staging_bytes(&request);
+        let (_, read) = lane.reads.front()?;
+        let staging = staging_bytes(&read.request);
         if self.staged > 0 && self.staged + staging > self.staging {
             self.starved = true;
             self.refused += 1;
             return None;
         }
-        lane.reads.pop_front();
+        let (seq, read) = lane.reads.pop_front()?;
         lane.running.insert(seq);
         self.staged += staging;
-        let size = u64::from(request.destination_size.max(request.source_size)).max(1);
+        let size = u64::from(read.request.destination_size.max(read.request.source_size)).max(1);
         self.now = self.clock[class];
         self.clock[class] += size * COST[class];
         self.lane_now[class] = lane.clock;
@@ -524,7 +533,7 @@ impl Lanes {
         Some(Job {
             lane: id,
             seq,
-            request,
+            read,
             staging,
         })
     }
@@ -686,8 +695,38 @@ const MEMORY_SOURCE: u64 = 1 << 22;
 const PAGE: usize = 64 * 1024;
 
 enum Command {
-    Read(Request),
+    Read(QueuedRead),
     Status(Status),
+}
+
+/// A read request holding a reference on its file object (when not reading
+/// from memory) until the read completes or is discarded.
+struct QueuedRead {
+    request: Request,
+    file: Option<*mut Instance<File>>,
+}
+
+impl QueuedRead {
+    fn new(request: Request) -> Self {
+        let file = (request.options & MEMORY_SOURCE == 0 && !request.source.is_null()).then(|| {
+            let file = request.source.cast::<Instance<File>>().cast_mut();
+            add_ref_instance(file);
+            file
+        });
+        Self { request, file }
+    }
+
+    fn release_file(&mut self) {
+        if let Some(file) = self.file.take() {
+            release(file);
+        }
+    }
+}
+
+impl Drop for QueuedRead {
+    fn drop(&mut self) {
+        self.release_file();
+    }
 }
 
 
@@ -715,7 +754,7 @@ extern "system" fn enqueue_request(this: QueueRef, request: *const Request) {
     let Some(&request) = (unsafe { request.as_ref() }) else {
         return;
     };
-    queue(this, Command::Read(request));
+    queue(this, Command::Read(QueuedRead::new(request)));
 }
 
 extern "system" fn enqueue_status(this: QueueRef, array: Array, index: u32) {
@@ -920,7 +959,11 @@ fn read_into(request: &Request, out: &mut [u8]) -> Result<(), HRESULT> {
         out.copy_from_slice(unsafe { std::slice::from_raw_parts(request.source.cast(), out.len()) });
         return Ok(());
     }
-    // SAFETY: a file object we created; the title keeps it open.
+    if request.source.is_null() {
+        return Err(E_INVALIDARG);
+    }
+    // SAFETY: a file object we created; `QueuedRead` holds a reference for
+    // the lifetime of the request.
     let file = &unsafe { &*request.source.cast::<Instance<File>>() }
         .state
         .file;
@@ -1276,7 +1319,7 @@ mod tests {
         let mut r = request(options, std::ptr::null_mut(), 0, std::ptr::null(), 0, 0);
         (r.destination_size, r.source_size) = (size, size);
         let lane = lanes.lanes.get_mut(&id).unwrap();
-        lane.unsubmitted.push(Command::Read(r));
+        lane.unsubmitted.push(Command::Read(QueuedRead::new(r)));
     }
 
     #[test]
@@ -1563,5 +1606,101 @@ mod tests {
         }
         assert_eq!(xmem::XMemFreePhysicalPages(3, a.as_ptr()), 1);
         assert_eq!(xmem::XMemFreePhysicalPages(1, b.as_ptr()), 1);
+    }
+
+    #[test]
+    fn file_released_after_enqueue_stays_alive_until_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("released.bin");
+        let payload = pattern(128);
+        std::fs::write(&path, &payload).unwrap();
+        let file = open(&path);
+        let (queue, array) = (new_queue(0), status_array(1));
+        let mut out = [0u8; 64];
+
+        enqueue(queue, &request(0, out.as_mut_ptr().cast(), 64, file, 32, 64));
+        // Release the caller's reference immediately after enqueueing; the queue
+        // must still hold its own reference (refcount drops from 2 to 1).
+        let release_com: extern "system" fn(*mut c_void) -> u32 = call(file, 0x10);
+        assert_eq!(release_com(file), 1);
+
+        enqueue_status(queue, array, 0);
+        void(queue, 0x30);
+        assert_eq!(wait(array, 0), S_OK);
+        assert_eq!(out, payload[32..96]);
+        // The worker released the file handle before signalling completion, so
+        // removing the file succeeds without sharing violations.
+        std::fs::remove_file(&path).unwrap();
+        void(queue, 0x40);
+    }
+
+    #[test]
+    fn file_released_after_enqueue_on_closed_queue_drops_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("discarded.bin");
+        std::fs::write(&path, pattern(64)).unwrap();
+        let file = open(&path);
+        let queue = new_queue(0);
+        let mut out = [0u8; 16];
+
+        enqueue(queue, &request(0, out.as_mut_ptr().cast(), 16, file, 0, 16));
+        let release_com: extern "system" fn(*mut c_void) -> u32 = call(file, 0x10);
+        assert_eq!(release_com(file), 1);
+
+        // Close without submitting: the unsubmitted read drops its reference
+        // and closes the OS handle.
+        void(queue, 0x40);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn factory_methods_reject_null_out_without_leaking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("null_out.bin");
+        std::fs::write(&path, b"hello").unwrap();
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+
+        let open_fn: extern "system" fn(*mut c_void, *const u16, *const Guid, Out) -> HRESULT =
+            call(factory(), 0x20);
+        assert_eq!(
+            open_fn(factory(), wide.as_ptr(), std::ptr::null(), std::ptr::null_mut()),
+            E_INVALIDARG
+        );
+        // No leaked OS file handle.
+        std::fs::remove_file(&path).unwrap();
+
+        let status_fn: extern "system" fn(
+            *mut c_void,
+            u32,
+            *const c_char,
+            *const Guid,
+            Out,
+        ) -> HRESULT = call(factory(), 0x28);
+        assert_eq!(
+            status_fn(
+                factory(),
+                4,
+                c"null".as_ptr(),
+                std::ptr::null(),
+                std::ptr::null_mut()
+            ),
+            E_INVALIDARG
+        );
+
+        let queue_fn: extern "system" fn(*mut c_void, *const QueueDesc, *const Guid, Out) -> HRESULT =
+            call(factory(), 0x50);
+        let desc = QueueDesc {
+            source_type: 0,
+            capacity: 4,
+            priority: 0,
+            name: c"null".as_ptr(),
+            unknown: 1,
+        };
+        let lanes_before = scheduler().unwrap().lock().lanes.len();
+        assert_eq!(
+            queue_fn(factory(), &desc, std::ptr::null(), std::ptr::null_mut()),
+            E_INVALIDARG
+        );
+        assert_eq!(scheduler().unwrap().lock().lanes.len(), lanes_before);
     }
 }
