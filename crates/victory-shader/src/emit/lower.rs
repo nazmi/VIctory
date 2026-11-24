@@ -1779,6 +1779,89 @@ impl<'a> Lower<'a> {
         self.s.m.bin(c, Bin::Or, r, sign)
     }
 
+    /// `f` as a 16-bit snorm (`signed`) or unorm in the low bits, the high
+    /// bits 0: clamped to [-1, 1] or [0, 1], scaled by 32767 or 65535 and
+    /// rounded to nearest even once, from the exact product. NaN gives 0.
+    ///
+    /// The product is formed in integers from the float's bits: in f32,
+    /// `x * 32767` can need up to 39 significant bits and would round
+    /// before the rounding to an integer. Denormals give 0 (below 2^-126,
+    /// the scaled value is far under one half).
+    fn norm16(&mut self, f: V, signed: bool) -> V {
+        let c = self.cur;
+        let (i32t, i64t) = (self.s.t.i32, self.s.m.int(64));
+        self.s.flags |= flags::INT64;
+        let k = |l: &mut Self, v: u32| l.s.m.i32(v);
+        let k64 = |l: &mut Self, v: i64| l.s.m.int_const(i64t, v);
+        let max: u32 = if signed { 0x7FFF } else { 0xFFFF };
+        let bits = self.as_int(f);
+        let abs_mask = k(self, 0x7FFF_FFFF);
+        let mag = self.s.m.bin(c, Bin::And, bits, abs_mask);
+        // Exponent 1..=126 (magnitudes in [2^-126, 1)); the rest below.
+        let exp = {
+            let k23 = k(self, 23);
+            self.s.m.bin(c, Bin::LShr, mag, k23)
+        };
+        let mant = {
+            let m = k(self, 0x7F_FFFF);
+            let one = k(self, 0x80_0000);
+            let m = self.s.m.bin(c, Bin::And, mag, m);
+            self.s.m.bin(c, Bin::Or, m, one)
+        };
+        let mant = self.s.m.cast(c, Cast::ZExt, mant, i64t);
+        let scale = k64(self, i64::from(max));
+        let p = self.s.m.bin(c, Bin::Mul, mant, scale);
+        // The value is p / 2^s with s = 150 - exp, at least 24. From s = 41
+        // on, p < 2^40 is under one half of 2^s: capping s at 63 keeps the
+        // shifts defined and the result (0) the same.
+        let s = {
+            let k150 = k(self, 150);
+            let s = self.s.m.bin(c, Bin::Sub, k150, exp);
+            let k63 = k(self, 63);
+            let big = self.s.m.cmp(c, pred::IUGT, s, k63);
+            let s = self.s.m.select(c, big, k63, s);
+            self.s.m.cast(c, Cast::ZExt, s, i64t)
+        };
+        let q = self.s.m.bin(c, Bin::LShr, p, s);
+        let one = k64(self, 1);
+        let unit = self.s.m.bin(c, Bin::Shl, one, s);
+        let low = self.s.m.bin(c, Bin::Sub, unit, one);
+        let rem = self.s.m.bin(c, Bin::And, p, low);
+        let half = self.s.m.bin(c, Bin::LShr, unit, one);
+        let above = self.s.m.cmp(c, pred::IUGT, rem, half);
+        let tie = self.s.m.cmp(c, pred::EQ, rem, half);
+        let odd = self.s.m.bin(c, Bin::And, q, one);
+        let zero64 = k64(self, 0);
+        let odd = self.s.m.cmp(c, pred::NE, odd, zero64);
+        let tie_up = self.s.m.bin(c, Bin::And, tie, odd);
+        let up = self.s.m.bin(c, Bin::Or, above, tie_up);
+        let up = self.s.m.cast(c, Cast::ZExt, up, i64t);
+        let n = self.s.m.bin(c, Bin::Add, q, up);
+        let n = self.s.m.cast(c, Cast::Trunc, n, i32t);
+        // Magnitudes of 1 and more (and infinity) give the maximum; below
+        // 2^-126 (zero, denormals) 0; NaN 0.
+        let one_f = k(self, 0x3F80_0000);
+        let sat = self.s.m.cmp(c, pred::IUGE, mag, one_f);
+        let kmax = k(self, max);
+        let n = self.s.m.select(c, sat, kmax, n);
+        let zero = k(self, 0);
+        let tiny = self.s.m.cmp(c, pred::EQ, exp, zero);
+        let n = self.s.m.select(c, tiny, zero, n);
+        let inf = k(self, 0x7F80_0000);
+        let nan = self.s.m.cmp(c, pred::IUGT, mag, inf);
+        let n = self.s.m.select(c, nan, zero, n);
+        // The sign: negated for snorm, 0 for unorm.
+        let neg = self.s.m.cmp(c, pred::NE, mag, bits);
+        if signed {
+            let minus = self.s.m.bin(c, Bin::Sub, zero, n);
+            let r = self.s.m.select(c, neg, minus, n);
+            let ffff = k(self, 0xFFFF);
+            self.s.m.bin(c, Bin::And, r, ffff)
+        } else {
+            self.s.m.select(c, neg, zero, n)
+        }
+    }
+
     /// `f` as an f16 in the low bits, rounded toward zero: the nearest-even
     /// conversion, one step back toward zero where it rounded away (which
     /// also turns an overflow to infinity into the largest finite half).
@@ -4956,6 +5039,25 @@ impl<'a> Lower<'a> {
                 let x = self.s.m.bin(c, Bin::Or, old, h);
                 self.write(inst, Reg::V(reg), x, guard);
                 Ok(())
+            }
+            "v_cvt_pknorm_i16_f32"
+            | "v_cvt_pknorm_u16_f32"
+            | "v_cvt_pknorm_i16_f16"
+            | "v_cvt_pknorm_u16_f16" => {
+                // src0 into the low half, src1 into the high half, each
+                // clamped and scaled to a 16-bit snorm or unorm.
+                let signed = name.contains("_i16_");
+                let (a, bb) = if name.ends_with("_f16") {
+                    (self.half_fsrc(inst, 0)?, self.half_fsrc(inst, 1)?)
+                } else {
+                    (f(self, 0)?, f(self, 1)?)
+                };
+                let lo = self.norm16(a, signed);
+                let hi = self.norm16(bb, signed);
+                let sh = self.s.m.i32(16);
+                let hi = self.s.m.bin(c, Bin::Shl, hi, sh);
+                let r = self.s.m.bin(c, Bin::Or, lo, hi);
+                int(self, r)
             }
             "v_cvt_pkrtz_f16_f32" => {
                 let (a, bb) = (f(self, 0)?, f(self, 1)?);

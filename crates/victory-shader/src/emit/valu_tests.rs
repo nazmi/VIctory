@@ -3,7 +3,8 @@
 //!
 //! Covers RDNA2 hardware semantics that differ from naive DXIL lowering:
 //! `v_med3_f32`/`v_med3_f16` with NaN operands, `v_fract_f32`/`v_fract_f16`
-//! near `1.0`, and turn-range reduction for `v_sin_*`/`v_cos_*`.
+//! near `1.0`, turn-range reduction for `v_sin_*`/`v_cos_*`, and the exact
+//! rounding of `v_cvt_pknorm_*`.
 
 use super::host::{Dispatch, Host, Root, View};
 use super::{HostShader, lower, validator};
@@ -1733,4 +1734,152 @@ fn ds_bpermute_b32_wave64_exec_mask_per_half() {
             );
         }
     });
+}
+
+/// A 16-bit snorm (`signed`) or unorm of `x`, as the RDNA2 ISA reference
+/// gives `v_cvt_pknorm_*`: clamped, scaled, rounded to nearest even from the
+/// exact product (exact in f64), NaN as 0.
+fn norm16_ref(x: f32, signed: bool) -> u16 {
+    if x.is_nan() {
+        return 0;
+    }
+    let (lo, k) = if signed {
+        (-1.0, 32767.0)
+    } else {
+        (0.0, 65535.0)
+    };
+    let n = (f64::from(x.clamp(lo, 1.0)) * k).round_ties_even() as i32;
+    n as u16
+}
+
+/// Inputs in [0.5, 1) and near 0.001 whose f32 product with the scale lands
+/// exactly on a tie although the exact product does not: a translation that
+/// multiplies in f32 rounds them the wrong way.
+fn f32_tie_traps(signed: bool) -> Vec<f32> {
+    let k: f32 = if signed { 32767.0 } else { 65535.0 };
+    let mut traps = Vec::new();
+    for start in [0.5f32, 0.001] {
+        let first = start.to_bits();
+        for b in first..first + 4_000_000 {
+            let x = f32::from_bits(b);
+            let p = x * k;
+            if p.fract() == 0.5 && f64::from(x) * f64::from(k) != f64::from(p) {
+                traps.push(x);
+                if traps.len() % 3 == 0 {
+                    break;
+                }
+            }
+        }
+    }
+    traps
+}
+
+fn pknorm_f32_inputs(signed: bool) -> Vec<f32> {
+    let mut xs = vec![
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        2.0,
+        -2.0,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+        -f32::NAN,
+        0.5,
+        -0.5,
+        0.25,
+        1.0 / 3.0,
+        -0.7,
+        0.999_99,
+        f32::MIN_POSITIVE,
+        1e-6,
+        -1e-6,
+        f32::from_bits(1), // denormal
+        1.0 / 65535.0,
+        0.5 / 65535.0,
+        1.5 / 32767.0,
+        f32::from_bits(0x3F7F_FFFF), // just below 1
+    ];
+    xs.extend(f32_tie_traps(signed));
+    xs
+}
+
+#[test]
+fn v_cvt_pknorm_f32_rounds_the_exact_product() {
+    for (op, signed, what) in [
+        (0x368u16, true, "v_cvt_pknorm_i16_f32"),
+        (0x369, false, "v_cvt_pknorm_u16_f32"),
+    ] {
+        // The traps must tell an f32 product apart from the exact one.
+        let k: f32 = if signed { 32767.0 } else { 65535.0 };
+        let f32_product = |x: f32| (x * k).round_ties_even() as i32 as u16;
+        let traps = f32_tie_traps(signed);
+        assert!(
+            traps
+                .iter()
+                .any(|&x| f32_product(x) != norm16_ref(x, signed)),
+            "{what}: no input separates an f32 product from the exact one"
+        );
+        let shader = build_valu_cs(&vop3(op, 0, vgpr(1), vgpr(2), 0));
+        let xs = pknorm_f32_inputs(signed);
+        // Each input once in each half, paired with its neighbour.
+        let cases: Vec<[u32; 4]> = (0..xs.len())
+            .map(|i| [xs[i].to_bits(), xs[(i + 1) % xs.len()].to_bits(), 0, 0])
+            .collect();
+        run_cases(&shader, &cases, |backend, _, inp, got| {
+            let (a, b) = (f32::from_bits(inp[0]), f32::from_bits(inp[1]));
+            let want = u32::from(norm16_ref(a, signed)) | u32::from(norm16_ref(b, signed)) << 16;
+            assert_eq!(
+                got, want,
+                "{backend}: {what}({a:e} [{:#010x}], {b:e} [{:#010x}]) = {got:#010x}, want {want:#010x}",
+                inp[0], inp[1],
+            );
+        });
+    }
+}
+
+#[test]
+fn v_cvt_pknorm_f16_rounds_the_exact_product() {
+    let halves: Vec<u16> = vec![
+        0x0000, 0x8000, 0x3C00, 0xBC00, 0x4000, 0xC000, 0x7C00, 0xFC00, 0x7E00, 0xFE00,
+        0x3800, // 0.5: a tie in both scales
+        0xB800, 0x3555, 0x0001, // smallest denormal
+        0x8001, 0x0400, // smallest normal
+        0x3BFF, // just below 1
+        0x1001, 0x2E66, 0xB266, 0x3A00, 0x3401,
+        // Large denormals, which scale to 1 or 2: kept, not flushed (the
+        // FP16 input-denormal mode RDNA2 measurements matched).
+        0x03D6, 0x83D6, 0x823F, 0x03FF,
+    ];
+    // Measured on RDNA2 (gfx1036) with FP16 input denormals kept.
+    assert_eq!(norm16_ref(f16_to_f32(0x83D6), true), 0xFFFE);
+    assert_eq!(norm16_ref(f16_to_f32(0x823F), true), 0xFFFF);
+    for (op, signed, what) in [
+        (0x312u16, true, "v_cvt_pknorm_i16_f16"),
+        (0x313, false, "v_cvt_pknorm_u16_f16"),
+    ] {
+        let shader = build_valu_cs(&vop3(op, 0, vgpr(1), vgpr(2), 0));
+        let cases: Vec<[u32; 4]> = (0..halves.len())
+            .map(|i| {
+                let next = halves[(i + 1) % halves.len()];
+                // Junk in the high halves: only the low halves are read.
+                [
+                    u32::from(halves[i]) | 0xABCD_0000,
+                    u32::from(next) | 0x1234_0000,
+                    0,
+                    0,
+                ]
+            })
+            .collect();
+        run_cases(&shader, &cases, |backend, _, inp, got| {
+            let (a, b) = (inp[0] as u16, inp[1] as u16);
+            let (fa, fb) = (f16_to_f32(a), f16_to_f32(b));
+            let want = u32::from(norm16_ref(fa, signed)) | u32::from(norm16_ref(fb, signed)) << 16;
+            assert_eq!(
+                got, want,
+                "{backend}: {what}({a:#06x}, {b:#06x}) = {got:#010x}, want {want:#010x}",
+            );
+        });
+    }
 }
