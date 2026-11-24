@@ -1,0 +1,151 @@
+name: Bug report
+description: A crash, GPU hang, wrong rendering or sound, or a build or test failure.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing VIctory. The more of this you fill in, the faster someone can find the cause.
+
+        **Never attach anything from the game**: no game files, no parts of the executable, no shader dumps. See [docs/asset-policy.md](https://github.com/Marvisak/VIctory/blob/main/docs/asset-policy.md).
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of problem
+      options:
+        - Crash (the process exits or crashes.log has an entry)
+        - GPU hang or device removed (screens go black, TDR, DXGI_ERROR_DEVICE_HUNG / REMOVED)
+        - Wrong or missing rendering
+        - Audio
+        - Input
+        - Too slow
+        - Build fails (cargo build)
+        - Test fails (cargo test, no game data needed)
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Where it goes wrong
+      description: The last stage that worked is listed in the README's status table.
+      options:
+        - Building or testing (no game data involved)
+        - Boot, before anything is shown
+        - First-boot screens (accessibility, language, settings, legal)
+        - Intro video
+        - Start screen, profile or saves
+        - Loading into the world
+        - In the world
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you did, what you expected and what happened instead. Include the exact error message if there is one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and environment variables
+      description: The exact command you ran, and every `VICTORY_*` variable you set (or "none").
+      placeholder: |
+        set VICTORY_D3D12_DRED=1
+        target\diag\victory.exe run <game dir>\<exe> --execute
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: VIctory commit
+      description: Output of `git rev-parse --short HEAD` in your checkout.
+      placeholder: d2a4bae
+    validations:
+      required: true
+
+  - type: dropdown
+    id: build
+    attributes:
+      label: Build
+      options:
+        - release (cargo build --release)
+        - diag (cargo build --profile diag --features diagnostics)
+        - other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: console
+    attributes:
+      label: Console mode
+      options:
+        - Series X (default)
+        - Series S (--console series-s)
+        - Not applicable (build or test problem)
+    validations:
+      required: true
+
+  - type: input
+    id: title-version
+    attributes:
+      label: Title version
+      description: The version of your copy of the game, if you ran it.
+      placeholder: 1.0.2.1
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver version
+      description: Name the GPU actually used if you have more than one (e.g. a laptop with an integrated GPU). Say if you used `VICTORY_D3D12_WARP=1`.
+      placeholder: AMD Radeon RX 6700 XT, driver <version>
+    validations:
+      required: true
+
+  - type: input
+    id: cpu-ram
+    attributes:
+      label: CPU and RAM
+      placeholder: AMD Ryzen 7 5800X, 32 GB
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: Windows version and build (run `winver`), or your Linux distribution with Wine/Proton and vkd3d-proton versions.
+      placeholder: Windows 11 24H2, build 26100.4652
+    validations:
+      required: true
+
+  - type: textarea
+    id: crashes-log
+    attributes:
+      label: crashes.log
+      description: The relevant entry from `crashes.log` in the data folder (default `%LOCALAPPDATA%\victory\data`), or "empty". Attach longer logs as files.
+      render: text
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: What you already tried, whether it happens every time, links to related issues.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and this is not a duplicate.
+          required: true
+        - label: I attached nothing from the game (files, executable parts, shader dumps).
+          required: true
