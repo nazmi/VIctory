@@ -882,6 +882,23 @@ fn commit_limit_message(
     message
 }
 
+/// What Windows can still commit, and its commit limit, in bytes: the
+/// paging file as it stands. The title asks for 6.1 GiB of physical pages
+/// in one mapping on its first boot, so a host with less headroom stops it
+/// a few seconds in (issue #23). `None` if the host cannot say.
+pub fn commit_headroom() -> Option<(usize, usize)> {
+    let mut info = PERFORMANCE_INFORMATION {
+        cb: size_of::<PERFORMANCE_INFORMATION>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: the buffer and size describe a writable PERFORMANCE_INFORMATION.
+    if unsafe { K32GetPerformanceInfo(&mut info, info.cb) } == 0 || info.PageSize == 0 {
+        return None;
+    }
+    let available = info.CommitLimit.saturating_sub(info.CommitTotal) * info.PageSize;
+    Some((available, info.CommitLimit * info.PageSize))
+}
+
 /// Returns `[base, base + len)` to placeholders; views reaching past it
 /// are mapped again outside it.
 fn unmap(physical: &mut Physical, base: usize, len: usize) {
@@ -1136,6 +1153,13 @@ mod tests {
             assert!(report.contains("Windows paging file size"));
         }
         assert!(!fallback.contains("System commit:"));
+    }
+
+    #[test]
+    fn commit_headroom_is_within_the_limit() {
+        let (available, limit) = commit_headroom().expect("Windows reports its commit");
+        assert!(limit > 0);
+        assert!(available <= limit);
     }
 
     #[test]

@@ -56,7 +56,9 @@ version pinned in `rust-toolchain.toml`.
 The title also needs several GiB of available Windows commit at startup.
 Check **Committed** under **Task Manager → Performance → Memory**. If
 `crashes.log` reports Windows error 1455, close other applications or increase
-the Windows paging file size, then retry.
+the Windows paging file size, then retry. `victory run` prints the host's
+commit headroom as its `commit` line; the title's first boot asks for 6.1 GiB
+in one mapping.
 
 Keep the game folder on an SSD if you can. From a hard drive the first
 screen stays black, at 30 fps and about 3 draws/frame, for a minute and a
