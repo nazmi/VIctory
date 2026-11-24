@@ -1355,3 +1355,33 @@ budget. Small batches report; large ones time out.
 Gate at `b976f7ff`/`3d18226e`: fmt 0 differing, both Clippy gates 0 errors,
 policy 219 files, workspace **678 passed / 0 failed** with the 10 documented
 GPU skips.
+
+### Wave 11: folds, hardware tests, and a guard the PR was missing: 2026-11-25
+
+Merged as `ab4f8581`, pushed. Gate: fmt 0 differing, both Clippy gates 0
+errors, policy 219 files, workspace **685 passed / 0 failed**.
+
+**#1282 needed a guard it did not have.** The PR folds a conditional branch
+whose target is the next instruction into a jump to the fallthrough, which is
+correct — but the fold runs *before* `effects()`, so it silently accepted four
+`s_cbranch_cdbg*` debug branches that `effects()` deliberately refuses. The
+worker added `!name.starts_with("s_cbranch_cdbg")` plus a refusal test and
+mutation-checked it. Taking the PR as filed would have widened what translates
+without anyone deciding to.
+
+Also integrated: #1360 and #1362 (hardware tests for `s_min/s_max` and
+`s_lshl_add`, executed on the real GPU), #1490 (freed XMem page numbers are
+recycled rather than growing the pool; page numbers are opaque keys into the
+page map, so a recycled one gets fresh zeroed memory), #1607 (a 1D texture
+must use a GFX10 1D swizzle mode; otherwise it refused rather than computing a
+size from an invalid layout).
+
+Refused: #1523 — withdrawn by its author, since three NVIDIA GPUs all stop at
+exactly 1,000,000 shader-visible descriptors, so only a log line would change.
+Duplicate: #512.
+
+**An honest note on the gate.** One test run in this wave reported a single
+failure; a full re-run passed 685/0 and the failing test's name was lost to
+output filtering. It is recorded as unreproduced, not dismissed. The GPU suite
+on this host has a documented intermittent abort, so a one-off is plausible —
+but "plausible" is not proof, and a later sweep should watch for it.
