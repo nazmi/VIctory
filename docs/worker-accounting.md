@@ -43,6 +43,11 @@ sides keep their behaviour, never "ours dropped to make it apply".
 | wave7-hle | `df16f7d2` | report APU heap allocations that fail | in branch |
 | wave7-hle | `df359c78` | DirectStorage: read a page list naming page 0 again | in branch |
 | wave7-hle | — | `1729` stray/unreadable save folder | **refused**: it rejects `v0`, breaking `a_folder_named_like_a_version_does_not_remove_the_save`, and returns a readable older version where HEAD deliberately refuses an unreadable newest one — a silent rollback replacing a clean refusal. A policy flip, so it needs the two HEAD tests rewritten deliberately, not a cherry-pick. |
+| wave7-shader | `08c99ea0` | Shaders: support line-topology mesh shaders (#1712) | in branch |
+| wave7-shader | `574c7310` | Shaders: mask mesh vertex indices to 9 bits (#1718) | in branch — **must travel with #1712**: alone, an edge-flagged corner yields a host index >= 512 while `max_vertices` <= 256 |
+| wave7-shader | — | `1732` f32_to_half NaN / nearest-even | **duplicate**: landed locally as `67b24154`; verified in `primitive.rs:126-152` and re-ran the PR's test bodies against the tree's function (`bad = 0`) |
+| wave7-shader | — | `1733` helper lane reads its own value | **duplicate**: landed locally as `694c4944`; verified the select at `lower.rs:5387-5396` |
+| wave7-shader | — | `1716` bitcode optimiser | **held**: unconditional from `Shader::finish`, and on a probe branch it fails 2 of 233 tests — dxil.dll rejects one module ("Flags must match usage") and another shader's emitted IR changes. Probe branch `scratch/1716-probe` is evidence only and must not be integrated. |
 
 ## Verification of this table
 
