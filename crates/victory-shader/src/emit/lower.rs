@@ -5032,8 +5032,18 @@ impl<'a> Lower<'a> {
                 let Some(Operand::Vector { reg, .. }) = v.dst else {
                     return Err("a mixed-precision result");
                 };
+                // An unavailable old value is zero, as for other partial
+                // writes; never resurrect bits from before a full write.
+                // `v_interp_p1ll_f16` writes all 32 bits, so when its p2
+                // pair represents the interpolation, the half this FMA
+                // would preserve was never written. Any other unmodelled
+                // value is still refused rather than silently zeroed.
                 let old = match inst.read(Reg::V(reg)) {
-                    Some(o) => self.i32_of(o)?,
+                    Some(o) => match self.i32_of(o) {
+                        Ok(o) => o,
+                        Err("the first half of an interpolation") => self.s.m.i32(0),
+                        Err(why) => return Err(why),
+                    },
                     None => self.s.m.i32(0),
                 };
                 let h = self.f16_nearest(r);
