@@ -847,6 +847,23 @@ static USED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0)
 static TEXTURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(windows)]
 static TEXTURE_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Placed textures made ([`texture_at`]). Counted separately from the host
+/// textures above because they are never released, so the growth is the thing
+/// worth seeing: a streaming world adds one per address and description it
+/// views, and none of them is counted as a host texture.
+///
+/// The count, not the bytes: getting a byte figure needs a
+/// `D3D12_RESOURCE_DESC`, and this module's description is its own type, so
+/// the honest figure here would be a guess. One resource is one host texture,
+/// which bounds it well enough to see growth.
+#[cfg(windows)]
+static PLACED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Placed textures made so far.
+#[cfg(windows)]
+pub(crate) fn placed_count() -> u64 {
+    PLACED.load(std::sync::atomic::Ordering::Relaxed)
+}
 /// Title textures that found their memory's host texture made already.
 #[cfg(windows)]
 static SHARED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1746,7 +1763,11 @@ pub(crate) fn texture_at(address: u64, desc: &[u32; 14]) -> Option<This> {
         return None;
     }
     map.insert((address, *desc), out as usize);
-    resource(out).host().is_some().then_some(out)
+    if resource(out).host().is_some() {
+        PLACED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return Some(out);
+    }
+    None
 }
 
 pub(crate) extern "system" fn create_placed(
