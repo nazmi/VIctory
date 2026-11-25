@@ -1115,14 +1115,13 @@ mod tests {
         if !dxc.exists() {
             return None;
         }
-        let file = std::env::temp_dir().join(format!("victory-interp-{}.dxil", std::process::id()));
-        std::fs::write(&file, container).ok()?;
+        let file = tempfile::NamedTempFile::new().expect("temporary DXIL file").into_temp_path();
+        std::fs::write(&file, container).expect("write DXIL file");
         let out = std::process::Command::new(dxc)
             .arg("-dumpbin")
             .arg(&file)
             .output()
-            .ok()?;
-        let _ = std::fs::remove_file(&file);
+            .expect("run dxc -dumpbin");
         assert!(
             out.status.success(),
             "dxc -dumpbin failed: {}",

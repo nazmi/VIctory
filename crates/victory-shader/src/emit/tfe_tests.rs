@@ -208,6 +208,29 @@ fn tfe_on_a_store_and_lwe_stay_refused() {
     assert_eq!(refusal(&lwe), "an image access with lwe");
 }
 #[cfg(windows)]
+#[test]
+fn one_dimensional_views_use_two_dimensional_backing() {
+    for (dim, host_kind) in [(0, 2), (4, 7)] {
+        let access = [0xF09C_0100 | dim << 3, 0x0043_0C02];
+        let lowered = translate(&program(SAMPLE_AT_MIDDLE, access, 12, 12)).unwrap();
+        let text = super::tests::dump_dxil(&lowered.dxil).expect("dxc required for coordinate regression");
+        assert!(text.contains(&format!("{{ i32 {host_kind}, i32 1033 }}")), "{text}");
+        let sample = text.lines().find(|l| l.contains("call %dx.types.ResRet.f32 @dx.op.sampleLevel.f32")).unwrap();
+        assert!(sample.contains(", float 0.000000e+00,"), "host y is zero: {sample}");
+        if dim == 4 {
+            // The second console coordinate becomes the host array slice.
+            assert!(!sample.contains("float undef, float undef"), "{sample}");
+        }
+        let query = [0xF038_0200 | dim << 3, 0x0003_1402];
+        let lowered = translate(&program(LOAD_AT_ORIGIN, query, 20, 20)).unwrap();
+        let text = super::tests::dump_dxil(&lowered.dxil).unwrap();
+        if dim == 4 {
+            assert!(text.lines().any(|l| l.contains("extractvalue %dx.types.Dimensions") && l.ends_with(", 2")), "array layers come from third dimension: {text}");
+        }
+    }
+}
+
+#[cfg(windows)]
 mod gpu {
     use windows::Win32::Graphics::Direct3D12::*;
 

@@ -4034,7 +4034,8 @@ impl<'a> Lower<'a> {
                     5 => 7,
                     _ => return Err("an image dimension (cube or MSAA)"),
                 };
-                ((kind | u, 0x409), Some(kind))
+                let host_kind = match kind { 1 => 2, 6 => 7, k => k };
+                ((host_kind | u, 0x409), Some(kind))
             }
             Fields::Buffer { idxen, format, .. } => {
                 let stride = used.map_or(0, |u| u.stride);
@@ -4089,7 +4090,7 @@ impl<'a> Lower<'a> {
                 let (height, depth) = match kind {
                     1 => (one, one),
                     2 => (field(self, 1), one),
-                    6 => (one, field(self, 1)),
+                    6 => (one, field(self, 2)),
                     _ => (field(self, 1), field(self, 2)),
                 };
                 let levels = if uav { one } else { field(self, 3) };
@@ -7446,6 +7447,13 @@ impl<'a> Lower<'a> {
             5 => (7, 3),
             _ => return Err("an image dimension (cube loads or MSAA)"),
         };
+        // Match the host's height-one 2D backing for console 1D views.
+        let flat = kind == 1 || kind == 6;
+        let host_kind = match kind { 1 => 2, 6 => 7, k => k };
+        let flat_to_2d = |cs: &mut [V], zero: V| {
+            if kind == 6 { cs[2] = cs[1]; }
+            if flat { cs[1] = zero; }
+        };
         // Address VGPRs in order.
         let mut regs = Vec::new();
         for a in addr {
@@ -7486,7 +7494,7 @@ impl<'a> Lower<'a> {
             || self
                 .used_kind(src)
                 .is_some_and(|u| u.kind == ResourceType::Uav);
-        let props = (kind | if uav { 0x1000 } else { 0 }, 0x409);
+        let props = (host_kind | if uav { 0x1000 } else { 0 }, 0x409);
         if let Some(op) = name.strip_prefix("image_atomic_") {
             // DXIL's atomic operations on a 32-bit integer texture UAV; the
             // old value returns with glc. Sub is the add of the negation.
@@ -7524,6 +7532,7 @@ impl<'a> Lower<'a> {
             for (k, slot) in cs.iter_mut().enumerate().take(coords) {
                 *slot = packed_val(self, 0, k)?;
             }
+            flat_to_2d(&mut cs, self.s.m.i32(0));
             let Operand::Vector { reg, .. } = *data else {
                 return Err("image atomic data");
             };
@@ -7561,7 +7570,7 @@ impl<'a> Lower<'a> {
                 // host device must support both (D3D12 options 9 and 11).
                 self.s.flags |= flags::INT64 | flags::ATOMIC64_TYPED | flags::ATOMIC64_HEAP;
             }
-            let h = self.handle(site, src, false, (kind | 0x1000, 0x105))?;
+            let h = self.handle(site, src, false, (host_kind | 0x1000, 0x105))?;
             let at = self.begin_guarded(guard);
             let (ty, suffix) = if wide {
                 (i64t, "i64")
@@ -7624,6 +7633,7 @@ impl<'a> Lower<'a> {
             for (k, slot) in cs.iter_mut().enumerate().take(coords) {
                 *slot = packed_val(self, 0, k)?;
             }
+            flat_to_2d(&mut cs, self.s.m.i32(0));
             let Operand::Vector { reg, .. } = *data else {
                 return Err("image store data");
             };
@@ -7703,10 +7713,12 @@ impl<'a> Lower<'a> {
                 return Err("an image result");
             };
             for (k, ch) in (0..4u32).filter(|ch| dmask >> ch & 1 != 0).enumerate() {
+                // A 1D array's layers, read from the 2D array's third place.
+                let from = if kind == 6 && ch == 1 { 2 } else { ch };
                 let x = if ch == 3 && uav || !present[ch as usize] {
                     one
                 } else {
-                    self.s.m.extract(c, d, ch)
+                    self.s.m.extract(c, d, from)
                 };
                 self.write(inst, Reg::V(reg + k as u8), x, guard);
             }
@@ -7807,6 +7819,7 @@ impl<'a> Lower<'a> {
                     *slot = self.s.m.bin(c, Bin::SDiv, *slot, n);
                 }
             }
+            flat_to_2d(&mut cs, self.s.m.f32(0));
             if op == 81 {
                 // The clamped then the unclamped level of detail.
                 let Operand::Vector { reg, .. } = *data else {
@@ -7835,7 +7848,7 @@ impl<'a> Lower<'a> {
             };
             let zero = self.s.m.i32(0);
             let mut os = vec![iu; 3];
-            for o in os.iter_mut().take(offsets) {
+            for o in os.iter_mut().take(offsets + usize::from(flat)) {
                 *o = zero;
             }
             let mut args = vec![h, sh];
@@ -7944,6 +7957,10 @@ impl<'a> Lower<'a> {
                         let y = packed_val(self, first + deriv_stride, k)?;
                         g[3 + k] = to_float(self, y);
                     }
+                    if flat {
+                        let z = self.s.m.f32(0);
+                        (g[1], g[4]) = (z, z);
+                    }
                     args.extend(&os);
                     args.extend(g);
                     // `_cl`: the least level of detail, after the coordinates.
@@ -8038,6 +8055,7 @@ impl<'a> Lower<'a> {
             } else {
                 self.s.m.i32(0)
             };
+            flat_to_2d(&mut cs, self.s.m.i32(0));
             let mut args = vec![h, mip];
             args.extend(&cs);
             args.extend([iu, iu, iu]);
