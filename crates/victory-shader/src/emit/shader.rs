@@ -32,6 +32,8 @@ pub const NULL_BUFFER_VIEW: u32 = HEAP_VIEWS - 2;
 
 /// `ShaderFlags` bits (metadata) and their `SFI0` feature bits.
 pub(crate) mod flags {
+    /// Texel residency checks.
+    pub const TILED_RESOURCES: u64 = 1 << 12;
     pub const RAW_BUFFERS: u64 = 1 << 4;
     pub const STENCIL_REF: u64 = 1 << 11;
     pub const TYPED_UAV_LOADS: u64 = 1 << 13;
@@ -805,6 +807,9 @@ impl Shader {
         dxil.extend(&bitcode);
 
         let mut features = 0u64;
+        if self.flags & flags::TILED_RESOURCES != 0 {
+            features |= 0x100;
+        }
         if self.flags & flags::STENCIL_REF != 0 {
             features |= 0x200;
         }

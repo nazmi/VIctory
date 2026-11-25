@@ -1,6 +1,6 @@
 //! Texel-fail status (`tfe`) on image loads, samples and gathers: synthetic
 //! GFX10 programs lowered to DXIL and, on Windows, validated by `dxil.dll`
-//! when present and run on the host GPU and WARP. A texture that is not
+//! when present. A texture that is not
 //! tiled is resident everywhere, so the status dword after the data reads 0.
 
 use super::lower::{self, Lowered};
@@ -163,6 +163,21 @@ fn loads_samples_and_gathers_with_tfe_check_residency() {
         let l = translate(&words).unwrap_or_else(|e| panic!("{label}: {e}"));
         assert!(l.tiled_resources, "{label}: no residency check");
         assert!(!l.wave_ops, "{label}");
+        #[cfg(windows)]
+        if let Some(text) = super::tests::dump_dxil(&l.dxil) {
+            assert!(text.contains("dx.op.checkAccessFullyMapped.i32(i32 71"), "{label}: {text}");
+            assert!(text.contains("select i1"), "{label}: residency becomes status 0 or 1");
+        }
+        let container = crate::Container::parse(&l.dxil).unwrap();
+        let features = container.part(crate::FourCC::SFI0).unwrap().data;
+        assert_ne!(u64::from_le_bytes(features.try_into().unwrap()) & 0x100, 0);
+        #[cfg(windows)]
+        if let Ok(mut v) = super::validator::Validator::load(
+            super::validator::Validator::default_path().as_deref(),
+        ) {
+            v.validate(&mut l.dxil.clone())
+                .expect("TFE DXIL validation");
+        }
     }
 }
 
@@ -184,11 +199,14 @@ fn tfe_on_a_store_and_lwe_stay_refused() {
     ]
     .concat();
     assert_eq!(refusal(&store), "tfe on an image store, atomic or query");
+    // The newer explicit-level gather path returns before the common
+    // status write; keep TFE refused until all its load statuses combine.
+    let gather_l = program(SAMPLE_AT_MIDDLE, [0xF111_0108, 0x0043_0C02], 12, 16);
+    assert_eq!(refusal(&gather_l), "tfe on an explicit-level gather");
     // `sample_red` with lwe as well as tfe.
     let lwe = program(SAMPLE_AT_MIDDLE, [0xF09F_0108, 0x0043_0C02], 12, 13);
     assert_eq!(refusal(&lwe), "an image access with lwe");
 }
-
 #[cfg(windows)]
 mod gpu {
     use windows::Win32::Graphics::Direct3D12::*;
@@ -211,6 +229,12 @@ mod gpu {
             static_samplers: Vec::new(),
             root_cbvs: l.root_cbvs,
             root_srvs: l.root_srvs,
+            root_uavs: l.root_uavs,
+            memory: l.memory,
+            memory_writes: l.memory_writes,
+            view_addresses: l.view_addresses,
+            heap: l.heap,
+            heap_writes: l.heap_writes,
         };
         if let Ok(mut v) =
             validator::Validator::load(validator::Validator::default_path().as_deref())
@@ -228,6 +252,10 @@ mod gpu {
     /// the hardware GPU and on WARP (each skipped without a device) and
     /// returns, per one that ran, each lane's (data, status) pair.
     fn run(words: &[u32]) -> Vec<(&'static str, Vec<[u32; 2]>)> {
+        if std::env::var_os("VICTORY_GPU_TESTS").is_none() {
+            eprintln!("TFE device execution requires VICTORY_GPU_TESTS=1; skipped");
+            return Vec::new();
+        }
         let shader = build(words);
         let texel = [TEXEL];
         let unused = [[0.0f32; 4]];

@@ -32,6 +32,8 @@ enum Val {
 }
 
 pub(crate) struct Lowered {
+    #[cfg(test)]
+    pub tiled_resources: bool,
     pub dxil: Vec<u8>,
     /// Bit n: immediate sampler n is used for comparisons.
     pub cmp_samplers: u64,
@@ -1333,6 +1335,8 @@ impl<'a> Lower<'a> {
             wave_ops: self.s.flags & flags::WAVE_OPS != 0,
             #[cfg(test)]
             rovs: self.s.flags & flags::ROVS != 0,
+            #[cfg(test)]
+            tiled_resources: self.s.flags & flags::TILED_RESOURCES != 0,
             dxil: self.s.finish(),
             user_data,
             samplers: self.samplers,
@@ -7412,10 +7416,19 @@ impl<'a> Lower<'a> {
         else {
             unreachable!()
         };
-        if *tfe || *lwe {
-            return Err("an image access with tfe or lwe");
+        if *lwe {
+            return Err("an image access with lwe");
         }
         let name = inst.name();
+        if *tfe && (name.starts_with("image_store") || name.starts_with("image_atomic_")
+            || name.starts_with("image_bvh") || matches!(name, "image_get_resinfo" | "image_get_lod")) {
+            return Err("tfe on an image store, atomic or query");
+        }
+        // Explicit-level gathers use multiple loads; their statuses must be
+        // combined before this path can supply a texel-fail result.
+        if *tfe && matches!(name, "image_gather4_l" | "image_gather4_l_o") {
+            return Err("tfe on an explicit-level gather");
+        }
         if name.starts_with("image_bvh") {
             return self.bvh(inst, b, i);
         }
@@ -8078,6 +8091,27 @@ impl<'a> Lower<'a> {
                     _ => p[0],
                 })
                 .collect();
+        }
+        if *tfe {
+            // The texel-fail code in the dword after the data: zero when every
+            // texel read was resident, which on the host is DXIL's status
+            // having touched only mapped tiles (always, outside tiled
+            // resources).
+            // shortcut: a fail reads 1, whatever other bits the console sets
+            // (code that checks residency compares the dword with zero).
+            let status = self.s.m.extract(c, r, 4);
+            let i1t = self.s.t.i1;
+            let mapped = self.s.op(
+                c,
+                "checkAccessFullyMapped.i32",
+                Attr::ReadOnly,
+                i1t,
+                71,
+                &[status],
+            );
+            let (resident, failed) = (self.s.m.i32(0), self.s.m.i32(1));
+            xs.push(self.s.m.select(c, mapped, resident, failed));
+            self.s.flags |= flags::TILED_RESOURCES;
         }
         for (k, x) in xs.into_iter().enumerate() {
             self.write(inst, Reg::V(reg + k as u8), x, guard);
