@@ -69,3 +69,57 @@ Evidence outside the repository:
 
 No title was executed, and no gameplay, frame-rate, NVIDIA stability or
 ray-tracing claim from the source README is established for our integration.
+
+## Re-verified on the integration (2026-11-25, after PRs #1324/#1432/#1032)
+
+Both accepted ports were re-tested **in this branch**, not just in their
+candidate state.
+
+### Pipeline wait budgets
+
+`cargo test -p victory-gpu --locked pipeline::make` → **8 tests, all pass**:
+
+```
+pipeline_wait_switch_accepts_zero_and_rejects_invalid_values
+a_zero_wait_switch_reaches_the_submission_wait_path
+unused_wait_time_returns_to_the_same_frame_only
+an_old_recording_thread_cannot_reset_a_new_frames_budget
+concurrent_waiters_share_one_frame_allowance
+worker_count_takes_the_switch_within_bounds
+draws_go_ahead_of_early_starts
+first_use_is_made_by_a_worker
+```
+
+That is **five more than the source has**: ztrx's own `make.rs` carries three
+tests, none of them about the budget. The behaviour they pin is the point of the
+port — `FrameBudget::reserve`/`refund` in `make.rs`, where a thread resumed
+after a newer frame gets `Duration::ZERO` and unused reservation returns to the
+same frame only, so concurrent recording threads share one frame allowance
+instead of each spending it.
+
+### Launcher, end to end
+
+`scripts/play.ps1` driven against a synthetic executable (no title, no GPU):
+
+| Check | Result |
+| --- | --- |
+| child exits 7 → launcher exits 7 | `LAUNCHER EXIT: 7`, captured stderr preserved in the log file |
+| a game path with spaces | child received `run "C:\fake dir\game.exe" --execute` intact |
+| `VICTORY_CACHE_DIR` / `VICTORY_DATA_DIR` | reached the child as passed |
+| cache and data directories | created when absent |
+| missing `-Exe` | clear refusal: *"VIctory executable not found: … Build with cargo build --release -p victory."* |
+| an inherited `VICTORY_CAPTURE` | cleared before launch (child reported `CAPTURE_CLEARED`) |
+
+The script also parses clean under the PowerShell parser. What this does **not**
+prove: nothing was run against a real title, so "normal play" in the README's
+sense is still unverified.
+
+### What is still not in, and why it is not a quick port
+
+A declaration sweep over ztrx's 93 changed files finds **575 functions,
+constants and statics present only there**. They are the coupled subsystems
+listed above: shader threading (`exchange`/`clane`/`own_bits`), the memory
+instrumentation set (`copystat` blocks, command timing, process/thread memory),
+ray tracing, in-place memory and relay, and the bitcode optimizer. Each needs an
+independent semantic port with a correctness witness; the review's disposition
+for them stands unchanged.
