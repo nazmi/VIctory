@@ -2696,8 +2696,8 @@ void main(uint3 id : SV_DispatchThreadID) {
                 [2, 4096, 1, 1 | 1 << 16, 41],
                 [41, 2, 0, 0, 0, 0, 0, 0, 0, 0],
                 [41, 2, 0x1688, 0, 0, 1, 0, 0, 0, 0],
-                "RWTexture1D<float> o : register(u0); void put(uint3 p) { if (p.y == 0 && p.z == 0) o[p.x] = p.x * 0.25; }",
-                "Texture1D<float4> t : register(t0); float4 get(uint3 p) { return t.Load(int2(p.y * 64 + p.x, 0)); }",
+                "RWTexture2D<float> o : register(u0); void put(uint3 p) { if (p.y == 0 && p.z == 0) o[uint2(p.x, 0)] = p.x * 0.25; }",
+                "Texture2D<float4> t : register(t0); float4 get(uint3 p) { return t.Load(int3(p.y * 64 + p.x, 0, 0)); }",
                 (512, 1),
                 [(2 * 64 + 7) as f32 * 0.25, 0.0, 0.0, 1.0],
             ),
@@ -2715,6 +2715,18 @@ void main(uint3 id : SV_DispatchThreadID) {
             let address = title_memory(1 << 22);
             let words = [d[0], 0, 0, 0, d[1], 0, d[2], d[3], d[4], 1, 0, 0, 4, 0];
             let texture = texture_at_address(address, &words);
+            let copy = crate::resource::host_copy(texture).unwrap();
+            // SAFETY: the host copy owns a live D3D12 resource.
+            let dimension = unsafe { copy.texture.GetDesc() }.Dimension;
+            assert_eq!(
+                dimension,
+                if d[0] == 2 {
+                    D3D12_RESOURCE_DIMENSION_TEXTURE2D
+                } else {
+                    D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                },
+                "round {round}: 1D title textures use a height-one 2D host texture"
+            );
             let unordered = View::Unordered(texture as usize, 0, Some(uav));
             let shader = View::Shader(texture as usize, Some(srv));
             slots.make(0, &unordered);
