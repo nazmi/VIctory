@@ -1263,6 +1263,8 @@ mod state {
 
 fn count_draw() {
     DRAWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(all(windows, feature = "diagnostics"))]
+    FRAME_DRAWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Draws of the kinds the host does not run yet (indirect, mesh), and
@@ -1612,4 +1614,13 @@ mod tests {
         assert_eq!(release(list), 0);
         assert_eq!(release(allocator), 0);
     }
+}
+
+#[cfg(all(windows, feature = "diagnostics"))]
+static FRAME_DRAWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Draws recorded since the last present, for diagnostics capture triggers.
+#[cfg(all(windows, feature = "diagnostics"))]
+pub(crate) fn take_frame_draws() -> u64 {
+    FRAME_DRAWS.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
