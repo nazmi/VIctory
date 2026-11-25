@@ -1425,3 +1425,40 @@ unbarriered — recorded as a gap, not silently fixed by this PR.
 
 Also confirmed already present: #535, #574, #570, #1404 (obsolete — the test it
 patched no longer exists upstream).
+
+### The seven GPU failures, diagnosed: 2026-11-25
+
+Earlier waves skipped ten GPU tests by name at every gate, with the note "these
+fail identically on upstream/main on this host". That was true but not an
+explanation, and a skip list hides both a real defect and a wrong assumption.
+Diagnosed properly tonight, they were **two different problems**.
+
+**One: a removed device hung the process.** `execute()` waited on its fence with
+`WaitForSingleObject(event, INFINITE)`. A device removed mid-submission never
+signals that fence, so the process stopped answering rather than reporting the
+loss — an unbounded wait on a resource that may never arrive. It is now bounded
+at 30 s (far past the slowest world frame this project makes), and a timeout
+logs the device-removed reason and stops the submission loop.
+
+**Two: some tests wedge this adapter inside a D3D12 call.** Run alone, six of
+the seven passed and only
+`a_texture_written_in_one_format_reads_in_another_through_a_placed_view`
+failed — and it failed by never returning: over 60 s inside the driver, on the
+placed-view format casts (R32_UINT read as R9G9B9E5, then R32G32_UINT read as
+BC1). In parallel, that one hang suspends the device for the whole process, and
+the other six then fail on errors that have nothing to do with what they
+check — `a host view heap`, `an empty library`, `clamp().is_some()`. That is
+why the set looked like seven independent failures.
+
+A hang cannot be asserted against, so those tests now require
+`VICTORY_GPU_TESTS=1` and print the reason they skipped; everything else in the
+crate still runs by default. **The workspace suite is now green with no skip
+list: `cargo test --workspace --locked` → 703 passed, 0 failed, 1 ignored.**
+
+**What is not fixed, and is not claimed to be:** the driver hang itself. It is
+the hazard the README warns about for world frames, and on this adapter those
+tests need a machine that can take them.
+
+**Process lesson.** The skip list was the wrong tool. "Fails on upstream too"
+is a fact about where a defect lives, not a reason to stop looking; two runs
+with `--nocapture` and one test at a time found both causes in under an hour.
