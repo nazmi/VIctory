@@ -1133,8 +1133,16 @@ pub(crate) fn castable(format: u32) -> Vec<u32> {
     let Some(e) = element(format) else {
         return Vec::new();
     };
+    // Same *family*, not merely the same element size. D3D12 accepts a view
+    // format only if it is in the resource format's typeless family, so a
+    // 4-byte format outside it is not a legal view of this texture: asking
+    // for one is DXGI_ERROR_INVALID_CALL and removes the device. Seen on a
+    // Radeon 780M viewing an R32_UINT resource as R9G9B9E5_SHAREDEXP, which
+    // is the same four bytes but another family.
     (1..=115)
         .filter(|&f| f != format && element(f) == Some(e) && !DEPTH_FAMILIES.contains(&f))
+        .filter(|&f| family(f) == family(format))
+        // A typeless format is a family's head, and no view may name one.
         .filter(|&f| !(family(f) == f && family(f + 1) == f))
         .collect()
 }
@@ -2077,19 +2085,44 @@ mod tests {
     /// Castable formats: every format of the same element but typeless and
     /// depth ones; block formats among block formats of their block size.
     #[test]
-    fn castable_formats_share_the_element() {
-        let c = castable(42);
-        for f in [67, 28, 29, 41, 24, 26, 87, 35] {
-            assert!(c.contains(&f), "{f}");
+    fn castable_formats_stay_in_the_family() {
+        // The rule D3D12 enforces: a view format must be in the resource
+        // format's typeless family, and a typeless format itself is never a
+        // view. Checked over every format, because the previous element-size
+        // rule was wrong for exactly the cases nobody enumerated: R32_UINT
+        // viewed as R9G9B9E5 removed the device on a 780M.
+        for format in 1..=115u32 {
+            let c = castable(format);
+            for &f in &c {
+                assert_eq!(family(f), family(format), "{format} -> {f}");
+                assert_ne!(f, format, "{format} lists itself");
+                assert!(
+                    !(family(f) == f && family(f + 1) == f),
+                    "{format} lists typeless {f}"
+                );
+            }
+            if let Some(e) = element(format) {
+                // Everything else of that element in the family is offered,
+                // minus depth formats and typeless heads.
+                let want: Vec<u32> = (1..=115)
+                    .filter(|&f| {
+                        f != format
+                            && element(f) == Some(e)
+                            && family(f) == family(format)
+                            && !(family(f) == f && family(f + 1) == f)
+                            && ![19, 20, 21, 22, 40, 44, 45, 46, 47, 55].contains(&f)
+                    })
+                    .collect();
+                assert_eq!(c, want, "complete for format {format}");
+            }
         }
-        for f in [42, 39, 40, 45, 27, 10, 56] {
+        // Concrete: R32_FLOAT and R32_SINT are views of R32_UINT; the same
+        // four bytes in another family are not.
+        let c = castable(42);
+        assert!(c.contains(&41) && c.contains(&43));
+        for f in [39, 40, 67, 24, 28] {
             assert!(!c.contains(&f), "{f}");
         }
-        let bc1 = castable(71);
-        assert!(bc1.contains(&72) && bc1.contains(&80) && bc1.contains(&81));
-        assert!(!bc1.contains(&70) && !bc1.contains(&98) && !bc1.contains(&17));
-        assert!(castable(98).contains(&95) && castable(98).contains(&77));
-        assert!(castable(53).contains(&56) && !castable(53).contains(&55));
     }
 
     #[test]
