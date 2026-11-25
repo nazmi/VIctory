@@ -1,1 +1,20 @@
-{}
+{
+  "1557": {
+    "source_sha": "1504ec9aa4465bfe99dcf9311ea0b5091ef1a892",
+    "state": "integrated-local",
+    "commit": "`9e0d40a2`",
+    "candidate": "c159fa221667aec45fc045f992e7c959487172b2",
+    "merge_sha": "9e0d40a221b5708f817da012bb882984aaa9f361",
+    "reason": "BC7 mode/subset validation; all-zero sentinel preserved; 1/1 files reviewed; source/candidate and full integration gates pass; negative control fails; no-ff merge",
+    "tests": {
+      "source_formats_passed": 24,
+      "candidate_formats_passed": 45,
+      "workspace_exit": 0,
+      "clippy_default_exit": 0,
+      "clippy_all_features_exit": 0,
+      "fmt_exit": 0,
+      "policy_exit": 0
+    },
+    "limitations": "Defensive malformed-table validation; no gameplay claim. Existing external-reference/benchmark tests ignored."
+  }
+}

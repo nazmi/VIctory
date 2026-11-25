@@ -321,3 +321,9 @@ git show <local>
 A row states only that the change is present locally. It does not mean the
 upstream PR is merged upstream, and a green test run here is not evidence about
 the upstream tree.
+
+## Codex continuation: 2026-11-25
+
+| PR | Source head | Candidate | Local no-ff merge | Evidence |
+| --- | --- | --- | --- | --- |
+| #1557 | `1504ec9aa4465bfe99dcf9311ea0b5091ef1a892` | `c159fa22` | `9e0d40a2` | Full 1-file review; source24/candidate45 formats tests; negative control; complete integration gate passed. |

@@ -27,7 +27,8 @@ before acting. `not yet reviewed` is explicitly unfinished, never approval.
 | duplicate | 9 |
 | held | 5 |
 | integrated | 96 |
-| not yet reviewed | 594 |
+| integrated-local | 1 |
+| not yet reviewed | 593 |
 | rejected | 5 |
 | total open | 713 |
 
@@ -294,7 +295,7 @@ before acting. `not yet reviewed` is explicitly unfinished, never approval.
 | #1564 | `c6eb3fddffb8` | integrated | â€” |  | GPU: MakeResident succeeds, as the console's memory is always resident |
 | #1563 | `93f718d7a94b` | not yet reviewed | â€” |  | Shaders: link mesh and pixel programs whose mesh outputs pass 32 KiB |
 | #1560 | `db470df5325d` | not yet reviewed | â€” |  | PE: refuse an import address table inside the headers |
-| #1557 | `1504ec9aa446` | not yet reviewed | â€” |  | Validate BC7 control-word subset counts |
+| #1557 | `1504ec9aa446` | integrated-local | `9e0d40a2` | BC7 mode/subset validation; all-zero sentinel preserved; 1/1 files reviewed; source/candidate and full integration gates pass; negative control fails; no-ff merge | Validate BC7 control-word subset counts |
 | #1555 | `9fb81e1c17e4` | not yet reviewed | â€” |  | GPU: coalesce nearby shadow-buffer refreshes without spanning huge heap gaps |
 | #1554 | `dce05bcc9508` | not yet reviewed | â€” |  | Shaders: flush subnormals in f32 MAD and MAC |
 | #1548 | `2d6a0b1af382` | not yet reviewed | â€” |  | GPU: preserve full DYNAMIC descriptor range when host view heap is capped at PORTABLE_VIEWS |

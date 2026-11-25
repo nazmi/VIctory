@@ -215,3 +215,10 @@ upstream shadow refresh `ed0dbfd1`. An initial uncommitted minimal library
 locking port was deliberately replaced by the worker's complete metadata-aware
 design; no work was lost. The review found and fixed the dump-before-show
 ordering and missing RTV/DSV mappings before the final gate.
+
+### Codex continuation: PR #1557
+
+Worker `review_pr1557`, actual model `gpt-6.1-sol` medium. Source1504ec9a,
+candidate `c159fa22`, accepted unchanged as merge `9e0d40a2` (`--no-ff`).
+Every source added line is present; source/candidate tests, negative control
+and coordinator integration gate reviewed. No unaccounted worker changes.

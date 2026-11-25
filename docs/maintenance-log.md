@@ -1603,3 +1603,14 @@ Other current rows: 112 integrated-local, 10 duplicate, 6 rejected, 5 held,
 First independent candidates: #421 (HLE path normalization), #1557 (BC7 input
 validation), #1722 (empty pipeline-library blob compatibility). Coordinator
 also inspects #1324 (cache publication race) without overlapping worker writes.
+
+### PR #1557 integrated-local: `9e0d40a2`
+
+Reviewed full source `1504ec9aa4465bfe99dcf9311ea0b5091ef1a892` (1/1 files,
+all hunks), description, discussion/reviews and empty current CI list. Source
+formats24/0, candidate45/0; invalid subset controls are rejected and zero
+sentinel retained. Removing validation fails the synthetic regression. Candidate
+`c159fa22` is merged with `--no-ff`, parents `aa457c7a`, `c159fa22`.
+Integration fmt, both workspace Clippy modes, workspace tests and policy224 files
+passed. Full local logs: `C:/Users/nazmi/victory-runs/codex-1557-*`.
+This hardens caller-supplied tables; no title failure or gameplay claim.
