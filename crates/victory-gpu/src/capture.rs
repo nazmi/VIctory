@@ -24,6 +24,8 @@ pub(crate) fn listed(n: u64) -> bool {
     static LIST: std::sync::OnceLock<Vec<u64>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| numbers("VICTORY_CAPTURE_FRAMES"))
         .contains(&n)
+        || trigger()
+            .is_some_and(|t| t.picks(n, TRIGGERED_AT.load(std::sync::atomic::Ordering::Relaxed)))
         || WORLD
             .get()
             .is_some_and(|&w| world_offsets().iter().any(|&k| w + k == n))
@@ -56,6 +58,65 @@ pub(crate) fn presented(n: u64) {
             frame = n,
             draws,
             "the world's first frame (VICTORY_CAPTURE_WORLD counts from it)"
+        );
+    }
+}
+
+/// `VICTORY_CAPTURE_DRAWS=<draws>[,<frames>]`: the first frame that records
+/// at least `draws` draws picks the `frames` frames after it (3 by
+/// default), as if they were listed. Where a scene starts moves by hundreds
+/// of frames between runs (loading time, the shader cache), so a frame
+/// number taken from one run can miss the scene in the next.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Trigger {
+    draws: u64,
+    frames: u64,
+}
+
+impl Trigger {
+    fn parse(text: &str) -> Option<Trigger> {
+        let mut parts = text.split(',').map(str::trim);
+        let draws = parts.next()?.parse().ok().filter(|&d| d > 0)?;
+        let frames = match parts.next() {
+            Some(f) => f.parse().ok().filter(|&f| f > 0)?,
+            None => 3,
+        };
+        parts.next().is_none().then_some(Trigger { draws, frames })
+    }
+
+    /// Whether frame `n` is picked, the trigger having fired at the present
+    /// of frame `at` (0: not yet).
+    fn picks(self, n: u64, at: u64) -> bool {
+        at != 0 && n > at && n - at <= self.frames
+    }
+}
+
+fn trigger() -> Option<Trigger> {
+    static TRIGGER: std::sync::OnceLock<Option<Trigger>> = std::sync::OnceLock::new();
+    *TRIGGER.get_or_init(|| Trigger::parse(&std::env::var("VICTORY_CAPTURE_DRAWS").ok()?))
+}
+
+/// The frame whose present fired the trigger; 0 until then. It fires once.
+static TRIGGERED_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// At the present of frame `frame`, which recorded `draws` draws.
+pub(crate) fn frame_recorded(frame: u64, draws: u64) {
+    if let Some(t) = trigger()
+        && draws >= t.draws
+        && TRIGGERED_AT
+            .compare_exchange(
+                0,
+                frame,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+    {
+        tracing::info!(
+            frame,
+            draws,
+            frames = t.frames,
+            "capture trigger: saving the frames after this one"
         );
     }
 }
@@ -134,6 +195,17 @@ pub(crate) fn read_back(
     list: &ID3D12GraphicsCommandList,
     texture: &ID3D12Resource,
 ) -> Option<(ID3D12Resource, D3D12_PLACED_SUBRESOURCE_FOOTPRINT)> {
+    read_back_of(device, list, texture, 0)
+}
+
+/// As [`read_back`], of subresource `sub` (the stencil plane of a
+/// one-level, one-slice depth-stencil texture is subresource 1).
+fn read_back_of(
+    device: &ID3D12Device,
+    list: &ID3D12GraphicsCommandList,
+    texture: &ID3D12Resource,
+    sub: u32,
+) -> Option<(ID3D12Resource, D3D12_PLACED_SUBRESOURCE_FOOTPRINT)> {
     let mut footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
     let mut total = 0;
     // SAFETY: a live texture; outputs for one subresource.
@@ -141,7 +213,7 @@ pub(crate) fn read_back(
         let desc = texture.GetDesc();
         device.GetCopyableFootprints(
             &desc,
-            0,
+            sub,
             1,
             0,
             Some(&mut footprint),
@@ -192,7 +264,7 @@ pub(crate) fn read_back(
             pResource: std::mem::transmute_copy(texture),
             Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
             Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                SubresourceIndex: 0,
+                SubresourceIndex: sub,
             },
         };
         list.CopyTextureRegion(&to, 0, 0, 0, &from, None);
@@ -262,6 +334,180 @@ pub(crate) fn dump_on() -> bool {
     *ON.get_or_init(|| folder().is_some() && std::env::var_os("VICTORY_DUMP_TARGETS").is_some())
 }
 
+/// `VICTORY_SHOW_TARGET=<n>`: every frame shows the `n`th texture it
+/// rendered to or wrote (first-use order, the `<i>` of a target dump's file
+/// names) instead of what the title presents; frames with fewer targets show
+/// the title's own picture. `VICTORY_SHOW_TARGET=busiest`: the displayable
+/// target (8-bit, 10-bit or 16-bit float colour, 16:9, at least 1280 wide) bound
+/// most often (render-target binds and UAV uses, not draws), usually a G-buffer layer
+/// in a world frame, picked once and shown for the rest of the run, until the
+/// title releases it (see [`LATCHED`]). Only textures the swap chain copy can take
+/// (single-sampled 2D, one mip level, one array slice) are shown, in either mode. A debugging
+/// view: it shows a buffer as it is (a G-buffer layer unlit, say), not a
+/// finished picture.
+#[derive(Clone, Copy)]
+pub(crate) enum Show {
+    Index(usize),
+    Busiest,
+}
+
+pub(crate) fn show_index() -> Option<Show> {
+    static N: std::sync::OnceLock<Option<Show>> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        let v = std::env::var("VICTORY_SHOW_TARGET").ok()?;
+        let v = v.trim();
+        let show = if v.eq_ignore_ascii_case("busiest") {
+            Show::Busiest
+        } else {
+            Show::Index(v.parse().ok()?)
+        };
+        tracing::warn!(
+            target = v,
+            "VICTORY_SHOW_TARGET: showing a render target instead of the title's picture"
+        );
+        Some(show)
+    })
+}
+
+/// Kept separately from dumps: queue presentation drains dump targets before
+/// Host::present selects its intermediate texture.
+#[allow(clippy::type_complexity)]
+static SHOW_TARGETS: std::sync::Mutex<
+    Vec<(usize, std::sync::Arc<crate::resource::HostTexture>, String)>,
+> = std::sync::Mutex::new(Vec::new());
+
+/// Binds (render-target binds and UAV uses) of each noted target this frame
+/// (show mode `busiest`), by resource address; not draws.
+static HITS: std::sync::Mutex<Option<std::collections::HashMap<usize, u32>>> =
+    std::sync::Mutex::new(None);
+
+/// Show mode `busiest`: the target it picked, kept for the run (a pick of
+/// another size or format on the next frame would resize the swap chain,
+/// which stalls the queue) until the title releases it.
+static LATCHED: std::sync::Mutex<Option<std::sync::Arc<crate::resource::HostTexture>>> =
+    std::sync::Mutex::new(None);
+
+/// The latched value, while anything but the latch holds it; a value only
+/// the latch holds (its title resource is released, no list or target list
+/// holds it) is dropped, so a later pick can latch another.
+fn kept<T>(latched: &mut Option<std::sync::Arc<T>>) -> Option<std::sync::Arc<T>> {
+    if latched
+        .as_ref()
+        .is_some_and(|l| std::sync::Arc::strong_count(l) == 1)
+    {
+        *latched = None;
+    }
+    latched.clone()
+}
+
+/// Counts one bind of `resource` in `hits`.
+fn hit(hits: &mut std::collections::HashMap<usize, u32>, resource: usize) {
+    *hits.entry(resource).or_default() += 1;
+}
+
+/// At the present of `frame` in show mode: the noted target to show, if the
+/// frame has one. Clears the show list independently of target dumps. The
+/// list is taken first: the targets' descriptions
+/// are read with neither lock held.
+pub(crate) fn shown(frame: u64) -> Option<std::sync::Arc<crate::resource::HostTexture>> {
+    let show = show_index()?;
+    let targets = std::mem::take(&mut *SHOW_TARGETS.lock().unwrap_or_else(|e| e.into_inner()));
+    let binds: Vec<u32> = {
+        let mut hits = HITS.lock().unwrap_or_else(|e| e.into_inner());
+        let hits = hits.get_or_insert_with(std::collections::HashMap::new);
+        let binds = targets
+            .iter()
+            .map(|(r, _, _)| hits.get(r).copied().unwrap_or(0))
+            .collect();
+        hits.clear();
+        binds
+    };
+    let logged = frame.is_power_of_two() && frame >= 256;
+    if let Show::Index(n) = show
+        && !logged
+    {
+        return targets
+            .get(n)
+            .filter(|(_, c, _)| {
+                // SAFETY: a live resource.
+                presentable(&unsafe { c.texture.GetDesc() })
+            })
+            .map(|(_, c, _)| c.clone());
+    }
+    if let Show::Busiest = show
+        && !logged
+        && let Some(kept) = kept(&mut LATCHED.lock().unwrap_or_else(|e| e.into_inner()))
+    {
+        return Some(kept);
+    }
+    // One pass: each target's description, read once, with its binds.
+    let seen: Vec<(D3D12_RESOURCE_DESC, u32)> = targets
+        .iter()
+        .zip(binds)
+        // SAFETY: a live resource.
+        .map(|((_, c, _), n)| (unsafe { c.texture.GetDesc() }, n))
+        .collect();
+    if logged {
+        let list: Vec<String> = seen
+            .iter()
+            .enumerate()
+            .map(|(i, (d, n))| format!("{i}: {}x{} f{} ({n} binds)", d.Width, d.Height, d.Format.0))
+            .collect();
+        tracing::info!(frame, ?list, "VICTORY_SHOW_TARGET: this frame's targets");
+    }
+    match show {
+        Show::Index(n) => seen
+            .get(n)
+            .filter(|(d, _)| presentable(d))
+            .map(|_| targets[n].1.clone()),
+        Show::Busiest => {
+            let mut latched = LATCHED.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(kept) = kept(&mut latched) {
+                return Some(kept);
+            }
+            let i = busiest(&seen)?;
+            let d = &seen[i].0;
+            tracing::info!(
+                frame,
+                width = d.Width,
+                height = d.Height,
+                format = d.Format.0,
+                "VICTORY_SHOW_TARGET=busiest: showing this target until the title releases it"
+            );
+            *latched = Some(targets[i].1.clone());
+            latched.clone()
+        }
+    }
+}
+
+/// What show mode `busiest` may show: a texture the swap chain copy takes,
+/// 8-bit, 10-bit or 16-bit float colour, screen-shaped (16:9: not a shadow
+/// map, which is bound more often) and at least 1280 wide.
+fn displayable(d: &D3D12_RESOURCE_DESC) -> bool {
+    presentable(d)
+        && d.Width >= 1280
+        && d.Width * 9 == u64::from(d.Height) * 16
+        && matches!(d.Format.0, 9..=14 | 23..=25 | 27..=32 | 87 | 90 | 91)
+}
+
+/// The index of the displayable target bound most often (the last of
+/// equals), given each target's description and binds.
+fn busiest(seen: &[(D3D12_RESOURCE_DESC, u32)]) -> Option<usize> {
+    seen.iter()
+        .enumerate()
+        .filter(|(_, (d, _))| displayable(d))
+        .max_by_key(|(_, (_, n))| *n)
+        .map(|(i, _)| i)
+}
+
+/// Checks the resource shape required by the swap-chain copy.
+fn presentable(d: &D3D12_RESOURCE_DESC) -> bool {
+    d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D
+        && d.MipLevels == 1
+        && d.DepthOrArraySize == 1
+        && d.SampleDesc.Count == 1
+}
+
 /// `VICTORY_DUMP_WRITERS`' hashes not dumped yet.
 static WRITERS: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
 
@@ -275,7 +521,25 @@ static BUFFERS: std::sync::Mutex<Vec<(usize, Vec<u8>, String)>> = std::sync::Mut
 /// command of `list`, whose submission dumps it again when the frame is
 /// listed).
 pub(crate) fn note_target(list: &crate::host::HostList, resource: crate::object::This) {
-    if resource.is_null() || !dump_on() {
+    if resource.is_null() {
+        return;
+    }
+    if show_index().is_some() {
+        {
+            let mut hits = HITS.lock().unwrap_or_else(|e| e.into_inner());
+            hit(
+                hits.get_or_insert_with(std::collections::HashMap::new),
+                resource as usize,
+            );
+        }
+        let mut targets = SHOW_TARGETS.lock().unwrap_or_else(|e| e.into_inner());
+        if !targets.iter().any(|(r, _, _)| *r == resource as usize)
+            && let Some(copy) = crate::resource::host_copy(resource)
+        {
+            targets.push((resource as usize, copy, String::new()));
+        }
+    }
+    if !dump_on() {
         return;
     }
     let by = WRITER.with(|w| w.borrow().clone());
@@ -594,14 +858,27 @@ fn dump_one(
                 .ResourceBarrier(&[crate::host::transition(texture, state, copy)]);
         }
         let read = read_back(&host.device, &list.list, texture);
+        // The stencil plane of a depth-stencil target, which the title's
+        // lighting reads (material class in the low bits; 0x08 "inside a
+        // room", which the lamps of a room are multiplied by): the plane
+        // after the depth plane of a one-level, one-slice texture.
+        let stencil = (matches!(d.Format.0, 19..=22 | 44..=47)
+            && d.MipLevels == 1
+            && d.DepthOrArraySize == 1)
+            .then(|| read_back_of(&host.device, &list.list, texture, 1))
+            .flatten();
         if state != copy {
             list.list
                 .ResourceBarrier(&[crate::host::transition(texture, copy, state)]);
         }
-        read
+        (read, stencil)
     };
+    let (read, stencil) = read;
     list.close();
     host.execute(&[&list]);
+    if let Some((buffer, footprint)) = stencil {
+        stencil_values(&buffer, &footprint, prefix, resource);
+    }
     let Some((buffer, footprint)) = read else {
         return;
     };
@@ -663,6 +940,67 @@ fn dump_one(
         } else {
             tracing::info!(format = f.Format.0, ?resource, "target not dumped: format");
         }
+        buffer.Unmap(0, None);
+    }
+}
+
+/// Logs which values a stencil plane read back by [`read_back_of`] holds
+/// (the most common first), how many texels have each of its bits, and the
+/// box of the texels with bit 3 (0x08).
+fn stencil_values(
+    buffer: &ID3D12Resource,
+    footprint: &D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
+    frame: &str,
+    resource: crate::object::This,
+) {
+    let f = footprint.Footprint;
+    let (w, h, pitch) = (f.Width as usize, f.Height as usize, f.RowPitch as usize);
+    let mut data = std::ptr::null_mut();
+    // SAFETY: the copy finished; the mapping spans the footprint's rows of
+    // one byte a texel, the last row without its padding.
+    unsafe {
+        if h == 0 || w == 0 || buffer.Map(0, None, Some(&mut data)).is_err() {
+            return;
+        }
+        let rows = std::slice::from_raw_parts(data.cast::<u8>(), pitch * (h - 1) + w);
+        let mut values = [0u32; 256];
+        let mut bits = [0u32; 8];
+        // Left, top, right, bottom of the texels with bit 3.
+        let mut inside = [u32::MAX, u32::MAX, 0, 0];
+        for y in 0..h {
+            for (x, &v) in rows[y * pitch..y * pitch + w].iter().enumerate() {
+                values[usize::from(v)] += 1;
+                for (bit, count) in bits.iter_mut().enumerate() {
+                    *count += u32::from(v >> bit & 1);
+                }
+                if v & 8 != 0 {
+                    inside = [
+                        inside[0].min(x as u32),
+                        inside[1].min(y as u32),
+                        inside[2].max(x as u32),
+                        inside[3].max(y as u32),
+                    ];
+                }
+            }
+        }
+        let mut most: Vec<(usize, u32)> = values
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|v| v.1 != 0)
+            .collect();
+        most.sort_by_key(|v| std::cmp::Reverse(v.1));
+        most.truncate(16);
+        tracing::info!(
+            frame,
+            ?resource,
+            width = w,
+            height = h,
+            values = ?most,
+            texels_with_bit = ?bits,
+            bit3_box = ?inside,
+            "stencil plane values (value, texels)"
+        );
         buffer.Unmap(0, None);
     }
 }
@@ -992,5 +1330,114 @@ mod tests {
             super::to_rgba(87, 1, 1, 4, &[1, 2, 3, 4]),
             Some(vec![3, 2, 1, 255])
         );
+    }
+    #[test]
+    fn the_draw_trigger_reads_a_count_and_an_optional_length() {
+        use super::Trigger;
+        let t = |draws, frames| Some(Trigger { draws, frames });
+        assert_eq!(Trigger::parse("1000"), t(1000, 3));
+        assert_eq!(Trigger::parse(" 1500 , 5 "), t(1500, 5));
+        assert_eq!(Trigger::parse(""), None);
+        assert_eq!(Trigger::parse("0"), None);
+        assert_eq!(Trigger::parse("1000,0"), None);
+        assert_eq!(Trigger::parse("many"), None);
+        assert_eq!(Trigger::parse("1000,3,7"), None);
+    }
+
+    #[test]
+    fn the_draw_trigger_picks_the_frames_after_the_one_that_fired() {
+        let t = super::Trigger {
+            draws: 1000,
+            frames: 3,
+        };
+        // Not fired yet: nothing is picked.
+        assert!(!(0..10).any(|n| t.picks(n, 0)));
+        // Fired at the present of frame 2850: frames 2851 to 2853.
+        let picked: Vec<u64> = (2840..2860).filter(|&n| t.picks(n, 2850)).collect();
+        assert_eq!(picked, [2851, 2852, 2853]);
+    }
+    #[test]
+    fn swap_copy_requires_one_single_sampled_2d_subresource() {
+        let mut d = super::D3D12_RESOURCE_DESC {
+            Dimension: super::D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            MipLevels: 1,
+            DepthOrArraySize: 1,
+            SampleDesc: super::DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            ..Default::default()
+        };
+        assert!(super::presentable(&d));
+        d.MipLevels = 4;
+        assert!(!super::presentable(&d));
+        d.MipLevels = 1;
+        d.DepthOrArraySize = 2;
+        assert!(!super::presentable(&d));
+        d.DepthOrArraySize = 1;
+        d.SampleDesc.Count = 4;
+        assert!(!super::presentable(&d));
+        d.SampleDesc.Count = 1;
+        d.Dimension = super::D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+        assert!(!super::presentable(&d));
+    }
+
+    /// A screen-shaped colour target of the swap chain copy's shape.
+    fn screen(width: u64, height: u32, format: i32) -> super::D3D12_RESOURCE_DESC {
+        super::D3D12_RESOURCE_DESC {
+            Dimension: super::D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            DepthOrArraySize: 1,
+            Format: super::DXGI_FORMAT(format),
+            SampleDesc: super::DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn busiest_counts_binds_per_target_and_skips_undisplayable_ones() {
+        let mut hits = std::collections::HashMap::new();
+        // Target 1 (a shadow map, square) is bound most, then 3, then 2.
+        for (resource, binds) in [(1, 9), (2, 2), (3, 5), (4, 7)] {
+            for _ in 0..binds {
+                super::hit(&mut hits, resource);
+            }
+        }
+        assert_eq!(hits[&3], 5);
+        let shapes = [
+            screen(4096, 4096, 10),
+            screen(1920, 1080, 28),
+            screen(1920, 1080, 10),
+            // Depth (format 40) is not shown.
+            screen(1920, 1080, 40),
+        ];
+        let seen: Vec<_> = shapes
+            .into_iter()
+            .zip([1, 2, 3, 4])
+            .map(|(d, r)| (d, hits.get(&r).copied().unwrap_or(0)))
+            .collect();
+        assert_eq!(super::busiest(&seen), Some(2));
+        // Too small or no target displayable: none.
+        assert_eq!(super::busiest(&[(screen(1024, 576, 28), 3)]), None);
+        assert_eq!(super::busiest(&[]), None);
+    }
+
+    #[test]
+    fn a_latched_pick_is_kept_until_only_the_latch_holds_it() {
+        let title = std::sync::Arc::new(7u32);
+        let mut latched = Some(title.clone());
+        // The title still holds it: kept, though another target is busier now.
+        assert!(super::kept(&mut latched).is_some_and(|k| *k == 7));
+        assert!(latched.is_some());
+        // Released: dropped, a later pick may latch another.
+        drop(title);
+        assert!(super::kept(&mut latched).is_none());
+        assert!(latched.is_none());
+        assert!(super::kept::<u32>(&mut None).is_none());
     }
 }

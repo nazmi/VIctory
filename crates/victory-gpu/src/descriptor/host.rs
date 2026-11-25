@@ -1212,6 +1212,30 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
             let resource = *resource as crate::object::This;
             if let Some(copy) = crate::resource::host_copy(resource) {
                 let texture = &copy.texture;
+                // The title's views of textures with a stencil plane, as it
+                // describes them (format, dimension, component mapping, a
+                // pad, then first level, levels, plane): each distinct one
+                // once. They say how its shaders read the stencil plane
+                // (the lighting takes each pixel's material class and its
+                // "inside a room" bit from it).
+                #[cfg(feature = "diagnostics")]
+                {
+                    // SAFETY: the shared host copy owns a live resource.
+                    let own = unsafe { texture.GetDesc() }.Format.0;
+                    if matches!(own, 19..=22 | 44..=47) {
+                        static SEEN: Mutex<Vec<(i32, Option<[u32; 10]>)>> = Mutex::new(Vec::new());
+                        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+                        if seen.len() < 64 && !seen.contains(&(own, *desc)) {
+                            seen.push((own, *desc));
+                            tracing::info!(
+                                ?resource,
+                                texture_format = own,
+                                view = ?desc,
+                                "shader view of a depth-stencil texture"
+                            );
+                        }
+                    }
+                }
                 let mut desc = desc.as_ref().map(srv_desc);
                 if desc.is_none() && !default_view(resource) {
                     return None;

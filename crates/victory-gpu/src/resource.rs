@@ -2578,5 +2578,49 @@ mod tests {
         assert_eq!(release(heap), 0);
         assert_eq!(release(results), 0);
     }
-
+    #[cfg(all(windows, feature = "diagnostics"))]
+    #[test]
+    fn target_dump_keeps_the_intermediate_presentation_pick() {
+        if !crate::host::tests::isolated(
+            "resource::tests::target_dump_keeps_the_intermediate_presentation_pick",
+        ) {
+            return;
+        }
+        let folder = tempfile::tempdir().unwrap();
+        // SAFETY: this isolated, single-test subprocess has not initialized
+        // the host or capture settings; no other test reads its environment.
+        unsafe {
+            std::env::set_var("VICTORY_SHOW_TARGET", "0");
+            std::env::set_var("VICTORY_CAPTURE", folder.path());
+            std::env::set_var("VICTORY_DUMP_TARGETS", "1");
+            std::env::set_var("VICTORY_CAPTURE_FRAMES", "1");
+        }
+        let host = crate::host::host().expect("WARP device");
+        let list = host.new_list().unwrap();
+        let null = std::ptr::null();
+        let mut target = null;
+        assert_eq!(
+            create_committed(
+                null,
+                &PROPERTIES,
+                0,
+                &texture(16, 16, 28, 1),
+                0,
+                null.cast(),
+                &RESOURCE_IIDS[0],
+                &mut target
+            ),
+            S_OK
+        );
+        let copy = host_copy(target).expect("host texture");
+        crate::capture::note_target(&list, target);
+        crate::capture::dump_targets(1);
+        let shown = crate::capture::shown(1).expect("dump must not consume the show target");
+        assert!(std::sync::Arc::ptr_eq(&copy, &shown));
+        assert!(
+            crate::capture::shown(2).is_none(),
+            "show list drains at present"
+        );
+        assert_eq!(slot::<Release>(target, 0x10)(target), 0);
+    }
 }
