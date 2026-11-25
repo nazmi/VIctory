@@ -152,3 +152,38 @@ not give; `scripts/play.ps1` is the path that does.
   `0x218` and `0x1c8`.
 - One descriptor warning: `buffer view empty or past its host copy first=0
   count=0`.
+
+## Black screen with audio, and what the render size follows (2026-11-25 14:0x UTC)
+
+Runs, one at a time, Radeon 780M / 32 GB shared, `--execute`,
+`VICTORY_CAPTURE` + `VICTORY_DUMP_TARGETS` to read back what the title drew:
+
+| Profile | Presented texture | What it holds | Title's own target |
+| --- | --- | --- | --- |
+| Series X | 1920x1080 | the intro plays, 3.8-4.2 MB frames | 3840x2160 f28, full art |
+| Series S | 960x540 | **black, every frame** | 3840x2160 f28, account-picker menu |
+
+So Series S is not a present-path fault: `Present` never failed (0 of 15,500
+frames), and the title's own render target does hold the menu. What it hands
+over to present is a texture nothing writes.
+
+Two things were invisible and are now recorded: a failed `Present` used to be
+dropped with `let _ =` (a log full of "frame presented" and a black screen
+looked identical), and the plane we are asked to show was never described.
+The latter now logs `planes=N count=M [0] WxH fFF` once per shape.
+
+**Render size does not follow what we report.** With
+`VICTORY_DISPLAY=1280x720` (the emulated DXGI mode list) and
+`VICTORY_WINDOW_MAX=1280x720` (the window fitted, logged as
+`title window fitted ... to=(1280, 720)`), the title still creates
+3840x2160 render targets. It sizes them from something else; the console's
+10 GiB title memory and the device type are the remaining candidates. Cutting
+GPU work therefore needs a cap at resource creation with matching view
+scaling, not an environment variable.
+
+Cost at 4K, from the run statistics: ~440 ms on the GPU and ~300 MB of
+memory copied per frame, about 1 fps in the intro. The copies are the larger
+share of the frame and are CPU-side.
+
+`VICTORY_DISPLAY` is kept (safe default: the console's 4K) because it changes
+what the title hands over, but it does not reduce internal rendering.
