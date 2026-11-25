@@ -66,7 +66,11 @@ impl Cache {
         let (tmp, mut file) = tempfile_in(dir)?;
         let written = file.write_all(&output);
         drop(file);
-        let published = written.and_then(|()| std::fs::rename(&tmp, &path));
+        if let Err(error) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error.into());
+        }
+        let published = std::fs::rename(&tmp, &path);
         if published.is_err() {
             let _ = std::fs::remove_file(&tmp);
         }
@@ -179,6 +183,14 @@ mod tests {
                 .share_mode(FILE_SHARE_READ)
                 .open(&self.entry)?;
             *self.held.lock().unwrap() = Some(file);
+            let (probe, mut staged) = tempfile_in(self.entry.parent().unwrap())?;
+            staged.write_all(&output)?;
+            drop(staged);
+            assert!(
+                std::fs::rename(&probe, &self.entry).is_err(),
+                "the open reader must block replacement of the published entry"
+            );
+            std::fs::remove_file(probe)?;
             Ok(output)
         }
     }
