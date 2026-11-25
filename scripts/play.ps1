@@ -25,8 +25,11 @@ if ($SmallGpu) {
     # The title selects its smaller render configuration from the console
     # model. The reported display mode alone does not change that choice.
     $runArgs += @('--console', 'series-s')
-    $env:VICTORY_MODE = '1280x720'
-    Write-Host 'Small GPU: Series S profile, reported display 1280x720.'
+    # Under this profile the title renders 3840x2160 but asks to present an
+    # empty 1920x1080 texture; D3D12 cannot scale on copy, so show the target
+    # that holds the picture.
+    $env:VICTORY_PRESENT_LARGEST = '1'
+    Write-Host 'Small GPU: Series S profile, presenting the largest render target.'
 }
 $log = Join-Path ([System.IO.Path]::GetTempPath()) 'victory-play.log'
 # Native stderr is diagnostic text; preserve the executable's actual exit status.

@@ -152,3 +152,75 @@ not give; `scripts/play.ps1` is the path that does.
   `0x218` and `0x1c8`.
 - One descriptor warning: `buffer view empty or past its host copy first=0
   count=0`.
+
+## Black screen with audio, and what the render size follows (2026-11-25 14:0x UTC)
+
+Runs, one at a time, Radeon 780M / 32 GB shared, `--execute`,
+`VICTORY_CAPTURE` + `VICTORY_DUMP_TARGETS` to read back what the title drew:
+
+| Profile | Texture asked for | What it holds | Title's own target |
+| --- | --- | --- | --- |
+| Series X | 3840x2160 f28 mips1 | the intro plays | 3840x2160 f28, full art |
+| Series S | 1920x1080 f28 mips1 | **black, every frame** | 3840x2160 f28, account-picker menu |
+
+**Read the PNG sizes below with care: `capture::save_as` saves half the
+width and half the height of every image** (`capture.rs`, `(width/2,
+height/2)`), so a 960x540 PNG is a 1920x1080 texture and a 1920x1080 PNG is
+3840x2160. An earlier revision of this file read those PNG sizes as texture
+sizes and said 960x540; the logged descriptors say otherwise and are the
+authority.
+
+So Series S is not a present-path fault: `Present` never failed (0 of 15,500
+frames), and the title's own render target does hold the menu. What it hands
+over to present is a smaller texture nothing writes.
+
+Two things were invisible and are now recorded: a failed `Present` used to be
+dropped with `let _ =` (a log full of "frame presented" and a black screen
+looked identical), and the plane we are asked to show was never described.
+The latter now logs `planes=N count=M [0] WxH fFF` once per shape.
+
+### Why the platform has to do the scaling (D3D12)
+
+- A **subresource** is a (mip slice, array slice, plane slice) triple; the
+  plane slice exists for planar formats (NV12 and friends) and is always 0
+  otherwise. `GetDesc` reports mip 0's dimensions, and a view may address a
+  subresource range.
+- Both presented textures here report `mips=1 array=1`, so the 1920x1080 one
+  is **its own resource**, not a mip or plane of the 3840x2160 one. Nothing
+  can be recovered by reinterpreting a subresource.
+- D3D12 has **no scaling copy**: `CopyResource` requires identical dimensions,
+  format and sample count, and `CopySubresourceRegion` copies a box at 1:1
+  with no filtering. `ResolveSubresource` resolves MSAA and does not scale.
+  So producing a 1920x1080 picture from a 3840x2160 target needs a shader
+  pass with a sampler, or presenting the larger resource and letting the
+  window/DXGI scaling stretch it.
+- Our present path sizes the swap chain to the texture it is given, so there
+  is no size mismatch to hit: Series X works because the title asks for the
+  same 3840x2160 it renders.
+
+**Fix, measured.** `VICTORY_PRESENT_LARGEST=1` presents the largest
+single-mip R8G8B8A8 render target instead of the plane asked for, and the
+window scales it. Series S with it on: the intro plays, 26.8 fps in the menu,
+2,735 MB of host textures, 0 Present failures. It is opt-in rather than the
+default because a title that legitimately presents a small overlay over a
+larger target would get the wrong picture, and nothing here distinguishes the
+two cases yet. A real scale pass (fullscreen triangle into the asked-for
+texture) would keep the present size the title asked for and avoid relying on
+window stretching; it needs an emitted DXIL blit, which this tree does not
+have.
+
+**Render size does not follow what we report.** With
+`VICTORY_DISPLAY=1280x720` (the emulated DXGI mode list) and
+`VICTORY_WINDOW_MAX=1280x720` (the window fitted, logged as
+`title window fitted ... to=(1280, 720)`), the title still creates
+3840x2160 render targets. It sizes them from something else; the console's
+10 GiB title memory and the device type are the remaining candidates. Cutting
+GPU work therefore needs a cap at resource creation with matching view
+scaling, not an environment variable.
+
+Cost at 4K, from the run statistics: ~440 ms on the GPU and ~300 MB of
+memory copied per frame, about 1 fps in the intro. The copies are the larger
+share of the frame and are CPU-side.
+
+`VICTORY_DISPLAY` is kept (safe default: the console's 4K) because it changes
+what the title hands over, but it does not reduce internal rendering.

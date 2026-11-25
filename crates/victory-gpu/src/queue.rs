@@ -236,6 +236,16 @@ pub(crate) fn presented() -> u64 {
 ///
 /// shortcut: one plane, no scaling or placement, the source expected in
 /// the common state.
+/// Whether to show the largest colour target rather than the plane asked for
+/// (`VICTORY_PRESENT_LARGEST`): a diagnostic for titles that render at one
+/// size and hand over a smaller texture nothing fills.
+fn present_largest() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("VICTORY_PRESENT_LARGEST").is_ok_and(|v| v != "0" && !v.is_empty())
+    })
+}
+
 extern "system" fn present(
     _: This,
     planes: u32,
@@ -286,15 +296,19 @@ extern "system" fn present(
     // SAFETY: the title passes a plane description (the branch below is
     // what uses it, and this reads only its shape).
     if let Some(plane) = unsafe { plane_parameters.as_ref() } {
-        static SAID: std::sync::Mutex<Option<(u64, u32, i32)>> = std::sync::Mutex::new(None);
-        let shape = plane.resources.is_null().then_some((0, 0, 0)).or_else(|| {
-            // SAFETY: the plane lists at least one resource.
-            let r = unsafe { *plane.resources };
-            // SAFETY: a live host texture; a plain query on it.
-            crate::resource::host_resource(r)
-                .map(|t| unsafe { t.GetDesc() })
-                .map(|d| (d.Width, d.Height, d.Format.0))
-        });
+        static SAID: std::sync::Mutex<Option<(u64, u32, i32, u16)>> = std::sync::Mutex::new(None);
+        let shape = plane
+            .resources
+            .is_null()
+            .then_some((0, 0, 0, 0))
+            .or_else(|| {
+                // SAFETY: the plane lists at least one resource.
+                let r = unsafe { *plane.resources };
+                // SAFETY: a live host texture; a plain query on it.
+                crate::resource::host_resource(r)
+                    .map(|t| unsafe { t.GetDesc() })
+                    .map(|d| (d.Width, d.Height, d.Format.0, d.MipLevels))
+            });
         let changed = {
             let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
             if *said == shape {
@@ -312,8 +326,19 @@ extern "system" fn present(
                     let r = unsafe { *plane.resources.add(i) };
                     // SAFETY: a live host texture; a plain query on it.
                     match crate::resource::host_resource(r).map(|t| unsafe { t.GetDesc() }) {
-                        Some(d) => said
-                            .push_str(&format!(" [{i}] {}x{} f{}", d.Width, d.Height, d.Format.0)),
+                        // The whole descriptor: a smaller present texture
+                        // is either its own resource or a subresource of a
+                        // larger one, and the mip count says which.
+                        Some(d) => said.push_str(&format!(
+                            " [{i}] {}x{} f{} dim{} mips{} array{} flags{:#x}",
+                            d.Width,
+                            d.Height,
+                            d.Format.0,
+                            d.Dimension.0,
+                            d.MipLevels,
+                            d.DepthOrArraySize,
+                            d.Flags.0
+                        )),
                         None => said.push_str(&format!(" [{i}] no host copy")),
                     }
                 }
@@ -328,19 +353,39 @@ extern "system" fn present(
         && plane.count > 0
         && !plane.resources.is_null()
         // SAFETY: the plane lists `count` resources.
-        && let resource = unsafe { *plane.resources }
-        && let Some(texture) = crate::resource::host_resource(resource)
+        && let asked = unsafe { *plane.resources }
         && let Some(host) = crate::host::host()
     {
         const COPY_SOURCE: u32 = 0x800;
-        let state = crate::resource::host_transition(resource, COPY_SOURCE)
-            .map_or(COPY_SOURCE, |(_, before)| before);
-        let shown = host.present(texture, state, frame);
-        crate::resource::host_transition(resource, state);
-        #[cfg(feature = "diagnostics")]
-        blinks(frame, resource, state, shown);
-        #[cfg(not(feature = "diagnostics"))]
-        let _ = shown;
+        // A title may render at one size and hand over a smaller texture it
+        // expects the platform to scale. D3D12 has no scaling copy
+        // (`CopyResource` wants equal sizes and formats), so that smaller
+        // texture can stay empty while the picture sits in the larger target.
+        // `VICTORY_PRESENT_LARGEST=1` shows the larger target instead, and
+        // the window scales it.
+        let resource = match crate::resource::largest_colour_target(asked) {
+            Some((bigger, w, h)) if present_largest() => {
+                tracing::warn!(
+                    asked = asked as usize,
+                    chosen = bigger as usize,
+                    w,
+                    h,
+                    "presenting the largest colour target, not the plane asked for"
+                );
+                bigger
+            }
+            _ => asked,
+        };
+        if let Some(texture) = crate::resource::host_resource(resource) {
+            let state = crate::resource::host_transition(resource, COPY_SOURCE)
+                .map_or(COPY_SOURCE, |(_, before)| before);
+            let shown = host.present(texture, state, frame);
+            crate::resource::host_transition(resource, state);
+            #[cfg(feature = "diagnostics")]
+            blinks(frame, resource, state, shown);
+            #[cfg(not(feature = "diagnostics"))]
+            let _ = shown;
+        }
     }
     #[cfg(not(windows))]
     let _ = (planes, plane_parameters);
