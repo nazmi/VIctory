@@ -278,6 +278,49 @@ extern "system" fn present(
             crate::capture::dump_targets(frame);
         }
     }
+    // What the title asks to be shown, said once: a black screen is either
+    // a plane we were told to present or one we were not. `planes` is not a
+    // count of plane structures (a second one reads as garbage), so only the
+    // first is described.
+    #[cfg(all(windows, feature = "diagnostics"))]
+    // SAFETY: the title passes a plane description (the branch below is
+    // what uses it, and this reads only its shape).
+    if let Some(plane) = unsafe { plane_parameters.as_ref() } {
+        static SAID: std::sync::Mutex<Option<(u64, u32, i32)>> = std::sync::Mutex::new(None);
+        let shape = plane.resources.is_null().then_some((0, 0, 0)).or_else(|| {
+            // SAFETY: the plane lists at least one resource.
+            let r = unsafe { *plane.resources };
+            // SAFETY: a live host texture; a plain query on it.
+            crate::resource::host_resource(r)
+                .map(|t| unsafe { t.GetDesc() })
+                .map(|d| (d.Width, d.Height, d.Format.0))
+        });
+        let changed = {
+            let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+            if *said == shape {
+                false
+            } else {
+                *said = shape;
+                true
+            }
+        };
+        if changed {
+            let mut said = format!("planes={planes} count={}", plane.count);
+            if !plane.resources.is_null() {
+                for i in 0..plane.count as usize {
+                    // SAFETY: the plane lists `count` resources.
+                    let r = unsafe { *plane.resources.add(i) };
+                    // SAFETY: a live host texture; a plain query on it.
+                    match crate::resource::host_resource(r).map(|t| unsafe { t.GetDesc() }) {
+                        Some(d) => said
+                            .push_str(&format!(" [{i}] {}x{} f{}", d.Width, d.Height, d.Format.0)),
+                        None => said.push_str(&format!(" [{i}] no host copy")),
+                    }
+                }
+            }
+            tracing::info!("{said}");
+        }
+    }
     #[cfg(windows)]
     if planes > 0
         // SAFETY: the title passes `planes` plane descriptions.
