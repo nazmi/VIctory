@@ -12,14 +12,14 @@ happened to each open PR". Per-worker accounting is in
 
 | Disposition | Count |
 | --- | --- |
-| integrated | 233 |
+| integrated | 234 |
 | rejected | 21 |
 | deferred | 8 |
 | held | 6 |
 | duplicate | 20 |
 | obsolete | 2 |
 | already-present | 1 |
-| not yet reviewed | 766 |
+| not yet reviewed | 765 |
 | total open | 1057 |
 
 A further 18 PRs are in the branch and no longer open upstream;
@@ -27,7 +27,7 @@ they are in [pr-integration-ledger.md](pr-integration-ledger.md).
 
 ## Read this before trusting a row
 
-**766 of 1057 have no reviewed disposition.** They are
+**765 of 1057 have no reviewed disposition.** They are
 listed rather than omitted so that silence is never read as approval.
 
 `integrated` means the change is in **this branch**, reviewed and tested when
@@ -144,7 +144,7 @@ Newest first. `—` in the commit column means nothing is in the tree.
 | #1642 | `f876a822b059` | not yet reviewed | — |  | Shaders: preserve signaling NaNs in typed buffer loads |
 | #1641 | `3271c00e8c9b` | not yet reviewed | — |  | GameInput: answer IUnknown and own-IID queries on the COM objects |
 | #1640 | `b916a9c0d419` | not yet reviewed | — |  | GPU: constant buffer views of at most 64 KiB |
-| #1639 | `0b7a13c68dfb` | not yet reviewed | — |  | PE: map header RVAs and read TLS data from the headers |
+| #1639 | `0b7a13c68dfb` | integrated | — |  | PE: map header RVAs and read TLS data from the headers |
 | #1638 | `ab4a6e645b1e` | not yet reviewed | — |  | [BUNDLE] NVIDIA stack: Impre-visible's tree (wave64 #189 + the world-run list… |
 | #1636 | `40f30be0b52f` | duplicate | — | code already correct; its test was added here | Shaders: GFX10 FLAT offsets ignore bit 11 |
 | #1635 | `6dcf40a4c8b4` | integrated | — |  | victory-gpu: drop an indirect call before its clamp, not after (1 400-1 750 a… |
