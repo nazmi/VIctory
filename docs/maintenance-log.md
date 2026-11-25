@@ -1835,3 +1835,49 @@ Pending: semantic port after ztrx lands, repeat combined checks, then measure
 Series S on the physical GPU. Unbounded placed/loose caches and staging still
 need allocation-generation invalidation with descriptor/list lifetime safety.
 There is no evidence yet that memory peaks or device removal are resolved.
+
+## 2026-11-25 13:37 UTC — upstream 940d32f6 merged; host copies deferred; world-load memory fixed
+
+**Branch.** `integration/maintenance` at `601fcab3`, a `--no-ff` merge of
+`merge/up2` (`b2f08b94`). The merged tree is byte-identical to the tree that
+was gated (`e153178b`), so the gate evidence below is that tree's own.
+
+Source commits: `afaacd64` (merge of upstream/main `940d32f6`, 291 commits),
+`3931cae8` (host copy made on first use), `b2f08b94` (measurements).
+
+**What was lost and restored.** The 291-commit merge took upstream's
+`crates/victory-gpu/src/resource.rs` wholesale, which discarded the deferral
+`fix/small-gpu-memory` carried: host copies were again allocated for every
+texture the title reserved, drawn or not. That is the OOM cause. Re-applied
+against the new file (state and clear value kept on the `Resource`, alias
+lookup and `Drop` inspecting existing copies without allocating).
+
+**Measured, same machine (Radeon 780M, 32 GB shared), `--execute`, one run
+at a time.** Before/after are the same title and scene, different builds:
+
+| | copies at reserve | copies on first use |
+| --- | --- | --- |
+| host textures at end | 3,894 | 1,515 (flat 240 s) |
+| host texture bytes at end | 9,583 MB | 4,803 MB (flat 240 s) |
+| `0x8007000E` failures | 439 | 0 |
+| device removals | 97 | 0 |
+| run | 104 s, died at frame 3,214 | 240 s, frame 4,096 (my timeout) |
+| draws dropped | 0 | 0 |
+
+**Not claimed: stable world play.** The surviving run held 30.0 fps with 8 ms
+of GPU work per 33 ms frame and ~13 draws/frame, which is the boot/menu scene
+on a vsync-locked present. The frame budget was not the constraint, so this
+says nothing about the world. Reaching the world needs input to the title;
+`--execute` gives none. `scripts/play.ps1` is the path that does.
+
+**Remaining, from that run:** one pixel shader refused,
+`GFX10 code at 0x38c: barycentrics read directly is not supported`
+(hash `98bd9f9ae5f9c7e3`, draws dropped, so visible); two
+`victory_gpu::object` device slots unimplemented (`0x218`, `0x1c8`); one
+descriptor warning `buffer view empty or past its host copy first=0 count=0`.
+The earlier TDR did not recur, but one clean run does not retire it.
+
+**Validation.** fmt 0 differing; both `clippy --workspace --all-targets`
+configurations 0 errors; workspace 754 passed / 0 failed / 12 existing
+ignores; asset policy 0 failures. Run logs outside the repo under
+`C:\Users\nazmi\victory-runs\`.
