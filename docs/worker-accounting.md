@@ -229,3 +229,12 @@ Worker `review_pr1722`, `gpt-6.1-sol` medium: source08b526d9, candidate
 `0b88cae5`, all changes integrated as no-ff merge `a202f7ff`. 1/1 files fully
 reviewed; no unaccounted worker changes. Windows WARP source/candidate checks
 and coordinator integration gate passed; Wine unavailable.
+
+### Codex continuation: PR #421 and deferred follow-ups
+
+Worker `review_pr421`: `ed600eb8` plus race-free test follow-up `20782e9e`,
+both integrated as no-ff merge `5cb63e52`. Every source change accounted for.
+Worker follow-up requests #1436/#1432/#1032 produced no commits (usage-limit
+errors before execution); source/candidate worktrees for those remain clean.
+Coordinator #1324 candidate `7f94c8f1` intentionally remains unmerged on its
+review branch while user-requested ztrx comparison takes priority.

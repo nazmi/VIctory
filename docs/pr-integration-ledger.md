@@ -335,3 +335,5 @@ the upstream tree.
 | #1557 | `1504ec9aa4465bfe99dcf9311ea0b5091ef1a892` | `c159fa22` | `9e0d40a2` | Full 1-file review; source24/candidate45 formats tests; negative control; complete integration gate passed. |
 
 | #1722 | `08b526d98c2da5bf7d2a99b585c6e48b1b5a82c0` | `0b88cae5` | `a202f7ff` | Full 1-file review; source WARP check; candidate110/default and120/diagnostics; complete integration gate passed. Wine unavailable. |
+
+| #421 | `83b2037e40ea3fe2990f9aac88f46afa0b77c84d` | `ed600eb8`, `20782e9e` | `5cb63e52` | 1/1 file review; source-root negative control; HLE190, repeated parallel file tests180; full integration gate passed. |

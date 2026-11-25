@@ -1626,3 +1626,42 @@ Source focused test1/0, candidate GPU110/0 and diagnostics120/0, both targeted
 Clippy gates/fmt/policy pass. Full combined workspace gates passed (logs
 `C:/Users/nazmi/victory-runs/codex-1722-*`), policy224 files. `--no-ff` parents
 `94e25680`, `0b88cae5`. Wine unavailable; no claim of Wine/hardware verification.
+
+### PR #421 integrated-local: `5cb63e52`
+
+Full exact-source review at83b2037e (1/1 files), current head/open state checked
+before no-ff commit. Candidate `ed600eb8` preserves local parent clamping and
+fixes source drive-root separator loss; regression against source fails.
+Follow-up `20782e9e` removes shared test-drive remounting; 20 eight-thread file
+runs pass (180 tests). HLE190 unit tests and two integration harnesses pass,
+FidelityFX external-DLL coverage unavailable. Complete combined workspace
+fmt/Clippy both modes/tests passed (`codex-421-*` outside repo), policy224 files.
+No-ff merge `5cb63e52`, parents `47365e94` and `20782e9e`.
+
+### Scope steering: Zettrox/ztrx integration
+
+User requested prioritizing Zettrox/ztrx. #1324 candidate `7f94c8f1` remains
+reviewed and targeted-tested on `review/codex-pr-1324`, not merged; source5 and
+candidate9 tests passed, both targeted Clippy modes/fmt/policy passed, rename
+fallback negative control failed. Its full combined gate is pending. No new
+code was produced for the later #1436/#1432/#1032 review requests: workers hit
+usage limits before starting; their new worktrees remain clean.
+
+Ztrx source: `https://github.com/Zettrox/ztrx`, exact main `90b529f878a470fec9bf07b7be316bc769a12232`,
+shared base `ffe310eb`. Public source tree170 files inspected before fetching;
+only binary is the existing BCpack-table exception. Source GPL-3.0-or-later
+workspace. No title files are needed or run. Read-only source worktree:
+`../VIctory-review-ztrx`, source ref `ztrx/main`. Compared with our current tree:
+204 changed paths, many newer local features/tests absent from the fork. Do
+not replace the integrated tree or import its relaxed unsafe/style lints.
+
+Ordered plan: inventory source features against current and previously
+reviewed fork work; identify self-contained, behaviorally testable improvements;
+port onto current upstream architecture in a separate candidate worktree,
+retaining attribution and regression repairs; test exact source where feasible,
+add synthetic regression/negative controls, run required full integration gate
+and merge accepted candidates with `--no-ff`. Record dependencies and any
+refused/held features rather than claiming full fork compatibility. Priority
+candidate: conservative uniform-diamond shader jump threading, independently
+of the fork's incompatible unspill/approximate wave64 paths. Source guarded
+or approximate/GPU scheduling changes need separate proof before acceptance.

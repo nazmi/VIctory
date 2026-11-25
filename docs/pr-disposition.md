@@ -27,8 +27,8 @@ before acting. `not yet reviewed` is explicitly unfinished, never approval.
 | duplicate | 9 |
 | held | 5 |
 | integrated | 96 |
-| integrated-local | 2 |
-| not yet reviewed | 592 |
+| integrated-local | 3 |
+| not yet reviewed | 591 |
 | rejected | 5 |
 | total open | 713 |
 
@@ -644,7 +644,7 @@ before acting. `not yet reviewed` is explicitly unfinished, never approval.
 | #428 | `a312333c28eb` | integrated | `ca8d2253` | in the branch | GameInput: next and previous readings of a disconnected device fail |
 | #427 | `16d395ccc097` | not yet reviewed | â€” |  | GPU: say in device-removed reports which user data is a table |
 | #425 | `012ce71c5a8c` | integrated | `2c9c3325` | in the branch | Game: validate DXBC containers in SGD5 records |
-| #421 | `83b2037e40ea` | not yet reviewed | â€” |  | HLE: clean dot parts in extended virtual-drive paths |
+| #421 | `83b2037e40ea` | integrated-local | `5cb63e52` | Extended virtual-path cleanup; fixed source drive-root separator loss; retained local parent clamp; dynamically allocated test letters; full integration gate passed; no-ff merge | HLE: clean dot parts in extended virtual-drive paths |
 | #420 | `b4b9498abc00` | not yet reviewed | â€” |  | GPU: include root-selected entries in rebuilt descriptor tables |
 | #416 | `16d21661cf55` | not yet reviewed | â€” |  | shader: implement v_cvt_f32_f64 instruction lowering |
 | #415 | `6924b095e3bf` | integrated | `e9aecbd8` | in the branch | GPU: use native root type codes in the shader cache |

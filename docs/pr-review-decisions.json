@@ -35,5 +35,25 @@
       "policy_exit": 0
     },
     "limitations": "Wine unavailable; WARP verifies Windows compatibility, not Wine. Mesh rendering unavailable on WARP."
+  },
+  "421": {
+    "source_sha": "83b2037e40ea3fe2990f9aac88f46afa0b77c84d",
+    "state": "integrated-local",
+    "commit": "`5cb63e52`",
+    "candidate": "20782e9e4ffc09ae363b406d768963d8d7803540",
+    "merge_sha": "5cb63e5282c62160fb788b5df0bd2c2449223e33",
+    "reason": "Extended virtual-path cleanup; fixed source drive-root separator loss; retained local parent clamp; dynamically allocated test letters; full integration gate passed; no-ff merge",
+    "tests": {
+      "source_files_passed": 6,
+      "candidate_hle_unit_passed": 190,
+      "parallel_repetitions": 20,
+      "parallel_files_tests_total": 180,
+      "workspace_exit": 0,
+      "clippy_default_exit": 0,
+      "clippy_all_features_exit": 0,
+      "fmt_exit": 0,
+      "policy_exit": 0
+    },
+    "limitations": "FidelityFX integration returned early without external DLL; no title execution."
   }
 }
