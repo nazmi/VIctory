@@ -112,6 +112,22 @@ const _: () = assert!(size_of::<ResourceDesc>() == 56);
 const BUFFER: u32 = 1;
 const TEXTURE_3D: u32 = 4;
 
+/// The host dimension of a title resource: 1D textures (and 1D arrays) are
+/// 2D on the host, one texel high. The console samples a 1D texture with 2D
+/// image instructions too (its hardware goes by the descriptor and ignores
+/// the extra coordinate); D3D12 wants the shader's resource type to match
+/// the view, so the translation reads every 1D view as 2D and the views
+/// (`descriptor::host`) and textures are made 2D to match.
+pub(crate) fn host_dimension(dimension: u32) -> u32 {
+    const TEXTURE_1D: u32 = 2;
+    const TEXTURE_2D: u32 = 3;
+    if dimension == TEXTURE_1D {
+        TEXTURE_2D
+    } else {
+        dimension
+    }
+}
+
 /// Bytes per element and the element's width in texels (4 for block
 /// compression), by DXGI format number. `None` for 1-bit and video
 /// formats. The console adds 116/117 (10-bit float color), 118-120 (16-bit
@@ -1013,6 +1029,10 @@ fn host_desc(desc: &ResourceDesc) -> Option<ResourceDesc> {
     d.layout = 0;
     d.alignment = 0;
     d.flags &= PC_FLAGS;
+    if host_dimension(d.dimension) != d.dimension {
+        d.dimension = host_dimension(d.dimension);
+        d.height = 1;
+    }
     // PC refuses depth targets that are also unordered-access (the console
     // allows both; Grand Theft Auto VI's shadow maps and material depth ask
     // for it): unordered views of such a texture write its twin
@@ -1892,6 +1912,20 @@ mod tests {
         // Boundaries: 59 belongs to the preceding family, 66 is unmapped.
         assert_eq!(family(59), 53);
         assert_eq!(family(66), 66);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn one_d_host_descriptions_keep_slices_and_mips() {
+        let mut desc = texture(16, 7, 28, 3);
+        desc.dimension = 2;
+        desc.depth_or_array_size = 4;
+        let host = host_desc(&desc).expect("texture description");
+        assert_eq!((host.dimension, host.width, host.height), (3, 16, 1));
+        assert_eq!((host.depth_or_array_size, host.mip_levels), (4, 3));
+        assert_eq!(host_dimension(1), 1);
+        assert_eq!(host_dimension(3), 3);
+        assert_eq!(host_dimension(4), 4);
     }
 
     type Release = extern "system" fn(This) -> u32;
