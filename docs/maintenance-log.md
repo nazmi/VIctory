@@ -1719,3 +1719,13 @@ explicit reasons. This is a selective integration, not a wholesale fork merge
 or a claim that source gameplay results transfer to this machine. Pending PR
 work (#1324 ready branch; #1436/#1432/#1032 clean unstarted branches) remains
 separate from this user-requested source integration.
+
+## DeepSeek handoff
+
+Updated `docs/HANDOFF.md` for the next DeepSeek session: verified ztrx source
+head and accepted no-ff ports, current branch tracking state, pending PR queue
+and candidates, completed hang/regression fixes, and the user's constraint
+that off-peak scheduling applies only to DeepSeek. The complete ztrx fork is
+not merged; larger GPU/IR work remains documented as held. No push requested
+or performed. Handoff is documentation-only; prior integration checks remain
+the applicable code validation.
