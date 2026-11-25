@@ -8,7 +8,13 @@ Generated from git, not typed by hand: one row per commit between upstream
 in [maintenance-log.md](maintenance-log.md). Regenerate it whenever commits are
 added; do not edit the tables by hand.
 
-## Summary
+## Historical generated summary
+
+These counts predate the latest continuation. Current exact-head decisions and
+non-fast-forward merge SHAs are recorded in `pr-review-decisions.json`; new
+append-only rows below supplement this historical ledger.
+
+### Summary
 
 For a disposition on **every** currently open PR — including the ones with
 no decision yet — see [pr-disposition.md](pr-disposition.md). This file only
@@ -327,3 +333,5 @@ the upstream tree.
 | PR | Source head | Candidate | Local no-ff merge | Evidence |
 | --- | --- | --- | --- | --- |
 | #1557 | `1504ec9aa4465bfe99dcf9311ea0b5091ef1a892` | `c159fa22` | `9e0d40a2` | Full 1-file review; source24/candidate45 formats tests; negative control; complete integration gate passed. |
+
+| #1722 | `08b526d98c2da5bf7d2a99b585c6e48b1b5a82c0` | `0b88cae5` | `a202f7ff` | Full 1-file review; source WARP check; candidate110/default and120/diagnostics; complete integration gate passed. Wine unavailable. |

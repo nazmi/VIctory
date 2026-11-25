@@ -222,3 +222,10 @@ Worker `review_pr1557`, actual model `gpt-6.1-sol` medium. Source1504ec9a,
 candidate `c159fa22`, accepted unchanged as merge `9e0d40a2` (`--no-ff`).
 Every source added line is present; source/candidate tests, negative control
 and coordinator integration gate reviewed. No unaccounted worker changes.
+
+### Codex continuation: PR #1722
+
+Worker `review_pr1722`, `gpt-6.1-sol` medium: source08b526d9, candidate
+`0b88cae5`, all changes integrated as no-ff merge `a202f7ff`. 1/1 files fully
+reviewed; no unaccounted worker changes. Windows WARP source/candidate checks
+and coordinator integration gate passed; Wine unavailable.

@@ -16,5 +16,24 @@
       "policy_exit": 0
     },
     "limitations": "Defensive malformed-table validation; no gameplay claim. Existing external-reference/benchmark tests ignored."
+  },
+  "1722": {
+    "source_sha": "08b526d98c2da5bf7d2a99b585c6e48b1b5a82c0",
+    "state": "integrated-local",
+    "commit": "`a202f7ff`",
+    "candidate": "0b88cae5021eccab95a717caee5fe4463550f67a",
+    "merge_sha": "a202f7ffe3824e7fa0555c9666a2a8aaf6741670",
+    "reason": "Null empty-library blob; recovered per-name locks and snapshots retained; 1/1 files reviewed; source WARP and candidate/full integration gates pass; no-ff merge",
+    "tests": {
+      "source_focused_passed": 1,
+      "candidate_gpu_passed": 110,
+      "candidate_diagnostics_passed": 120,
+      "workspace_exit": 0,
+      "clippy_default_exit": 0,
+      "clippy_all_features_exit": 0,
+      "fmt_exit": 0,
+      "policy_exit": 0
+    },
+    "limitations": "Wine unavailable; WARP verifies Windows compatibility, not Wine. Mesh rendering unavailable on WARP."
   }
 }

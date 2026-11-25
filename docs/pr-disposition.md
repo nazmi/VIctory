@@ -27,8 +27,8 @@ before acting. `not yet reviewed` is explicitly unfinished, never approval.
 | duplicate | 9 |
 | held | 5 |
 | integrated | 96 |
-| integrated-local | 1 |
-| not yet reviewed | 593 |
+| integrated-local | 2 |
+| not yet reviewed | 592 |
 | rejected | 5 |
 | total open | 713 |
 
@@ -197,7 +197,7 @@ before acting. `not yet reviewed` is explicitly unfinished, never approval.
 | #1727 | `6cd8375a23d5` | integrated | â€” |  | GPU: 1D textures are 2D on the host, one texel high (GBV id=940) |
 | #1725 | `a6365c376b37` | integrated | â€” |  | GPU: placed copies take the bytes a GPU write leaves in their memory |
 | #1723 | `5542340831d3` | not yet reviewed | â€” |  | GPU diagnostics: pipeline statistics per noted command with VICTORY_GPU_TIMING |
-| #1722 | `08b526d98c2d` | not yet reviewed | ? | Head changed since `ad06ac715e28`; prior not yet reviewed evidence needs revalidation | GPU: the host pipeline library works under Wine (null blob for an empty library) |
+| #1722 | `08b526d98c2d` | integrated-local | `a202f7ff` | Null empty-library blob; recovered per-name locks and snapshots retained; 1/1 files reviewed; source WARP and candidate/full integration gates pass; no-ff merge | GPU: the host pipeline library works under Wine (null blob for an empty library) |
 | #1721 | `428c5abf6889` | not yet reviewed | ? | Head changed since `619a8e8b158c`; prior not yet reviewed evidence needs revalidation | Launcher: a GUI that checks the game directory and runs victory.exe |
 | #1720 | `7a990741f749` | not yet reviewed | ? | Head changed since `2f61f7c0fc27`; prior integrated evidence needs revalidation | report apu heap allocations that fail |
 | #1719 | `771467458b5d` | integrated | `b7e3689c` | in the branch | DirectStorage: clear the factory out pointer on failure |

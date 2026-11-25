@@ -1614,3 +1614,15 @@ sentinel retained. Removing validation fails the synthetic regression. Candidate
 Integration fmt, both workspace Clippy modes, workspace tests and policy224 files
 passed. Full local logs: `C:/Users/nazmi/victory-runs/codex-1557-*`.
 This hardens caller-supplied tables; no title failure or gameplay claim.
+
+### PR #1722 integrated-local: `a202f7ff`
+
+Reviewed source `08b526d98c2da5bf7d2a99b585c6e48b1b5a82c0` (1/1 files,
+all hunks), discussion/reviews and empty CI list; exact open head rechecked
+before merge. Apply only the remaining null-empty-blob/error-log change;
+recovered per-name locks, metadata snapshots and save retry/backoff stay.
+Candidate `0b88cae5` adds an isolated WARP serialize/reopen regression.
+Source focused test1/0, candidate GPU110/0 and diagnostics120/0, both targeted
+Clippy gates/fmt/policy pass. Full combined workspace gates passed (logs
+`C:/Users/nazmi/victory-runs/codex-1722-*`), policy224 files. `--no-ff` parents
+`94e25680`, `0b88cae5`. Wine unavailable; no claim of Wine/hardware verification.
