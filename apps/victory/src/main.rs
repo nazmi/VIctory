@@ -140,13 +140,25 @@ enum Console {
 }
 
 fn main() -> Result<()> {
-    victory_core::logging::init("info");
     // The audio recorder `run` starts for `VICTORY_AUDIO_CAPTURE`.
     #[cfg(all(windows, feature = "diagnostics"))]
     if victory_hle::modules::audio::capture::child() {
+        victory_core::logging::init("info");
         return Ok(());
     }
     let cli = Cli::parse();
+    // A title run keeps its log on disk without being asked: it is the run
+    // most likely to end without unwinding (a crash, a device removal, or the
+    // title terminating the process), and the one whose log is worth having
+    // afterwards. Everything else stays on stderr unless
+    // `VICTORY_LOG_FILE` asks for a file.
+    let log_file = victory_core::logfile::log_file_from_env(match &cli.command {
+        Command::Run { .. } => victory_core::Config::load()
+            .ok()
+            .map(|cfg| cfg.data_dir.join("victory.log")),
+        _ => None,
+    });
+    victory_core::logging::init_to("info", log_file);
     match cli.command {
         Command::Inspect {
             file,
