@@ -255,9 +255,9 @@ The on/off switches below (`...=1`) are off when unset or set to `0`.
 | `VICTORY_NO_HOST_PAD=1` | ignores XInput pads, so the keyboard drives the stand-in pad |
 | `VICTORY_CRASH_SAVE=<rva>:<len>,...` | saves title memory to the cache folder on a crash |
 | `VICTORY_CAPTURE=<dir>` | saves presented frames (powers of two, or `VICTORY_CAPTURE_FRAMES=<list>`) |
-| `VICTORY_CAPTURE_DRAWS=<draws>[,<frames>]` | with the above, the first frame recording at least `draws` draws picks the `frames` frames after it (default 3), as if listed: for a scene whose frame number moves between runs |
+| `VICTORY_CAPTURE_DRAWS=<draws>[,<frames>]` | **not implemented in this branch** (see `docs/discarded-features-check.md`): the switch parses nothing and does nothing |
 | `VICTORY_DUMP_TARGETS=1` | with the two above, saves every render target of those frames |
-| `VICTORY_SHOW_TARGET=2560x1440-f28` | shows the last render target of that size and DXGI format each frame instead of the title's frame (copied 1:1 to the top left, only when its format matches the window's), e.g. the world's geometry while its lit image is black |
+| `VICTORY_SHOW_TARGET=2560x1440-f28` | **not implemented in this branch** (see `docs/discarded-features-check.md`): the switch parses nothing and does nothing |
 | `VICTORY_CAPTURE_WORLD=<list>` | with `VICTORY_CAPTURE`, also saves (and with `VICTORY_DUMP_TARGETS` dumps) the frames at these offsets from the first frame that ran 500 draws (the world's first; its number depends on how fast the title loaded) |
 | `VICTORY_DUMP_WRITERS=<hash>,...` | with the two above, also the textures a pipeline containing a listed shader hash writes, the first frame it runs, and for its buffers a log line (dwords changed, dwords not zero) |
 | `VICTORY_PEEK=<hex address>[:<bytes>],...` | in listed frames, those bytes of title memory logged after each submission. Listed frames also log targets of 16 texels or fewer as values, each table view's view words and whether its host slot is null, the host copy of every buffer of 64 bytes or fewer a draw reads (at submission and after its list), and each 1D or 3D texture a dispatch writes, read back right after it |
@@ -267,7 +267,7 @@ The on/off switches below (`...=1`) are off when unset or set to `0`.
 | `VICTORY_LOG=victory_gpu::draw=debug` | with frames listed for capture: one line per draw and dispatch of those frames with its targets (named as in the `VICTORY_DUMP_TARGETS` files) and, if it was dropped, why |
 | `VICTORY_PIPELINE_WAIT_MS=24` | reduce the per-frame wait for background pipeline creation from the default of 500 ms. A draw can be omitted until its pipeline is ready |
 | `VICTORY_SKIP_PIPELINES=<hash>,...` | omit draws and dispatches, including indirect ones, whose pipeline contains a listed 16-digit shader hash |
-| `VICTORY_SKIP_WAVE64=mesh,compute` | omit draws and dispatches whose pipeline has a program of a listed stage written for 64-lane waves (on hosts with 32-lane waves, such as NVIDIA's, these can hang the GPU) |
+| `VICTORY_SKIP_WAVE64=mesh,compute` | omit draws and dispatches whose pipeline has a program of a listed stage written for 64-lane waves (on hosts with 32-lane waves, such as NVIDIA's, these can hang the GPU); needs a `diagnostics` build |
 | `VICTORY_GPU_TIMING=1` | with the above, each list of a submission run and timed on its own; slow lists logged with their slowest commands; a device removal names the list it happened in and lists all its commands; the per-command notes come from `VICTORY_D3D12_DRED`, so `VICTORY_GPU_TIMING` alone reports `commands=0` |
 | `VICTORY_TRACE_SHADERS=<hash>,...` | with `VICTORY_D3D12_DRED`, every draw and dispatch of a listed shader logged with what it binds (user data, heap slots, root views and their first dwords; the first 500) |
 | `VICTORY_D3D12_WARP=1` | host device on the software adapter (slow; cannot reset the driver); `=0` opts out like an unset variable |
