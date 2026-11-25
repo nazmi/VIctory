@@ -1438,6 +1438,43 @@ fn hand_out_resource(
 static TEXTURES_AT: std::sync::Mutex<std::collections::BTreeMap<u64, Vec<usize>>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 
+/// The largest single-mip colour render target other than `exclude`, with
+/// its size: for a title that renders at one size and hands over a smaller
+/// texture it leaves empty. D3D12 has no scaling copy (`CopyResource` wants
+/// equal sizes and formats; `CopySubresourceRegion` copies a box, unfiltered),
+/// so a platform that must show the smaller one has to render a scale pass —
+/// or show the larger one and let the window scale it.
+#[cfg(windows)]
+pub(crate) fn largest_colour_target(exclude: This) -> Option<(This, u32, u32)> {
+    // Render target, with a format the swap chain takes (R8G8B8A8_UNORM).
+    const RENDER_TARGET: u32 = 0x1;
+    const COLOUR: u32 = 28;
+    let map = TEXTURES_AT.lock().unwrap_or_else(|e| e.into_inner());
+    let mut best: Option<(This, u32, u32, u64)> = None;
+    for list in map.values() {
+        for &at in list {
+            let this = at as This;
+            if this == exclude {
+                continue;
+            }
+            let d = resource(this).desc;
+            if d.dimension == BUFFER
+                || d.format != COLOUR
+                || d.mip_levels != 1
+                || d.flags & RENDER_TARGET == 0
+                || d.width > u64::from(u32::MAX)
+            {
+                continue;
+            }
+            let area = d.width * u64::from(d.height);
+            if best.is_none_or(|b| area > b.3) {
+                best = Some((this, d.width as u32, d.height, area));
+            }
+        }
+    }
+    best.map(|(this, w, h, _)| (this, w, h))
+}
+
 /// For a texture made for a placed view (`texture_at`): a title texture
 /// the GPU writes (render target, depth or unordered access) at the same
 /// memory, in the same layout and with the same bytes per row and rows
