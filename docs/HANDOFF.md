@@ -1,5 +1,12 @@
 # Handoff: continue the VIctory maintenance sweep
 
+**Resumed 2026-11-25:** the hanging-test repair and beneficial merge recoveries
+have landed locally on `integration/maintenance`. The decision table below is
+historical; see the repair update in `docs/discarded-features-check.md` and the
+latest `docs/maintenance-log.md` entry for current behavior and validation.
+The wider PR sweep remains unfinished; this repair did not review its queue.
+
+
 Written 2026-11-25 00:32 UTC. Everything here was verified against the tree at
 that time; re-verify before relying on any of it, because the branch moves.
 

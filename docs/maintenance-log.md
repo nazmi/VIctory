@@ -1482,3 +1482,82 @@ checking each against `git log` before committing the file, which is the whole
 reason the handoff opens with verification commands instead of assertions.
 
 Nothing was pushed upstream. No PR, issue, or comment was opened anywhere.
+
+## Resume: hanging tests and merge regressions (2026-11-25 00:38 UTC)
+
+- User scope: fix the hanging test and restore beneficial local behavior lost
+  when upstream was merged; prefer demonstrably better upstream designs.
+- Start: clean `integration/maintenance`, `715f6075`; MSVC Rust 1.98.1.
+  Fetched upstream: `4118f33b` (previous merge base `70564ae0`). New upstream
+  changes are comparison evidence; a second broad merge is outside this repair.
+- Ordered plan: (1) reproduce the safe baseline and inspect driver-hang paths;
+  (2) repair test execution and fence completion safety; (3) restore lost shader
+  behavior and independently review GPU recoveries against current designs;
+  (4) integrate reviewed fixes, run fmt, both Clippy gates, workspace tests,
+  diagnostics checks and policy; record exact results and remaining limits.
+- Acceptance: tests terminate with actionable failure, no blanket suppression
+  of unrelated GPU checks; recovered behavior has meaningful synthetic tests;
+  existing upstream improvements remain intact. No title execution on this host.
+- AGENTS.md explicitly requires bounded delegation. Workers use separate
+  worktrees and target directories; actual worker model gpt-6.1-sol, medium.
+  Time check: 00:38 UTC, before documented 01:00 UTC peak window.
+
+### Outcome: verified merge repairs (2026-11-25)
+
+Source repair HEAD before documentation: `f892ad79`. The branch remains
+`integration/maintenance`; no push, PR, issue or comment was made. This is a
+repair of the existing merge, not another broad upstream integration.
+
+- **Hanging test fixed, not suppressed:** recursive test mutex removed. Five
+  draw cases actually run on WARP in isolated subprocesses, with a 60-second
+  parent deadline and process reaping. Production submissions require a
+  successful wait and a completed fence other than UINT64_MAX before any
+  copy-back or deferred writes; setup failure, timeout and WAIT_FAILED stop
+  through the existing fatal-report path. Synthetic child failures/deadlines
+  are asserted without printing misleading expected FAIL lines.
+- **Lost shader behavior restored:** upstream `e29391f5` half-register writer
+  is preferred to the old local interpolation implementation; TFE checks real
+  residency, mesh lines include the nine-bit corner mask, and 1D samples,
+  loads, stores, atomics and dimensions agree with height-one 2D backing.
+  DXC and DXIL validation were available and executed. Four negative controls
+  failed their respective tests (modifiers, masks, fake TFE status and native
+  1D kinds), so the assertions detect the original regressions.
+- **Lost GPU behavior restored:** counted/binary occlusion, capability-aware
+  depth bounds, resource and SRV/UAV/RTV/DSV dimension mappings, per-name
+  library loading, ordered snapshots/retries/backoff, draw capture triggers,
+  intermediate target selection/latching and stencil diagnostics.
+- **Better upstream retained:** tracked/shadow memory and placed-copy design,
+  prebuilt pipeline metadata, explicit mesh topology and rectangle geometry
+  shader are preserved. Accept upstream `ed0dbfd1` for refreshing CPU writes
+  under shader-write ranges; its regression executes on WARP. Do not revive
+  the old threaded copy-back design/`VICTORY_COPY_THREADS` or the mesh library
+  kind workaround whose original missing-topology premise changed upstream.
+- **Review fixes on top:** separate dump and show target lists so queue
+  dumping cannot consume a presentation pick (bounded WARP test); convert
+  explicit 1D RTV/DSV descriptions too (two synthetic regressions). Query
+  tests start from nonzero sentinels and check both query forms and suffixes.
+
+Final combined checks, MSVC Rust 1.98.1, target directory outside repo:
+
+| Check | Result | Local evidence outside repository |
+| --- | --- | --- |
+| `cargo fmt --check` | exit 0 | `../repair-final-fmt.log` |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | exit 0 | `../repair-final-clippy-default.log` |
+| `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | exit 0 | `../repair-final-clippy-all.log` |
+| `cargo test --workspace --locked -- --test-threads=1` | exit 0; **730 passed, 0 failed, 11 ignored** | `../repair-final-workspace.log` |
+| `cargo test -p victory-gpu --all-features --locked` | exit 0; **119 passed, 0 failed, 1 ignored**, parallel default runner | `../repair-gpu-parallel.log` |
+| `cargo xtask policy` | exit 0; **222 files OK** | `../repair-final-policy.log` |
+
+Counts use each parent harness's final summary, excluding nested subprocess
+summaries. The actual reproduced baseline was **702 passed, 0 failed, 11
+ignored**; the prior handoff's 703/1 accounting was inaccurate. Existing ignores
+were retained; some environment-dependent tests also return early. WARP's
+vertex depth test actually rendered `[0.25, 0.5, 0.25, 0.25]`; mesh rendering
+was unavailable because this software adapter has no mesh shaders. Image TFE
+explicit-level gather remains safely refused until its multiple load statuses
+can combine. Hardware driver stability and title/world appearance were not
+verified. No title was executed.
+
+The wider PR/issue sweep was not part of these two repairs and remains pending.
+The historical audit/handoff have explicit current-state notices; worker
+accounting lists every source commit and its integration disposition.

@@ -194,3 +194,24 @@ rustfmt --edition 2024 --check   crates/victory-shader/src/emit/valu_tests.rs  #
    user data is worse than an error.
 5. Report the exact `test result:` line, the head SHA reviewed, and anything
    not verified.
+
+
+## Hanging tests and merge recoveries: 2026-11-25
+
+Workers used isolated worktrees and targets, actual model `gpt-6.1-sol`,
+medium reasoning. All source changes were inspected by the coordinator and
+checked on the combined integration tree. No worker changes remain unaccounted
+for in this repair batch.
+
+| Worker branch | Source commits | Disposition |
+| --- | --- | --- |
+| `repair/hanging-tests` | `3ca22d45`, `fee5f9e2`, `6cd84931`, `141d7579` | All integrated: bounded WARP tests, complete-fence requirement, depth host/draw state, 1D GPU regression and render/depth views. Coordinator added quiet expected-failure children. |
+| `repair/shader-regressions` | `44528504`, `4c4ec61b`, `7af4dad2`, `7944a72f`, `1daff4c1` | All integrated: f16/TFE/mesh/1D behavior and strengthened tests. Negative controls failed for all four restored families. |
+| `repair/gpu-regressions` | `cc4aba7e`, `74c56f18`, `b584a4ea`, `1fb81641`, `e8db626e`, `6fcbac0c` | All integrated: recorded-draw counter, occlusion, depth streams/tests, library locks/saves/retry. Worker-local cherry-picks of the host worker were duplicates and were not applied twice. |
+
+Coordinator independently ported resource/view mappings, sentinel query test,
+intermediate presentation/capture triggers/stencil diagnostics and accepted
+upstream shadow refresh `ed0dbfd1`. An initial uncommitted minimal library
+locking port was deliberately replaced by the worker's complete metadata-aware
+design; no work was lost. The review found and fixed the dump-before-show
+ordering and missing RTV/DSV mappings before the final gate.

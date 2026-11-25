@@ -1,5 +1,30 @@
 # Every feature the upstream merge discarded, checked against upstream
 
+## Repair update: 2026-11-25
+
+The original audit below is a historical snapshot. The integration repair
+has now restored the useful missing behavior against the current design:
+
+| Behavior | Current disposition and evidence |
+| --- | --- |
+| Hanging draw tests | Recursive test mutex removed. Five draw regressions execute on WARP in bounded subprocesses; timeout, failed child and incomplete/removed fence cases are tested. No `VICTORY_GPU_TESTS` gate for these tests. |
+| Depth bounds | Restored for graphics and mesh streams, capability checked, title state reset/rebound. WARP graphics readback verifies acceptance/rejection; this WARP has no mesh shaders, so mesh rendering remains unverified. Upstream geometry shaders and explicit mesh topology are preserved. |
+| Occlusion | Counted and binary host queries restored. A WARP test overwrites nonzero sentinels with measured zero counts and leaves the suffix intact. Other query kinds retain upstream behavior. |
+| 1D textures | Height-one 2D resources and SRV/UAV/RTV/DSV mappings restored together with shader coordinates and array dimensions. Synthetic descriptors, DXIL validation and WARP 1D/3D readback pass. |
+| Library parallel loads | Per-name locks restored around loads/stores, preserving upstream prebuilt metadata. Saves serialize against stores and publish in order; failed saves retry. |
+| Library kind verdicts | Retain upstream explicit mesh topology rather than revive the old workaround for a stream lacking topology. Mesh library behavior still needs a capable adapter; no blanket claim that mesh pipelines cannot load. |
+| Shadow states / copy-back | Retain upstream tracked ranges, legal states and copy-back architecture. Add upstream `ed0dbfd1`, whose synthetic test proves CPU writes under pending shader-write ranges reach the copy without clobbering later title writes. Old shadow-state and threaded copy-back implementations are incompatible with this design; `VICTORY_COPY_THREADS` is not restored. |
+| Stencil diagnostics | Stencil-plane readback and shader-view descriptions restored. |
+| Intermediate target / draw trigger | `VICTORY_SHOW_TARGET=<zero-based index>` or `busiest`, and `VICTORY_CAPTURE_DRAWS`, restored. Separate show and dump lists prevent dump-before-present from losing the pick; a bounded WARP regression covers the ordering. |
+| Image TFE | Real `CheckAccessFullyMapped` status restored for the supported image paths, with feature metadata. Explicit-level gathers remain refused: upstream added a multi-load path whose residency statuses need aggregation. |
+| f16 interpolation | Prefer upstream `e29391f5` using the existing half-register writer, with output modifiers and destination selection. |
+| Mesh lines / indices | Restore lines together with upstream `c0228d93` nine-bit corner masks. Synthetic modules validate without requiring mesh hardware. |
+
+Previously recovered mode/worker switches, half conversion and atomic library
+writes remain present. No title was run. WARP validates software behavior;
+physical-adapter stability and mesh rendering are not established by these checks.
+
+
 The merge dropped a number of our integrated PRs in favour of upstream's
 designs. "Upstream has a better solution" was the claim; this file is the check
 behind it, made 2026-11-25 by grepping both trees for the exact symbols and

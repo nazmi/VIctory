@@ -49,7 +49,7 @@ What each part does today and what it still needs:
 | Input | XInput pads, keyboard, keyboard stand-in pad, rumble | Rumble unverified in game |
 | Audio | Menu, video and loading sound; XMA voices and Opus streams decode | Reverb is silent; Opus results unverified against the title |
 | GPU: menus | Draws, compute and presentation on host D3D12; only changed title memory is copied | Frame pacing drifts on one screen in release builds |
-| GPU: world | The scene is drawn and presented: mesh pipelines, indirect execution, views the shaders pick from the heap themselves, title memory read by address (ray-tracing structures), depth written from compute, pipelines pre-built or made by worker threads and kept on disk | Lighting (surfaces are unlit) and some missing geometry; frames take 1-2 s; draws of untranslated shaders are dropped; real queries, depth bounds, HDR and scaling are missing |
+| GPU: world | The scene is drawn and presented: mesh pipelines, indirect execution, views the shaders pick from the heap themselves, title memory read by address (ray-tracing structures), depth written from compute, pipelines pre-built or made by worker threads and kept on disk | Lighting (surfaces are unlit) and some missing geometry; frames take 1-2 s; draws of untranslated shaders are dropped; timestamp and pipeline-statistic queries, HDR and scaling are missing |
 | Shaders | Console GPU code recompiled to DXIL, ahead of time (`translate --cache`) or at first use, cached on disk. Menus: all. World: mesh 8,765 of 8,765, vertex/pixel 12,550 of 12,592, compute 2,579 of 2,637 | Merged geometry stages (195 programs) and about 100 others; fused multiply-adds follow the host GPU; some compute programs need a GPU with 64-lane waves |
 | Textures | Console tiled layouts and detiling for the modes the title uses | Render-target metadata planes |
 | Series S mode | Runs through the menus to the loading screen | The world, as above |
@@ -87,11 +87,6 @@ outside the repository. The environment variable applies to this Bash shell.
 For persistent local paths, copy `victory.example.toml` to `victory.toml` and
 edit it.
 
-```bash
-export VICTORY_GAME_DIR='/d/Xbox Titles/My Game'
-cargo xtask install-hooks                # asset-policy check on every commit
-cp victory.example.toml victory.toml     # then set your paths (outside the repo)
-cargo build --release -p victory
 ```bash
 export VICTORY_GAME_DIR='/d/Xbox Titles/My Game'
 cargo xtask install-hooks                # asset-policy check on every commit
@@ -255,9 +250,9 @@ The on/off switches below (`...=1`) are off when unset or set to `0`.
 | `VICTORY_NO_HOST_PAD=1` | ignores XInput pads, so the keyboard drives the stand-in pad |
 | `VICTORY_CRASH_SAVE=<rva>:<len>,...` | saves title memory to the cache folder on a crash |
 | `VICTORY_CAPTURE=<dir>` | saves presented frames (powers of two, or `VICTORY_CAPTURE_FRAMES=<list>`) |
-| `VICTORY_CAPTURE_DRAWS=<draws>[,<frames>]` | **not implemented in this branch** (see `docs/discarded-features-check.md`): the switch parses nothing and does nothing |
+| `VICTORY_CAPTURE_DRAWS=<draws>[,<frames>]` | with capture enabled, the first frame recording at least `draws` draws selects the following `frames` frames (default 3) |
 | `VICTORY_DUMP_TARGETS=1` | with the two above, saves every render target of those frames |
-| `VICTORY_SHOW_TARGET=2560x1440-f28` | **not implemented in this branch** (see `docs/discarded-features-check.md`): the switch parses nothing and does nothing |
+| `VICTORY_SHOW_TARGET=<index>` or `busiest` | presents the zero-based intermediate target, or latches the most frequently bound displayable world target until it is released |
 | `VICTORY_CAPTURE_WORLD=<list>` | with `VICTORY_CAPTURE`, also saves (and with `VICTORY_DUMP_TARGETS` dumps) the frames at these offsets from the first frame that ran 500 draws (the world's first; its number depends on how fast the title loaded) |
 | `VICTORY_DUMP_WRITERS=<hash>,...` | with the two above, also the textures a pipeline containing a listed shader hash writes, the first frame it runs, and for its buffers a log line (dwords changed, dwords not zero) |
 | `VICTORY_PEEK=<hex address>[:<bytes>],...` | in listed frames, those bytes of title memory logged after each submission. Listed frames also log targets of 16 texels or fewer as values, each table view's view words and whether its host slot is null, the host copy of every buffer of 64 bytes or fewer a draw reads (at submission and after its list), and each 1D or 3D texture a dispatch writes, read back right after it |
