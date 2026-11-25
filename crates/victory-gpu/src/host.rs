@@ -186,7 +186,7 @@ fn create() -> windows::core::Result<Host> {
                 }
                 Err(e) => tracing::warn!(
                     error = %e,
-                    "VICTORY_D3D12_DEBUG is set but no D3D12 debug layer is installed;                      add the optional feature 'Graphics Tools'                      (DISM /Online /Add-Capability /CapabilityName:Tools.Graphics.DirectX~~~~0.0.1.0)"
+                    "VICTORY_D3D12_DEBUG is set but no D3D12 debug layer is installed; add the optional Windows feature Graphics Tools, then run the DISM command in README.md"
                 ),
             }
             // GPU-based validation (`VICTORY_D3D12_GBV`): out-of-range
@@ -211,11 +211,20 @@ fn create() -> windows::core::Result<Host> {
         // faulting address), read when the device is removed.
         if dred_on() {
             let mut dred: Option<ID3D12DeviceRemovedExtendedDataSettings> = None;
-            if D3D12GetDebugInterface(&mut dred).is_ok()
-                && let Some(dred) = dred
-            {
-                dred.SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-                dred.SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            match D3D12GetDebugInterface(&mut dred) {
+                Ok(()) => {
+                    if let Some(dred) = dred {
+                        dred.SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                        dred.SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                        tracing::info!(
+                            "DRED on: a removed device reports the command it stopped in"
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "VICTORY_D3D12_DRED needs the optional Windows feature Graphics Tools; without it a removed device reports no breadcrumbs"
+                ),
             }
         }
         let mut device: Option<ID3D12Device> = None;
