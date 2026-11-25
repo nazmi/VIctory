@@ -165,11 +165,29 @@ fn create() -> windows::core::Result<Host> {
         // The debug layer only in builds with diagnostics.
         let debug =
             cfg!(feature = "diagnostics") && std::env::var_os("VICTORY_D3D12_DEBUG").is_some();
+        if !cfg!(feature = "diagnostics") && std::env::var_os("VICTORY_D3D12_DEBUG").is_some() {
+            // Silently doing nothing is the failure mode this switch already
+            // had: the layer exists only in builds with diagnostics.
+            tracing::warn!(
+                "VICTORY_D3D12_DEBUG needs a diagnostics build                  (cargo build --profile diag -p victory --features diagnostics)"
+            );
+        }
         if debug {
             let mut layer: Option<ID3D12Debug> = None;
             match D3D12GetDebugInterface(&mut layer) {
-                Ok(()) => layer.iter().for_each(|l| l.EnableDebugLayer()),
-                Err(e) => tracing::warn!(error = %e, "no D3D12 debug layer"),
+                Ok(()) => {
+                    layer.iter().for_each(|l| l.EnableDebugLayer());
+                    // Said out loud, because the switch being set is not the
+                    // same as the layer being on, and a run that asks for it
+                    // and gets silence cannot tell the two apart.
+                    tracing::info!(
+                        "D3D12 debug layer on: its messages are logged as warnings with id and severity"
+                    );
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "VICTORY_D3D12_DEBUG is set but no D3D12 debug layer is installed;                      add the optional feature 'Graphics Tools'                      (DISM /Online /Add-Capability /CapabilityName:Tools.Graphics.DirectX~~~~0.0.1.0)"
+                ),
             }
             // GPU-based validation (`VICTORY_D3D12_GBV`): out-of-range
             // descriptor heap indices and the like become messages naming
