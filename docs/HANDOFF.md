@@ -6,20 +6,29 @@ during the off-peak windows below. Codex can continue at any time.
 
 ## Current branch
 
-- Branch: `integration/maintenance`.
-- At handoff preparation, local HEAD was `5d0c65e7`; the origin tracking ref was
-  `715f6075`, so the local branch was ahead by 40 commits. Confirm remote state
-  before any push.
-- The ztrx source ref remains `90b529f878a470fec9bf07b7be316bc769a12232`.
-  Its complete history/tree is not merged. Two selected ports are present as
-  no-fast-forward merges: shared pipeline wait budgets (`58e9182c`, candidate
-  `5d3b4977`) and the normal-play launcher (`7eedff93`, candidate `1684dda1`).
-- Those two candidate integrations passed formatting, both workspace Clippy
-  modes, workspace tests (739 passed, 0 failed, 11 existing ignores), and asset
-  policy. See [ztrx integration review](ztrx-integration-review.md) for exact
-  source SHAs, held features, limitations, and external test logs.
-- No push was performed. Verify status before continuing; preserve any user
-  changes and do not push unless requested.
+- Branch: `integration/maintenance`, HEAD **`ce6dddb2`**.
+- `origin/integration/maintenance` was at `715f6075` when this was written, so
+  the local branch is **45 commits ahead and unpushed**. Confirm remote state
+  before any push; the last session was told not to push without instruction.
+- `upstream/main` is `70564ae0` and **is an ancestor**. `ztrx` source ref
+  `90b529f8` (rechecked unchanged).
+- Gate on this HEAD: fmt 0 differing, both Clippy modes 0 errors, asset policy
+  226 files, `cargo test --workspace --locked` **754 passed, 0 failed**.
+
+## Landed in the resume pass (2026-11-25)
+
+| Item | Local merge | Notes |
+| --- | --- | --- |
+| PR #1324 staging-write vs publication race | `e63b9e61` | temp removed on a failed write; held-reader regression strengthened |
+| PR #1432 `ERROR_PROC_NOT_FOUND` | `fd775f03` | conflict resolved by keeping this tree's ordinal-export lookup and adding the error to its miss path; negative control verified |
+| PR #1032 sampler-heap cap at 2048 | `a16cb124` | a request above the D3D12 limit lost the whole heap; capped, with `sampler_slots()` tested without a GPU |
+| PR #1436 | — | **closed upstream**, obsolete |
+
+ztrx ports re-verified as working, not merely present: wait-budget tests 8/8
+(incl. stale-frame and refund cases) and `scripts/play.ps1` parses clean. A
+declaration sweep finds **575 ztrx-only symbols**; the remaining ztrx features
+are the coupled subsystems `ztrx-integration-review.md` already holds, not
+cheap ports.
 
 ## Next work
 
@@ -30,11 +39,10 @@ open state and head SHA before review. The disposition table is
 is [`pr-review-decisions.json`](pr-review-decisions.json), and the previous
 complete inventory snapshot is [`pr-disposition-20261124.md`](pr-disposition-20261124.md).
 
-PR #1324 has a reviewed candidate on `review/codex-pr-1324` at `7f94c8f1`.
-Its targeted tests, Clippy, formatting, and policy checks passed; the combined
-workspace gate and no-ff merge remain outstanding. PRs #1436, #1432, and #1032
-have clean unstarted review branches. Recheck these refs and statuses before
-resuming. See `docs/maintenance-log.md` and `docs/worker-accounting.md` for
+#1324, #1432 and #1032 are landed (above); #1436 is closed upstream, so the
+review branches `review/codex-pr-1436`, `-1432` and `-1032` hold no work. The
+next review targets should come from `pr-disposition.md` rows still marked
+`not yet reviewed`, checking each PR's live state first. See `docs/maintenance-log.md` and `docs/worker-accounting.md` for
 prior decisions and worker outcomes. Do not treat earlier large open-PR counts
 as current.
 
