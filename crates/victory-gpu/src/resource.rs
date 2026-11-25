@@ -753,8 +753,19 @@ struct Resource {
     backing: Backing,
     /// Textures also live on the host GPU (decision 0007); buffers do not
     /// yet.
+    ///
+    /// Made on first host use, not when the title reserves texture memory: a
+    /// streamed world reserves far more than it draws in any window, and
+    /// copying all of it doubled the memory the title needed (the copies
+    /// reached 9.6 GB and the device went out of memory at the world load).
     #[cfg(windows)]
-    host: Option<std::sync::Arc<HostTexture>>,
+    host: std::sync::OnceLock<Option<std::sync::Arc<HostTexture>>>,
+    /// Kept for the deferred creation above: the state the title created it
+    /// in, and its clear value (`None` when the title passed null).
+    #[cfg(windows)]
+    initial_state: u32,
+    #[cfg(windows)]
+    clear_value: Option<[u32; 5]>,
 }
 
 /// A title texture's host copy and the state it is in. The title's barriers
@@ -980,7 +991,7 @@ pub(crate) mod life {
 #[cfg(windows)]
 pub(crate) fn host_transition(this: This, wanted: u32) -> Option<(*mut c_void, u32)> {
     use windows::core::Interface;
-    let host = resource(this).host.as_ref()?;
+    let host = resource(this).host()?;
     let before = host
         .state
         .swap(wanted, std::sync::atomic::Ordering::Relaxed);
@@ -995,7 +1006,7 @@ pub(crate) fn host_resource<'a>(
     if this.is_null() {
         return None;
     }
-    resource(this).host.as_deref().map(|h| &h.texture)
+    resource(this).host().map(|h| &h.texture)
 }
 
 /// A title texture's host copy, shared, for a list to hold.
@@ -1004,7 +1015,7 @@ pub(crate) fn host_copy(this: This) -> Option<std::sync::Arc<HostTexture>> {
     if this.is_null() {
         return None;
     }
-    resource(this).host.clone()
+    resource(this).host().cloned()
 }
 
 /// The host description of a title texture: the same, without the
@@ -1185,7 +1196,10 @@ fn takes(t: &HostTexture, d: &ResourceDesc) -> bool {
 #[cfg(windows)]
 fn current(this: This) -> bool {
     let r = resource(this);
-    let (Some(h), Some(k)) = (&r.host, memory_key(r.data() as u64, &r.desc)) else {
+    let (Some(h), Some(k)) = (
+        r.host.get().and_then(Option::as_ref),
+        memory_key(r.data() as u64, &r.desc),
+    ) else {
         return true;
     };
     let map = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
@@ -1335,6 +1349,23 @@ pub(crate) fn buffer_bytes(this: This) -> Option<(*mut u8, u64)> {
 }
 
 impl Resource {
+    /// The host copy, made now if this is its first use.
+    #[cfg(windows)]
+    fn host(&self) -> Option<&std::sync::Arc<HostTexture>> {
+        self.host
+            .get_or_init(|| {
+                shared_texture(
+                    self.data() as u64,
+                    &self.desc,
+                    self.initial_state,
+                    self.clear_value
+                        .as_ref()
+                        .map_or(std::ptr::null(), |v| std::ptr::from_ref(v).cast()),
+                )
+            })
+            .as_ref()
+    }
+
     fn data(&self) -> *mut u8 {
         match self.backing {
             Backing::Committed(ref memory) => memory.ptr.as_ptr(),
@@ -1370,25 +1401,27 @@ fn hand_out_resource(
 ) -> HRESULT {
     #[cfg(not(windows))]
     let _ = (state, clear);
-    #[allow(unused_mut)] // the host texture is set on Windows only
-    let mut resource = Box::new(Resource {
+    let resource = Box::new(Resource {
         object: Object::new(&RESOURCE_FUNCTIONS),
         desc,
         heap,
         heap_flags,
         backing,
         #[cfg(windows)]
-        host: None,
+        host: std::sync::OnceLock::new(),
+        #[cfg(windows)]
+        initial_state: state,
+        #[cfg(windows)]
+        clear_value: (!clear.is_null()).then(|| {
+            // SAFETY: the title passes a whole clear value (five words).
+            unsafe { clear.cast::<[u32; 5]>().read_unaligned() }
+        }),
     });
-    #[cfg(windows)]
-    {
-        resource.host = shared_texture(resource.data() as u64, &desc, state, clear);
-    }
     #[cfg(windows)]
     if desc.dimension == BUFFER {
         let at = std::ptr::from_ref::<Resource>(&resource) as usize;
         crate::shadow::register(at, resource.data() as u64, desc.width);
-    } else if resource.host.is_some() {
+    } else {
         let at = std::ptr::from_ref::<Resource>(&resource) as usize;
         let mut map = TEXTURES_AT.lock().unwrap_or_else(|e| e.into_inner());
         map.entry(resource.data() as u64).or_default().push(at);
@@ -1440,7 +1473,10 @@ pub(crate) fn alias_source(placed: This) -> Option<This> {
             let a = resource(r);
             a.desc.flags & WRITTEN != 0
                 && bytes(&a.desc) == Some(want)
-                && matches!((&a.host, &b.host), (Some(x), Some(y)) if !std::sync::Arc::ptr_eq(x, y))
+                && matches!(
+                    (a.host.get().and_then(Option::as_ref), b.host.get().and_then(Option::as_ref)),
+                    (Some(x), Some(y)) if !std::sync::Arc::ptr_eq(x, y)
+                )
         })
 }
 
@@ -1450,7 +1486,8 @@ impl Drop for Resource {
         #[cfg(feature = "diagnostics")]
         if self
             .host
-            .as_ref()
+            .get()
+            .and_then(Option::as_ref)
             .is_some_and(|h| std::sync::Arc::strong_count(h) > 1)
         {
             // Before lists held their textures, this freed a texture that
@@ -1466,7 +1503,7 @@ impl Drop for Resource {
             }
         }
         #[cfg(feature = "diagnostics")]
-        if let Some(h) = &self.host {
+        if let Some(h) = self.host.get().and_then(Option::as_ref) {
             use windows::core::Interface;
             life::note(
                 h.texture.as_raw() as usize,
@@ -1696,7 +1733,7 @@ pub(crate) fn texture_at(address: u64, desc: &[u32; 14]) -> Option<This> {
         return None;
     }
     map.insert((address, *desc), out as usize);
-    resource(out).host.is_some().then_some(out)
+    resource(out).host().is_some().then_some(out)
 }
 
 pub(crate) extern "system" fn create_placed(
