@@ -227,8 +227,37 @@ struct Mode {
 }
 const _: () = assert!(size_of::<Mode>() == 32);
 
-/// The console's mode list: one 4K mode at 60 Hz (Grand Theft Auto VI looks
-/// for a 120 Hz one to allow 120 Hz frame intervals).
+/// The display the title is told it has. The console offers one 4K mode and a
+/// title renders to it, which on a small or shared-memory host means writing
+/// 3840x2160 whether or not the window matches.
+///
+/// `VICTORY_DISPLAY=WIDTHxHEIGHT` reports that size instead, so the title
+/// renders what it presents and the GPU is asked for what the machine can
+/// afford. Unset (or unparsable) keeps the console's 4K.
+fn display() -> (u32, u32) {
+    static SIZE: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+    *SIZE.get_or_init(|| {
+        const CONSOLE: (u32, u32) = (3840, 2160);
+        let Some(text) = std::env::var("VICTORY_DISPLAY").ok() else {
+            return CONSOLE;
+        };
+        let Some((w, h)) = text.split_once(['x', 'X']) else {
+            tracing::warn!(value = %text, "ignoring invalid VICTORY_DISPLAY; expected WIDTHxHEIGHT");
+            return CONSOLE;
+        };
+        match (w.trim().parse::<u32>(), h.trim().parse::<u32>()) {
+            (Ok(w), Ok(h)) if w >= 320 && h >= 200 && w <= CONSOLE.0 && h <= CONSOLE.1 => (w, h),
+            _ => {
+                tracing::warn!(value = %text, "ignoring invalid VICTORY_DISPLAY; expected WIDTHxHEIGHT");
+                CONSOLE
+            }
+        }
+    })
+}
+
+/// The console's mode list: one mode at 60 Hz (Grand Theft Auto VI looks for
+/// a 120 Hz one to allow 120 Hz frame intervals). The mode is the console's
+/// 4K unless `VICTORY_DISPLAY` asks for another size.
 /// shortcut: fixed mode, not the host display's; report the host's rates if
 /// a title paces by them.
 extern "system" fn modes(
@@ -250,9 +279,10 @@ extern "system" fn modes(
         return MORE_DATA;
     }
     *count = 1;
+    let (width, height) = display();
     let mode = Mode {
-        width: 3840,
-        height: 2160,
+        width,
+        height,
         refresh: [60, 1],
         format: 0,
         scanlines: 1, // progressive

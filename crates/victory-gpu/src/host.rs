@@ -2635,7 +2635,25 @@ impl Host {
             if let Some((buffer, footprint)) = capture {
                 crate::capture::save_read_back(frame, &buffer, &footprint);
             }
-            let _ = p.swap_chain.Present(0, DXGI_PRESENT(0));
+            // A Present that fails is the difference between a log full of
+            // "frame presented" lines and a screen that shows none, so its
+            // result is not dropped. The first failure and each power of two
+            // after it are said once.
+            if let Err(e) = p.swap_chain.Present(0, DXGI_PRESENT(0)).ok() {
+                static FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let n = FAILED.fetch_add(1, Ordering::Relaxed) + 1;
+                if n.is_power_of_two() {
+                    tracing::warn!(
+                        error = %e,
+                        n,
+                        frame,
+                        width,
+                        height,
+                        format = format.0,
+                        "swap chain present failed"
+                    );
+                }
+            }
             p.meter.frame(p.hwnd);
             #[cfg(feature = "diagnostics")]
             return Some(probe.is_some_and(|b| crate::capture::black(&b)));
