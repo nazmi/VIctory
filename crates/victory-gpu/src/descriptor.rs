@@ -260,7 +260,21 @@ impl RtvRecord {
         &self,
     ) -> Option<windows::Win32::Graphics::Direct3D12::D3D12_RENDER_TARGET_VIEW_DESC> {
         const TEXTURE_2D: u32 = 4;
-        self.host_desc(TEXTURE_2D)
+        self.host_desc(TEXTURE_2D, |words| {
+            // RTV 1D/1DARRAY become 2D/2DARRAY. Mip and array fields
+            // keep their positions; the added plane is always plane zero.
+            match words[1] {
+                2 => {
+                    words[1] = 4;
+                    words[3] = 0;
+                }
+                3 => {
+                    words[1] = 5;
+                    words[5] = 0;
+                }
+                _ => {}
+            }
+        })
     }
 
     /// The depth view description in the host's type (the same layout).
@@ -269,14 +283,22 @@ impl RtvRecord {
         &self,
     ) -> Option<windows::Win32::Graphics::Direct3D12::D3D12_DEPTH_STENCIL_VIEW_DESC> {
         const TEXTURE_2D: u32 = 3;
-        self.host_desc(TEXTURE_2D)
+        self.host_desc(TEXTURE_2D, |words| {
+            // DSV 1D/1DARRAY have the same mip/slice layout as 2D forms.
+            // Flags (word 2), including read-only depth/stencil, stay intact.
+            words[1] = match words[1] {
+                1 => 3,
+                2 => 4,
+                other => other,
+            };
+        })
     }
 
     /// The description words as a host type, the format as the host has it.
     /// Without one, a typeless host copy gets a 2D view (`dimension`) in
     /// the title's format, which the host needs spelled out.
     #[cfg(windows)]
-    fn host_desc<T>(&self, dimension: u32) -> Option<T> {
+    fn host_desc<T>(&self, dimension: u32, remap: impl FnOnce(&mut [u32; 6])) -> Option<T> {
         assert!(size_of::<T>() <= size_of::<[u32; 6]>());
         let mut words = if self.described != 0 {
             self.desc
@@ -291,6 +313,7 @@ impl RtvRecord {
             ]
         };
         words[0] = crate::resource::pc_format(words[0]);
+        remap(&mut words);
         // SAFETY: both host view descriptions are 24 bytes in this layout.
         Some(unsafe { (&raw const words).cast::<T>().read_unaligned() })
     }
@@ -715,6 +738,70 @@ static FUNCTIONS: Table<24> = {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn explicit_one_d_render_views_preserve_mips_arrays_and_plane_zero() {
+        use windows::Win32::Graphics::Direct3D12::*;
+        let make = |desc| super::RtvRecord {
+            tag: super::RTV_TAG,
+            described: 1,
+            resource: std::ptr::null(),
+            desc,
+        };
+        let desc = make([28, 2, 3, 99, 98, 97]).desc().unwrap();
+        assert_eq!(desc.ViewDimension, D3D12_RTV_DIMENSION_TEXTURE2D);
+        // SAFETY: the dimension selects this union member.
+        let view = unsafe { desc.Anonymous.Texture2D };
+        assert_eq!((view.MipSlice, view.PlaneSlice), (3, 0));
+        let desc = make([28, 3, 2, 4, 5, 99]).desc().unwrap();
+        assert_eq!(desc.ViewDimension, D3D12_RTV_DIMENSION_TEXTURE2DARRAY);
+        // SAFETY: the dimension selects this union member.
+        let view = unsafe { desc.Anonymous.Texture2DArray };
+        assert_eq!(
+            (
+                view.MipSlice,
+                view.FirstArraySlice,
+                view.ArraySize,
+                view.PlaneSlice
+            ),
+            (2, 4, 5, 0)
+        );
+        let desc = make([28, 4, 3, 1, 0, 0]).desc().unwrap();
+        // SAFETY: this existing 2D view must retain its nonzero plane.
+        assert_eq!(unsafe { desc.Anonymous.Texture2D.PlaneSlice }, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explicit_one_d_depth_views_preserve_mips_arrays_and_read_only_flags() {
+        use windows::Win32::Graphics::Direct3D12::*;
+        let make = |desc| super::RtvRecord {
+            tag: super::RTV_TAG,
+            described: 1,
+            resource: std::ptr::null(),
+            desc,
+        };
+        let desc = make([45, 1, 3, 2, 99, 98]).depth_desc().unwrap();
+        assert_eq!(desc.ViewDimension, D3D12_DSV_DIMENSION_TEXTURE2D);
+        assert_eq!(desc.Flags.0, 3);
+        // SAFETY: the dimension selects this union member.
+        assert_eq!(unsafe { desc.Anonymous.Texture2D.MipSlice }, 2);
+        let desc = make([45, 2, 3, 2, 4, 5]).depth_desc().unwrap();
+        assert_eq!(desc.ViewDimension, D3D12_DSV_DIMENSION_TEXTURE2DARRAY);
+        assert_eq!(desc.Flags.0, 3);
+        // SAFETY: the dimension selects this union member.
+        let view = unsafe { desc.Anonymous.Texture2DArray };
+        assert_eq!(
+            (view.MipSlice, view.FirstArraySlice, view.ArraySize),
+            (2, 4, 5)
+        );
+        let desc = make([45, 4, 1, 3, 6, 7]).depth_desc().unwrap();
+        assert_eq!(desc.ViewDimension, D3D12_DSV_DIMENSION_TEXTURE2DARRAY);
+        assert_eq!(desc.Flags.0, 1);
+        // SAFETY: this existing 2D array view must retain its slice range.
+        assert_eq!(unsafe { desc.Anonymous.Texture2DArray.FirstArraySlice }, 6);
+    }
+
     use super::*;
     use crate::object::{S_OK, slot};
 
