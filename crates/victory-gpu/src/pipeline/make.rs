@@ -172,8 +172,51 @@ fn log(what: &str, key: &str, rest: impl FnOnce() -> String) {
 /// Signalled whenever a worker has made a pipeline.
 static DONE: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
 
-/// Waiting allowed per title frame, over all threads.
-const BUDGET: Duration = Duration::from_millis(500);
+/// Waiting allowed per title frame, over all recording threads.
+fn wait_budget() -> Duration {
+    static BUDGET: OnceLock<Duration> = OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        let budget = parse_wait_budget(std::env::var("VICTORY_PIPELINE_WAIT_MS").ok().as_deref());
+        tracing::info!(
+            millis = budget.as_millis() as u64,
+            "host pipeline wait budget per frame"
+        );
+        budget
+    })
+}
+
+fn parse_wait_budget(value: Option<&str>) -> Duration {
+    Duration::from_millis(value.and_then(|v| v.trim().parse().ok()).unwrap_or(500))
+}
+
+/// Reserved time counts immediately, so concurrent recording threads cannot
+/// each spend the entire frame allowance. Frame numbers increase during a run.
+#[derive(Default)]
+struct FrameBudget {
+    frame: Option<u64>,
+    spent: Duration,
+}
+
+impl FrameBudget {
+    fn reserve(&mut self, frame: u64, budget: Duration) -> Duration {
+        if self.frame.is_some_and(|current| frame < current) {
+            return Duration::ZERO; // a recording thread resumed after a newer frame
+        }
+        if self.frame != Some(frame) {
+            self.frame = Some(frame);
+            self.spent = Duration::ZERO;
+        }
+        let left = budget.saturating_sub(self.spent);
+        self.spent += left;
+        left
+    }
+
+    fn refund(&mut self, frame: u64, reserved: Duration, waited: Duration) {
+        if self.frame == Some(frame) {
+            self.spent = self.spent.saturating_sub(reserved.saturating_sub(waited));
+        }
+    }
+}
 
 /// Pipelines queued and not made yet.
 static WAITING: AtomicU64 = AtomicU64::new(0);
@@ -233,12 +276,21 @@ pub(crate) fn early(p: &Arc<Pending>) {
 
 /// Waits for `p` while frame `frame` has budget left.
 fn wait(p: &Pending, frame: u64) {
-    static FRAME: AtomicU64 = AtomicU64::new(u64::MAX);
-    static WAITED_US: AtomicU64 = AtomicU64::new(0);
-    if FRAME.swap(frame, Ordering::Relaxed) != frame {
-        WAITED_US.store(0, Ordering::Relaxed);
+    let budget = wait_budget();
+    if budget.is_zero() {
+        return;
     }
-    let left = BUDGET.saturating_sub(Duration::from_micros(WAITED_US.load(Ordering::Relaxed)));
+    static SPENT: Mutex<FrameBudget> = Mutex::new(FrameBudget {
+        frame: None,
+        spent: Duration::ZERO,
+    });
+    let left = SPENT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .reserve(frame, budget);
+    if left.is_zero() {
+        return;
+    }
     let started = Instant::now();
     let (lock, done) = &DONE;
     let mut held = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -252,7 +304,11 @@ fn wait(p: &Pending, frame: u64) {
             .unwrap_or_else(|e| e.into_inner())
             .0;
     }
-    WAITED_US.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+    drop(held);
+    SPENT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .refund(frame, left, started.elapsed());
 }
 
 /// Pipelines for the workers: those draws wait for, then those started
@@ -420,5 +476,82 @@ mod tests {
         assert_eq!(worker_count(Some("0"), 20), 1);
         assert_eq!(worker_count(Some("999"), 20), 64);
         assert_eq!(worker_count(Some("many"), 20), 8);
+    }
+    #[test]
+    fn pipeline_wait_switch_accepts_zero_and_rejects_invalid_values() {
+        assert_eq!(parse_wait_budget(None), Duration::from_millis(500));
+        assert_eq!(parse_wait_budget(Some("24")), Duration::from_millis(24));
+        assert_eq!(parse_wait_budget(Some(" 0 ")), Duration::ZERO);
+        for invalid in ["", "-1", "1.5", "many", "18446744073709551616"] {
+            assert_eq!(parse_wait_budget(Some(invalid)), Duration::from_millis(500));
+        }
+    }
+
+    #[test]
+    fn concurrent_waiters_share_one_frame_allowance() {
+        let budget = Arc::new(Mutex::new(FrameBudget::default()));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let budget = budget.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    budget.lock().unwrap().reserve(7, Duration::from_millis(24))
+                })
+            })
+            .collect();
+        let reservations: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(
+            reservations.iter().copied().sum::<Duration>(),
+            Duration::from_millis(24)
+        );
+        assert_eq!(reservations.iter().filter(|d| !d.is_zero()).count(), 1);
+    }
+
+    #[test]
+    fn unused_wait_time_returns_to_the_same_frame_only() {
+        let mut budget = FrameBudget::default();
+        let total = Duration::from_millis(24);
+        let reserved = budget.reserve(3, total);
+        budget.refund(3, reserved, Duration::from_millis(4));
+        assert_eq!(budget.reserve(3, total), Duration::from_millis(20));
+        assert_eq!(budget.reserve(3, total), Duration::ZERO);
+        assert_eq!(budget.reserve(4, total), total);
+        budget.refund(3, reserved, Duration::ZERO);
+        assert_eq!(budget.reserve(4, total), Duration::ZERO);
+        assert_eq!(budget.reserve(5, total), total);
+        budget.refund(5, total, Duration::from_secs(1));
+        assert_eq!(budget.reserve(5, total), Duration::ZERO);
+    }
+
+    #[test]
+    fn an_old_recording_thread_cannot_reset_a_new_frames_budget() {
+        let mut budget = FrameBudget::default();
+        let total = Duration::from_millis(24);
+        assert_eq!(budget.reserve(10, total), total);
+        assert_eq!(budget.reserve(9, total), Duration::ZERO);
+        assert_eq!(budget.reserve(10, total), Duration::ZERO);
+        assert_eq!(budget.reserve(11, total), total);
+    }
+
+    #[test]
+    fn a_zero_wait_switch_reaches_the_submission_wait_path() {
+        if !crate::host::tests::isolated(
+            "pipeline::make::tests::a_zero_wait_switch_reaches_the_submission_wait_path",
+        ) {
+            return;
+        }
+        // SAFETY: isolated single-test child; no other test reads this setting.
+        unsafe { std::env::set_var("VICTORY_PIPELINE_WAIT_MS", "0") };
+        assert_eq!(wait_budget(), Duration::ZERO);
+        let pending = Pending::new(Vec::new(), None);
+        let start = Instant::now();
+        wait(&pending, 0);
+        assert!(
+            start.elapsed() < Duration::from_millis(250),
+            "zero should not spend the default 500 ms"
+        );
+        assert!(pending.made.get().is_none());
     }
 }
