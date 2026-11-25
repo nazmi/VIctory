@@ -131,7 +131,34 @@ fn open(device: &ID3D12Device1, blob: Vec<u8>) -> Option<Library> {
     } else {
         tracing::info!("no host pipeline library yet; starting an empty one");
     }
-    let library = make(&[]).ok()?;
+    // An empty library is asked for with a null blob. An empty Rust slice has
+    // a dangling, non-null pointer; Windows only looks at the length, but
+    // vkd3d-proton (Wine) refuses a non-null blob of length 0 with
+    // E_INVALIDARG, and no pipeline was ever kept there.
+    let empty = || -> windows::core::Result<ID3D12PipelineLibrary1> {
+        use windows::core::Interface;
+        let mut out = std::ptr::null_mut();
+        // SAFETY: the method's own arguments; a null blob of length 0 makes
+        // an empty library.
+        unsafe {
+            (Interface::vtable(device).CreatePipelineLibrary)(
+                Interface::as_raw(device),
+                std::ptr::null(),
+                0,
+                &ID3D12PipelineLibrary::IID,
+                &mut out,
+            )
+            .ok()?;
+            ID3D12PipelineLibrary::from_raw(out).cast()
+        }
+    };
+    let library = match empty() {
+        Ok(library) => library,
+        Err(e) => {
+            tracing::info!(error = %e, "empty host pipeline library refused");
+            return None;
+        }
+    };
     Some(Library {
         library,
         _blob: Vec::new(),
@@ -505,6 +532,31 @@ pub(crate) fn note_used(key: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_library_can_be_serialised_and_reopened() {
+        if !crate::host::tests::isolated(
+            "pipeline::library::tests::an_empty_library_can_be_serialised_and_reopened",
+        ) {
+            return;
+        }
+        let device = crate::host::host()
+            .expect("WARP device required")
+            .device
+            .cast::<ID3D12Device1>()
+            .unwrap();
+        let library = open(&device, Vec::new()).expect("an empty library");
+        assert!(library._blob.is_empty());
+        // SAFETY: the live library writes into the buffer of its requested size.
+        let bytes = unsafe {
+            let mut bytes = vec![0; library.library.GetSerializedSize()];
+            library.library.Serialize(&mut bytes).unwrap();
+            bytes
+        };
+        assert!(!bytes.is_empty());
+        let reopened = open(&device, bytes.clone()).expect("the serialised library");
+        assert_eq!(reopened._blob, bytes, "the saved blob was accepted");
+    }
 
     #[test]
     fn failed_library_publication_keeps_the_snapshot_dirty_for_retry() {
