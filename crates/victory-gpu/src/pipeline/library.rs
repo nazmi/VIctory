@@ -507,6 +507,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn failed_library_publication_keeps_the_snapshot_dirty_for_retry() {
+        if !crate::host::tests::isolated(
+            "pipeline::library::tests::failed_library_publication_keeps_the_snapshot_dirty_for_retry",
+        ) {
+            return;
+        }
+        let device = crate::host::host()
+            .unwrap()
+            .device
+            .cast::<ID3D12Device1>()
+            .unwrap();
+        let library = open(&device, Vec::new()).unwrap();
+        library.added.store(1, Ordering::Relaxed);
+        library
+            .metadata
+            .lock()
+            .unwrap()
+            .prebuilt
+            .insert("synthetic".to_owned());
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, b"synthetic file prevents directory creation").unwrap();
+        assert!(!save_files(&blocked, &library));
+        assert_ne!(library.added.load(Ordering::Relaxed), 0);
+        assert!(library.metadata.lock().unwrap().prebuilt_changed);
+        assert!(save_files(dir.path(), &library));
+        assert_eq!(library.added.load(Ordering::Relaxed), 0);
+        assert!(!library.metadata.lock().unwrap().prebuilt_changed);
+        let bytes = std::fs::read(dir.path().join(LIBRARY_FILE)).unwrap();
+        let prebuilt = std::fs::read(dir.path().join(PREBUILT_FILE)).unwrap();
+        assert!(listed(&prebuilt, &tag(&bytes)).contains("synthetic"));
+    }
+
+    #[test]
     fn periodic_saves_back_off_and_account_for_write_cost() {
         assert_eq!(save_interval(0, Duration::ZERO), Duration::from_secs(20));
         assert_eq!(save_interval(1, Duration::ZERO), Duration::from_secs(40));
