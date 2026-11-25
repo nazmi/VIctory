@@ -1604,6 +1604,22 @@ const fn list_table(newer: bool) -> [*const (); 160] {
 static LIST_FUNCTIONS: Table<160> = Table(list_table(false));
 static NEWER_LIST_FUNCTIONS: Table<160> = Table(list_table(true));
 
+#[cfg(all(test, windows))]
+pub(crate) fn has_newer_table(list: This) -> bool {
+    // SAFETY: one of our lists, beginning with its vtable pointer.
+    let table = unsafe { *list.cast::<*const *const ()>() };
+    table == NEWER_LIST_FUNCTIONS.0.as_ptr()
+}
+
+#[cfg(all(windows, feature = "diagnostics"))]
+static FRAME_DRAWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Draws recorded since the last present, for diagnostics capture triggers.
+#[cfg(all(windows, feature = "diagnostics"))]
+pub(crate) fn take_frame_draws() -> u64 {
+    FRAME_DRAWS.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1675,19 +1691,4 @@ mod tests {
         assert_eq!(release(list), 0);
         assert_eq!(release(allocator), 0);
     }
-}
-#[cfg(all(test, windows))]
-pub(crate) fn has_newer_table(list: This) -> bool {
-    // SAFETY: one of our lists, beginning with its vtable pointer.
-    let table = unsafe { *list.cast::<*const *const ()>() };
-    table == NEWER_LIST_FUNCTIONS.0.as_ptr()
-}
-
-#[cfg(all(windows, feature = "diagnostics"))]
-static FRAME_DRAWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Draws recorded since the last present, for diagnostics capture triggers.
-#[cfg(all(windows, feature = "diagnostics"))]
-pub(crate) fn take_frame_draws() -> u64 {
-    FRAME_DRAWS.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
