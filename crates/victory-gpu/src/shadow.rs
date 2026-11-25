@@ -803,8 +803,15 @@ mod tests {
         copy.writing(p, len);
         // SAFETY: (all title reads and writes below) bytes of our pool.
         unsafe { title(PAGE + 20).write_volatile(0x55) };
-        assert!(copy.update(p + PAGE + 16, 16) > 0, "the title's write is copied");
-        assert_eq!(host(PAGE + 20), 0x55, "the title's constant reaches the copy");
+        assert!(
+            copy.update(p + PAGE + 16, 16) > 0,
+            "the title's write is copied"
+        );
+        assert_eq!(
+            host(PAGE + 20),
+            0x55,
+            "the title's constant reaches the copy"
+        );
         // The shaders run: one byte written. The title writes meanwhile.
         copy.write_host((p + 10) as u64, &[0xaa]);
         // SAFETY: a byte of our pool.
@@ -812,8 +819,16 @@ mod tests {
         copy.copy_back(p, len);
         // SAFETY: bytes of our pool.
         unsafe {
-            assert_eq!(title(10).read_volatile(), 0xaa, "the shader's write goes back");
-            assert_eq!(title(PAGE + 20).read_volatile(), 0x66, "the title's later write stays");
+            assert_eq!(
+                title(10).read_volatile(),
+                0xaa,
+                "the shader's write goes back"
+            );
+            assert_eq!(
+                title(PAGE + 20).read_volatile(),
+                0x66,
+                "the title's later write stays"
+            );
         }
         unregister(p, p as u64);
     }
