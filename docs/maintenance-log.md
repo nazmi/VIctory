@@ -1,5 +1,13 @@
 # Maintenance log
 
+## Current user clarification: 2026-11-25
+
+The off-peak-only restriction applies **only to DeepSeek**. Codex may continue
+reviewing pending PRs at any time. Review and test each candidate first, then
+merge accepted candidates into `integration/maintenance` with `--no-ff`.
+The earlier blanket restriction below is historical and superseded for Codex.
+
+
 ## Binding constraint: off-peak only
 
 The user set this as a standing hard rule on 2026-11-25:
@@ -1561,3 +1569,37 @@ verified. No title was executed.
 The wider PR/issue sweep was not part of these two repairs and remains pending.
 The historical audit/handoff have explicit current-state notices; worker
 accounting lists every source commit and its integration disposition.
+
+
+## Codex PR review continuation: 2026-11-25
+
+- User authorized Codex review during peak time and requires non-fast-forward
+  merge commits for accepted, tested PRs. No upstream mutation or push requested.
+- Start: clean `integration/maintenance` at `23e7b94c`; latest full gate at this
+  tree passed 730 workspace tests and both Clippy commands, formatting and
+  policy. Preserve the hang/merge-regression repairs.
+- Ordered plan: refresh the complete open-PR snapshot with paginated REST;
+  reconcile prior dispositions and exact heads; prioritize small correctness
+  fixes and reject duplicate/bundled/stale patches on evidence; delegate bounded
+  full-diff review and candidate testing in isolated worktrees; coordinator
+  reviews every result, runs integration gates and merges accepted candidates
+  one at a time with `--no-ff`; refresh tracking and report remaining queue.
+- Acceptance: complete file/hunk review and discussion/CI checks at the current
+  source SHA; meaningful targeted tests; both workspace Clippy modes, workspace
+  tests, formatting and asset policy on the resulting integration; source
+  attribution preserved. No title execution, WARP for new GPU reproduction.
+- Workers: Codex `gpt-6.1-sol`, low for read-only inventory, medium for bounded
+  reviews/fixes, as AGENTS.md requests. No DeepSeek workers launched.
+
+Inventory refresh: GitHub connector PR search has no exhaustive pagination
+control, so used read-only `gh api --paginate --slurp` REST fallback for the
+complete snapshot. Retrieved 2026-11-25: 8 pages (7 x 100, last 13), **713 open
+PRs**, including 129 absent from the older snapshot. Among currently open PRs,
+447 old rows are unreviewed; with new PRs, **576 need a reviewed disposition**.
+Other current rows: 112 integrated-local, 10 duplicate, 6 rejected, 5 held,
+4 deferred. These retain exact-head validity checks before reuse. Raw response:
+`C:/Users/nazmi/victory-runs/codex-open-prs-20261125.json` (outside repo).
+`upstream/main` refreshed to `42363ab6`; not merged as part of individual review.
+First independent candidates: #421 (HLE path normalization), #1557 (BC7 input
+validation), #1722 (empty pipeline-library blob compatibility). Coordinator
+also inspects #1324 (cache publication race) without overlapping worker writes.
