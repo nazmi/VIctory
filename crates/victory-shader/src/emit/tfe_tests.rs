@@ -165,8 +165,15 @@ fn loads_samples_and_gathers_with_tfe_check_residency() {
         assert!(!l.wave_ops, "{label}");
         #[cfg(windows)]
         if let Some(text) = super::tests::dump_dxil(&l.dxil) {
-            assert!(text.contains("dx.op.checkAccessFullyMapped.i32(i32 71"), "{label}: {text}");
-            assert!(text.contains("select i1"), "{label}: residency becomes status 0 or 1");
+            assert!(
+                text.contains("dx.op.checkAccessFullyMapped.i32(i32 71"),
+                "{label}: {text}"
+            );
+            assert!(
+                text.lines()
+                    .any(|l| l.contains("select i1") && l.ends_with(", i32 0, i32 1")),
+                "{label}: residency becomes status 0 or 1: {text}"
+            );
         }
         let container = crate::Container::parse(&l.dxil).unwrap();
         let features = container.part(crate::FourCC::SFI0).unwrap().data;
@@ -213,19 +220,36 @@ fn one_dimensional_views_use_two_dimensional_backing() {
     for (dim, host_kind) in [(0, 2), (4, 7)] {
         let access = [0xF09C_0100 | dim << 3, 0x0043_0C02];
         let lowered = translate(&program(SAMPLE_AT_MIDDLE, access, 12, 12)).unwrap();
-        let text = super::tests::dump_dxil(&lowered.dxil).expect("dxc required for coordinate regression");
-        assert!(text.contains(&format!("{{ i32 {host_kind}, i32 1033 }}")), "{text}");
-        let sample = text.lines().find(|l| l.contains("call %dx.types.ResRet.f32 @dx.op.sampleLevel.f32")).unwrap();
-        assert!(sample.contains(", float 0.000000e+00,"), "host y is zero: {sample}");
+        let Some(text) = super::tests::dump_dxil(&lowered.dxil) else {
+            eprintln!("no dxc.exe; 1D coordinate DXIL checks skipped");
+            return;
+        };
+        assert!(
+            text.contains(&format!("{{ i32 {host_kind}, i32 1033 }}")),
+            "{text}"
+        );
+        let sample = text
+            .lines()
+            .find(|l| l.contains("call %dx.types.ResRet.f32 @dx.op.sampleLevel.f32"))
+            .unwrap();
+        let args: Vec<_> = sample.split(',').map(str::trim).collect();
+        assert_eq!(args[4], "float 0.000000e+00", "host y is zero: {sample}");
         if dim == 4 {
             // The second console coordinate becomes the host array slice.
-            assert!(!sample.contains("float undef, float undef"), "{sample}");
+            assert_ne!(
+                args[5], "float undef",
+                "host z holds the array slice: {sample}"
+            );
         }
         let query = [0xF038_0200 | dim << 3, 0x0003_1402];
         let lowered = translate(&program(LOAD_AT_ORIGIN, query, 20, 20)).unwrap();
         let text = super::tests::dump_dxil(&lowered.dxil).unwrap();
         if dim == 4 {
-            assert!(text.lines().any(|l| l.contains("extractvalue %dx.types.Dimensions") && l.ends_with(", 2")), "array layers come from third dimension: {text}");
+            assert!(
+                text.lines()
+                    .any(|l| l.contains("extractvalue %dx.types.Dimensions") && l.ends_with(", 2")),
+                "array layers come from third dimension: {text}"
+            );
         }
     }
 }

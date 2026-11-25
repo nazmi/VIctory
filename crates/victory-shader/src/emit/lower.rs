@@ -4034,7 +4034,11 @@ impl<'a> Lower<'a> {
                     5 => 7,
                     _ => return Err("an image dimension (cube or MSAA)"),
                 };
-                let host_kind = match kind { 1 => 2, 6 => 7, k => k };
+                let host_kind = match kind {
+                    1 => 2,
+                    6 => 7,
+                    k => k,
+                };
                 ((host_kind | u, 0x409), Some(kind))
             }
             Fields::Buffer { idxen, format, .. } => {
@@ -7414,8 +7418,12 @@ impl<'a> Lower<'a> {
             return Err("an image access with lwe");
         }
         let name = inst.name();
-        if *tfe && (name.starts_with("image_store") || name.starts_with("image_atomic_")
-            || name.starts_with("image_bvh") || matches!(name, "image_get_resinfo" | "image_get_lod")) {
+        if *tfe
+            && (name.starts_with("image_store")
+                || name.starts_with("image_atomic_")
+                || name.starts_with("image_bvh")
+                || matches!(name, "image_get_resinfo" | "image_get_lod"))
+        {
             return Err("tfe on an image store, atomic or query");
         }
         // Explicit-level gathers use multiple loads; their statuses must be
@@ -7449,10 +7457,18 @@ impl<'a> Lower<'a> {
         };
         // Match the host's height-one 2D backing for console 1D views.
         let flat = kind == 1 || kind == 6;
-        let host_kind = match kind { 1 => 2, 6 => 7, k => k };
+        let host_kind = match kind {
+            1 => 2,
+            6 => 7,
+            k => k,
+        };
         let flat_to_2d = |cs: &mut [V], zero: V| {
-            if kind == 6 { cs[2] = cs[1]; }
-            if flat { cs[1] = zero; }
+            if kind == 6 {
+                cs[2] = cs[1];
+            }
+            if flat {
+                cs[1] = zero;
+            }
         };
         // Address VGPRs in order.
         let mut regs = Vec::new();

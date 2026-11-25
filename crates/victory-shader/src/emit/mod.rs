@@ -185,12 +185,12 @@ mod sampler;
 #[cfg(all(test, windows))]
 mod semantics_tests;
 mod shader;
-#[cfg(test)]
-mod tfe_tests;
 #[cfg(all(test, windows))]
 mod stride_tests;
 #[cfg(all(test, windows))]
 mod synthetic_tests;
+#[cfg(test)]
+mod tfe_tests;
 #[cfg(windows)]
 pub mod validator;
 #[cfg(all(test, windows))]
@@ -1115,7 +1115,9 @@ mod tests {
         if !dxc.exists() {
             return None;
         }
-        let file = tempfile::NamedTempFile::new().expect("temporary DXIL file").into_temp_path();
+        let file = tempfile::NamedTempFile::new()
+            .expect("temporary DXIL file")
+            .into_temp_path();
         std::fs::write(&file, container).expect("write DXIL file");
         let out = std::process::Command::new(dxc)
             .arg("-dumpbin")
@@ -1312,12 +1314,18 @@ mod tests {
                 }
                 #[cfg(windows)]
                 if let Some(text) = dump_dxil(&ms.dxil) {
-                    let calls: Vec<_> = text.lines().filter(|l| l.contains("call void @dx.op.emitIndices")).collect();
+                    let calls: Vec<_> = text
+                        .lines()
+                        .filter(|l| l.contains("call void @dx.op.emitIndices"))
+                        .collect();
                     assert!(!calls.is_empty());
                     if topology == 1 {
                         assert!(calls.iter().all(|l| l.contains("i32 undef")), "{text}");
                     }
-                    let masks = text.lines().filter(|l| l.contains(" = and i32") && l.ends_with(", 511")).count();
+                    let masks = text
+                        .lines()
+                        .filter(|l| l.contains(" = and i32") && l.ends_with(", 511"))
+                        .count();
                     assert_eq!(masks, if topology == 1 { 2 } else { 3 }, "{text}");
                     assert!(!text.contains(", 1023"), "edge bits are not vertex indices");
                 }
