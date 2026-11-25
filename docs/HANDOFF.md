@@ -6,8 +6,9 @@ acting.
 
 ## Current branch
 
-- Branch `integration/maintenance`, HEAD **`82755568`**, pushed and equal to
-  `origin/integration/maintenance` (0 ahead, 0 behind).
+- Branch `integration/maintenance`. The code state described here is
+  **`82755568`**; this document is the commit immediately after it. Both are
+  pushed, and `origin/integration/maintenance` is level with the local branch.
 - `upstream/main` **`940d32f6` is merged** (merge commit `afaacd64`, 291
   commits). 496 commits from `upstream/main` to HEAD.
 - Gate on this HEAD: `cargo fmt --check` 0 differing, both
