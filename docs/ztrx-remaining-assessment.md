@@ -12,14 +12,37 @@ lines**, 21,078 of them in `crates/victory-gpu` and 15,401 in
 parallel implementation of the GPU and shader layers. A declaration sweep
 finds **575 functions, constants and statics that exist only there**.
 
-## Blocked: licence
+## Console-instruction emulation: resolved, and smaller than it looked
 
-| Piece | Lines | Why |
+The permission question is settled by the project owner (2026-11-25), so the
+licence is no longer a blocker. But the port itself turned out to be almost
+unnecessary:
+
+**This tree already had its own implementation.** `emulate_amd_only` in
+`crates/victory-loader/src/crash.rs` covers `clzero` (including the
+`clzero`/`add`/`cmp`/`jb` loop, folded into one exception), `monitorx`,
+`mwaitx`, `rdpru`, `clwb` (including a whole write-back loop) and SSE4a
+`extrq`/`insertq` — written in-house, with no XCL provenance. A side-by-side
+comparison of both decoders found **exactly one encoding ztrx handled and we
+did not: `rdpid`**.
+
+That one is now in (`90bd357d`): `F3 [rex] 0F C7 /7` reads the destination from
+the ModRM, writes the host's processor number, and steps over the instruction.
+
+| Instruction | Before | Now |
 | --- | --- | --- |
-| `crates/victory-loader/src/console_insn.rs` + `console_insn_decode.rs`, and the 9-line `crash.rs` hook | ~491 | **It is ported from XCL, which is GPL-2.0-only; this project is GPL-3.0-or-later.** Those two are incompatible: GPLv2-only code cannot be combined with GPLv3 code, so importing it would make the tree undistributable. Nothing about the code is wrong — it emulates `clzero` (`0F 01 FC`) and `monitorx` (`0F 01 FA`), console-Zen-2 instructions an Intel PC raises `STATUS_ILLEGAL_INSTRUCTION` on, and the title zeroes memory with a `clzero` loop in its first frames. It cannot be taken until the licence question is settled by someone who can settle it (the XCL author's permission, or a clean-room rewrite). |
+| `clzero`, `clzero` loop | emulated | unchanged |
+| `monitorx`, `mwaitx` | emulated | unchanged |
+| `rdpru` | emulated | unchanged |
+| `clwb`, `clwb` loop | emulated | unchanged |
+| SSE4a `extrq`/`insertq` | emulated | unchanged |
+| **`rdpid`** | **faulted** | **emulated** |
+| `ud2` | crashes (correct) | unchanged: ztrx's `Ud2` case also returns continue-search |
 
-This is the single largest *complete* feature in ztrx (it is why the title runs
-at all on a PC CPU) and it is the one thing here I must not quietly port.
+So the largest "blocked" item in the earlier list cost one instruction and no
+third-party code at all. The lesson is recorded rather than glossed: the 491-line
+file was assumed to be a wholesale import need, and checking the two decoders
+against each other took minutes.
 
 ## Already present — verified, not assumed
 
@@ -75,15 +98,16 @@ taking it as written would breach the policy.
 
 There is no remainder that is both independent and valuable. Of 36,000 lines:
 
-- **~491** are blocked by licence,
+- **~490** console-instruction lines: **resolved** — this tree already had its
+  own emulation, and the only real gap was `rdpid`, now added (`90bd357d`),
 - **~200** are already present,
 - **~200** are branding,
-- **~2,000** are proven not to help (threading recovers no refusal),
+- **~2,000** are proven not to help (the threading port recovers no refusal),
 - **~19,000** are coupled subsystems that each need their own design, port and
   correctness witness,
 - **~2,100** (the optimiser) are held on evidence of breakage.
 
-The honest next steps, in value order, are ports rather than imports: the
-console-instruction emulation once its licence is settled, then in-place memory
-(which unblocks ray tracing), then the instrumentation. Each is a project with
-its own tests, not a merge.
+The honest next steps, in value order, are ports rather than imports: in-place
+title memory (which unblocks ray tracing), then the instrumentation set, then
+the optimiser behind an off-by-default switch with a title A/B. Each is a
+project with its own tests, not a merge.
