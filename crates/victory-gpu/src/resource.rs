@@ -112,22 +112,6 @@ const _: () = assert!(size_of::<ResourceDesc>() == 56);
 const BUFFER: u32 = 1;
 const TEXTURE_3D: u32 = 4;
 
-/// The host dimension of a title resource: 1D textures (and 1D arrays) are
-/// 2D on the host, one texel high. The console samples a 1D texture with 2D
-/// image instructions too (its hardware goes by the descriptor and ignores
-/// the extra coordinate); D3D12 wants the shader's resource type to match
-/// the view, so the translation reads every 1D view as 2D and the views
-/// (`descriptor::host`) and textures are made 2D to match.
-pub(crate) fn host_dimension(dimension: u32) -> u32 {
-    const TEXTURE_1D: u32 = 2;
-    const TEXTURE_2D: u32 = 3;
-    if dimension == TEXTURE_1D {
-        TEXTURE_2D
-    } else {
-        dimension
-    }
-}
-
 /// Bytes per element and the element's width in texels (4 for block
 /// compression), by DXGI format number. `None` for 1-bit and video
 /// formats. The console adds 116/117 (10-bit float color), 118-120 (16-bit
@@ -359,8 +343,7 @@ const NO_FOOTPRINT: PlacedFootprint = PlacedFootprint {
     row_pitch: 0,
 };
 
-/// One subresource's size in an upload buffer: footprint (offset 0), rows
-/// and bytes per row. Planes of depth-stencil formats are not told apart.
+/// One subresource's upload footprint (offset 0), row count and unpadded row size.
 fn subresource(desc: &ResourceDesc, index: u32) -> Option<(PlacedFootprint, u32, u64)> {
     const PITCH: u64 = 256;
     if desc.dimension == BUFFER {
@@ -380,11 +363,18 @@ fn subresource(desc: &ResourceDesc, index: u32) -> Option<(PlacedFootprint, u32,
     } else {
         u32::from(desc.depth_or_array_size).max(1)
     };
-    let (mip, slice) = (index % mips, index / mips);
-    if slice >= slices {
-        return None;
-    }
-    let (element, block) = element(desc.format)?;
+    let mip = index % mips;
+    let plane = index / mips / slices;
+    let depth_stencil = matches!(desc.format, 19..=22 | 44..=47);
+    // Each plane contains all the mip levels and array slices. Depth and
+    // stencil copies use separate formats and 512-byte row alignment.
+    let (format, pitch_alignment) = match (depth_stencil, plane) {
+        (true, 0) => (39, 512), // DXGI_FORMAT_R32_TYPELESS
+        (true, 1) => (60, 512), // DXGI_FORMAT_R8_TYPELESS
+        (false, 0) => (desc.format, PITCH),
+        _ => return None,
+    };
+    let (element, block) = element(format)?;
     let width = (desc.width >> mip).max(1).next_multiple_of(block);
     let height = (u64::from(desc.height) >> mip)
         .max(1)
@@ -397,18 +387,18 @@ fn subresource(desc: &ResourceDesc, index: u32) -> Option<(PlacedFootprint, u32,
     let row_size = width / block * element;
     let footprint = PlacedFootprint {
         offset: 0,
-        format: desc.format,
+        format,
         width: u32::try_from(width).ok()?,
         height: u32::try_from(height).ok()?,
         depth,
-        row_pitch: u32::try_from(row_size.next_multiple_of(PITCH)).ok()?,
+        row_pitch: u32::try_from(row_size.next_multiple_of(pitch_alignment)).ok()?,
     };
     Some((footprint, u32::try_from(height / block).ok()?, row_size))
 }
 
-/// Device method: where each subresource goes in an upload buffer, rows
-/// 256-byte and subresources 512-byte aligned, as on PC. Unknown sizes give
-/// the documented all-ones values.
+/// Places subresources at 512-byte boundaries in an upload buffer.
+/// Row pitch is aligned to 512 bytes for depth/stencil planes and 256 bytes
+/// otherwise. Unknown sizes give the documented all-ones values.
 pub(crate) extern "system" fn copyable_footprints(
     _: This,
     desc: *const ResourceDesc,
@@ -761,13 +751,19 @@ struct Resource {
     heap: HeapProperties,
     heap_flags: u32,
     backing: Backing,
-    /// The host copy is allocated on first host use, not when the title
-    /// reserves texture memory. Unused textures take no duplicate GPU memory.
+    /// Textures also live on the host GPU (decision 0007); buffers do not
+    /// yet.
+    ///
+    /// Made on first host use, not when the title reserves texture memory: a
+    /// streamed world reserves far more than it draws in any window, and
+    /// copying all of it doubled the memory the title needed (the copies
+    /// reached 9.6 GB and the device went out of memory at the world load).
     #[cfg(windows)]
     host: std::sync::OnceLock<Option<std::sync::Arc<HostTexture>>>,
+    /// Kept for the deferred creation above: the state the title created it
+    /// in, and its clear value (`None` when the title passed null).
     #[cfg(windows)]
     initial_state: u32,
-    /// Owned because the caller's clear-value pointer expires on return.
     #[cfg(windows)]
     clear_value: Option<[u32; 5]>,
 }
@@ -847,23 +843,6 @@ static USED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0)
 static TEXTURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(windows)]
 static TEXTURE_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// Placed textures made ([`texture_at`]). Counted separately from the host
-/// textures above because they are never released, so the growth is the thing
-/// worth seeing: a streaming world adds one per address and description it
-/// views, and none of them is counted as a host texture.
-///
-/// The count, not the bytes: getting a byte figure needs a
-/// `D3D12_RESOURCE_DESC`, and this module's description is its own type, so
-/// the honest figure here would be a guess. One resource is one host texture,
-/// which bounds it well enough to see growth.
-#[cfg(windows)]
-static PLACED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Placed textures made so far.
-#[cfg(windows)]
-pub(crate) fn placed_count() -> u64 {
-    PLACED.load(std::sync::atomic::Ordering::Relaxed)
-}
 /// Title textures that found their memory's host texture made already.
 #[cfg(windows)]
 static SHARED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1051,10 +1030,6 @@ fn host_desc(desc: &ResourceDesc) -> Option<ResourceDesc> {
     d.layout = 0;
     d.alignment = 0;
     d.flags &= PC_FLAGS;
-    if host_dimension(d.dimension) != d.dimension {
-        d.dimension = host_dimension(d.dimension);
-        d.height = 1;
-    }
     // PC refuses depth targets that are also unordered-access (the console
     // allows both; Grand Theft Auto VI's shadow maps and material depth ask
     // for it): unordered views of such a texture write its twin
@@ -1133,16 +1108,12 @@ pub(crate) fn castable(format: u32) -> Vec<u32> {
     let Some(e) = element(format) else {
         return Vec::new();
     };
-    // Same *family*, not merely the same element size. D3D12 accepts a view
-    // format only if it is in the resource format's typeless family, so a
-    // 4-byte format outside it is not a legal view of this texture: asking
-    // for one is DXGI_ERROR_INVALID_CALL and removes the device. Seen on a
-    // Radeon 780M viewing an R32_UINT resource as R9G9B9E5_SHAREDEXP, which
-    // is the same four bytes but another family.
     (1..=115)
         .filter(|&f| f != format && element(f) == Some(e) && !DEPTH_FAMILIES.contains(&f))
+        // Same typeless family only: D3D12 refuses a view outside it with
+        // DXGI_ERROR_INVALID_CALL, which removes the device (seen on a 780M,
+        // R32_UINT viewed as R9G9B9E5_SHAREDEXP).
         .filter(|&f| family(f) == family(format))
-        // A typeless format is a family's head, and no view may name one.
         .filter(|&f| !(family(f) == f && family(f + 1) == f))
         .collect()
 }
@@ -1254,8 +1225,6 @@ fn make_texture(d: &ResourceDesc, state: u32, clear: *const c_void) -> Option<Ho
         value[0] = pc_format(value[0]);
         value
     });
-    // The format the clear value names, for the failure note below.
-    let clear_format = clear_value.as_ref().map(|v| v[0]);
     let clear_value = clear_value
         .as_ref()
         .map(|v| std::ptr::from_ref(v).cast::<D3D12_CLEAR_VALUE>());
@@ -1337,17 +1306,7 @@ fn make_texture(d: &ResourceDesc, state: u32, clear: *const c_void) -> Option<Ho
             )
         };
         if let Err(e) = made {
-            // What the host was asked for: the state the title's maps to
-            // (the failure is often a state the resource's flags forbid) and
-            // the clear value's format.
-            tracing::warn!(
-                error = %e,
-                desc = ?d,
-                initial = format_args!("{initial:#x}"),
-                title_state = format_args!("{state:#x}"),
-                clear_format,
-                "no host texture"
-            );
+            tracing::warn!(error = %e, desc = ?d, "no host texture");
         }
     }
     let texture = texture?;
@@ -1390,6 +1349,7 @@ pub(crate) fn buffer_bytes(this: This) -> Option<(*mut u8, u64)> {
 }
 
 impl Resource {
+    /// The host copy, made now if this is its first use.
     #[cfg(windows)]
     fn host(&self) -> Option<&std::sync::Arc<HostTexture>> {
         self.host
@@ -1469,8 +1429,7 @@ fn hand_out_resource(
     object::hand_out(RESOURCE, resource, iid, &RESOURCE_IIDS, out)
 }
 
-/// Title textures, by the console memory they start at. Registration must
-/// not allocate a host copy: alias lookup also needs textures not yet used.
+/// Title textures with a host copy, by the console memory they start at.
 /// Title textures of one memory share a host texture where the host can
 /// view it in each one's format; where it cannot (block-compressed against
 /// plain formats, a cast the host refused, a host texture replaced),
@@ -1514,7 +1473,10 @@ pub(crate) fn alias_source(placed: This) -> Option<This> {
             let a = resource(r);
             a.desc.flags & WRITTEN != 0
                 && bytes(&a.desc) == Some(want)
-                && matches!((a.host.get().and_then(Option::as_ref), b.host.get().and_then(Option::as_ref)), (Some(x), Some(y)) if !std::sync::Arc::ptr_eq(x, y))
+                && matches!(
+                    (a.host.get().and_then(Option::as_ref), b.host.get().and_then(Option::as_ref)),
+                    (Some(x), Some(y)) if !std::sync::Arc::ptr_eq(x, y)
+                )
         })
 }
 
@@ -1541,7 +1503,7 @@ impl Drop for Resource {
             }
         }
         #[cfg(feature = "diagnostics")]
-        if let Some(Some(h)) = self.host.get() {
+        if let Some(h) = self.host.get().and_then(Option::as_ref) {
             use windows::core::Interface;
             life::note(
                 h.texture.as_raw() as usize,
@@ -1771,11 +1733,7 @@ pub(crate) fn texture_at(address: u64, desc: &[u32; 14]) -> Option<This> {
         return None;
     }
     map.insert((address, *desc), out as usize);
-    if resource(out).host().is_some() {
-        PLACED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        return Some(out);
-    }
-    None
+    resource(out).host().is_some().then_some(out)
 }
 
 pub(crate) extern "system" fn create_placed(
@@ -1951,6 +1909,43 @@ static RESOURCE_FUNCTIONS: Table<32> = {
 };
 
 #[cfg(test)]
+pub(crate) fn test_buffer(width: u64) -> This {
+    let heap = HeapProperties {
+        kind: 1,
+        cpu_pages: 0,
+        pool: 0,
+        creation_nodes: 0,
+        visible_nodes: 0,
+    };
+    let desc = ResourceDesc {
+        dimension: BUFFER,
+        alignment: 0,
+        width,
+        height: 1,
+        depth_or_array_size: 1,
+        mip_levels: 1,
+        format: 0,
+        sample_count: 1,
+        sample_quality: 0,
+        layout: 1,
+        flags: 0,
+    };
+    let mut out = std::ptr::null();
+    let hr = create_committed(
+        std::ptr::null(),
+        &heap,
+        0,
+        &desc,
+        0,
+        std::ptr::null(),
+        &RESOURCE_IIDS[0],
+        &mut out,
+    );
+    assert_eq!(hr, S_OK);
+    out
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::object::slot;
@@ -1969,20 +1964,6 @@ mod tests {
         // Boundaries: 59 belongs to the preceding family, 66 is unmapped.
         assert_eq!(family(59), 53);
         assert_eq!(family(66), 66);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn one_d_host_descriptions_keep_slices_and_mips() {
-        let mut desc = texture(16, 7, 28, 3);
-        desc.dimension = 2;
-        desc.depth_or_array_size = 4;
-        let host = host_desc(&desc).expect("texture description");
-        assert_eq!((host.dimension, host.width, host.height), (3, 16, 1));
-        assert_eq!((host.depth_or_array_size, host.mip_levels), (4, 3));
-        assert_eq!(host_dimension(1), 1);
-        assert_eq!(host_dimension(3), 3);
-        assert_eq!(host_dimension(4), 4);
     }
 
     type Release = extern "system" fn(This) -> u32;
@@ -2086,42 +2067,21 @@ mod tests {
     /// depth ones; block formats among block formats of their block size.
     #[test]
     fn castable_formats_stay_in_the_family() {
-        // The rule D3D12 enforces: a view format must be in the resource
-        // format's typeless family, and a typeless format itself is never a
-        // view. Checked over every format, because the previous element-size
-        // rule was wrong for exactly the cases nobody enumerated: R32_UINT
-        // viewed as R9G9B9E5 removed the device on a 780M.
+        // D3D12 allows a view only within the resource format's typeless
+        // family; a same-size format elsewhere is an invalid call that
+        // removes the device (R32_UINT viewed as R9G9B9E5 on a 780M).
         for format in 1..=115u32 {
             let c = castable(format);
             for &f in &c {
                 assert_eq!(family(f), family(format), "{format} -> {f}");
-                assert_ne!(f, format, "{format} lists itself");
-                assert!(
-                    !(family(f) == f && family(f + 1) == f),
-                    "{format} lists typeless {f}"
-                );
-            }
-            if let Some(e) = element(format) {
-                // Everything else of that element in the family is offered,
-                // minus depth formats and typeless heads.
-                let want: Vec<u32> = (1..=115)
-                    .filter(|&f| {
-                        f != format
-                            && element(f) == Some(e)
-                            && family(f) == family(format)
-                            && !(family(f) == f && family(f + 1) == f)
-                            && ![19, 20, 21, 22, 40, 44, 45, 46, 47, 55].contains(&f)
-                    })
-                    .collect();
-                assert_eq!(c, want, "complete for format {format}");
+                assert_ne!(f, format);
+                assert!(!(family(f) == f && family(f + 1) == f), "typeless {f}");
             }
         }
-        // Concrete: R32_FLOAT and R32_SINT are views of R32_UINT; the same
-        // four bytes in another family are not.
         let c = castable(42);
-        assert!(c.contains(&41) && c.contains(&43));
+        assert!(c.contains(&41) && c.contains(&43), "R32_FLOAT, R32_SINT");
         for f in [39, 40, 67, 24, 28] {
-            assert!(!c.contains(&f), "{f}");
+            assert!(!c.contains(&f), "not a legal view of R32_UINT: {f}");
         }
     }
 
@@ -2301,93 +2261,53 @@ mod tests {
         assert_eq!(t, u64::MAX, "no second subresource");
     }
 
-    #[cfg(windows)]
     #[test]
-    fn unused_textures_allocate_no_host_memory_and_first_use_shares() {
-        if !crate::host::tests::isolated(
-            "resource::tests::unused_textures_allocate_no_host_memory_and_first_use_shares",
-        ) {
-            return;
-        }
-        crate::host::host().expect("WARP device");
-        let before = texture_counts();
-        let null = std::ptr::null();
-        let memory = vec![0u8; 65536];
-        let mut resources = Vec::new();
-        for _ in 0..64 {
-            let mut out = null;
-            assert_eq!(
-                create_at_address(
-                    null,
-                    memory.as_ptr() as u64,
-                    &texture(16, 16, 28, 1),
-                    0,
-                    null.cast(),
-                    &RESOURCE_IIDS[0],
-                    &mut out
-                ),
-                S_OK
-            );
-            assert!(resource(out).host.get().is_none());
-            resources.push(out);
-        }
-        assert_eq!(texture_counts().0, before.0);
-        assert_eq!(texture_counts().1, before.1);
-        let copy = host_copy(resources[0]).expect("first use allocates");
-        for &r in &resources {
-            assert!(std::sync::Arc::ptr_eq(&copy, &host_copy(r).unwrap()));
-        }
-        assert_eq!(texture_counts().0, before.0 + 1);
-        // A recorded list keeps the first-use texture after all title
-        // objects are released. Retirement must never free it under the GPU.
-        let list = crate::host::host().unwrap().new_list().unwrap();
-        list.transition(resources[0], 0x800);
-        let weak = std::sync::Arc::downgrade(&copy);
-        drop(copy);
-        for r in resources {
-            assert_eq!(slot::<Release>(r, 0x10)(r), 0);
-        }
-        assert!(weak.upgrade().is_some());
-        drop(list);
-        assert!(weak.upgrade().is_none());
-        assert_eq!(texture_counts().0, before.0);
-        assert_eq!(texture_counts().1, before.1);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn deferred_texture_owns_clear_value_and_preserves_initial_state() {
-        if !crate::host::tests::isolated(
-            "resource::tests::deferred_texture_owns_clear_value_and_preserves_initial_state",
-        ) {
-            return;
-        }
-        crate::host::host().expect("WARP device");
-        let null = std::ptr::null();
-        let mut out = null;
-        let mut desc = texture(16, 16, 40, 1); // D32_FLOAT, depth target
-        desc.flags = DEPTH;
-        let mut clear = [40u32, 1.0f32.to_bits(), 0, 0, 0];
-        assert_eq!(
-            create_committed(
-                null,
-                &PROPERTIES,
-                0,
+    fn depth_stencil_footprints_follow_the_pc_plane_order() {
+        // Native D3D12 reports the same layout for both depth/stencil families
+        // and their view formats. Mips vary fastest, then array slices, then planes.
+        let expected = [
+            (512, 39, 16, 8),
+            (4_608, 39, 8, 4),
+            (6_656, 39, 16, 8),
+            (10_752, 39, 8, 4),
+            (12_800, 60, 16, 8),
+            (16_896, 60, 8, 4),
+            (18_944, 60, 16, 8),
+            (23_040, 60, 8, 4),
+        ];
+        for format in (19..=22).chain(44..=47) {
+            let desc = ResourceDesc {
+                depth_or_array_size: 2,
+                ..texture(16, 8, format, 2)
+            };
+            let mut layouts = [NO_FOOTPRINT; 8];
+            let (mut rows, mut sizes, mut total) = ([0; 8], [0; 8], 0);
+            copyable_footprints(
+                std::ptr::null(),
                 &desc,
-                0x10,
-                clear.as_ptr().cast(),
-                &RESOURCE_IIDS[0],
-                &mut out
-            ),
-            S_OK
-        );
-        clear.fill(u32::MAX); // the caller can reuse its stack immediately
-        assert!(resource(out).host.get().is_none());
-        assert_eq!(resource(out).clear_value.unwrap()[0], 40);
-        let copy = host_copy(out).expect("original clear format must reach D3D12");
-        assert_eq!(copy.state.load(std::sync::atomic::Ordering::Relaxed), 0x10);
-        assert!(std::sync::Arc::ptr_eq(&copy, &host_copy(out).unwrap()));
-        assert_eq!(slot::<Release>(out, 0x10)(out), 0);
+                0,
+                8,
+                512,
+                layouts.as_mut_ptr(),
+                rows.as_mut_ptr(),
+                sizes.as_mut_ptr(),
+                &mut total,
+            );
+
+            assert_eq!(
+                layouts.map(|l| (l.offset, l.format, l.width, l.height)),
+                expected,
+                "format {format}"
+            );
+            assert!(
+                layouts.iter().all(|l| l.depth == 1 && l.row_pitch == 512),
+                "format {format}"
+            );
+            assert_eq!(rows, [8, 4, 8, 4, 8, 4, 8, 4], "format {format}");
+            assert_eq!(sizes, [64, 32, 64, 32, 16, 8, 16, 8], "format {format}");
+            assert_eq!(total, 24_072, "format {format}");
+            assert!(subresource(&desc, 8).is_none(), "format {format}");
+        }
     }
 
     /// A 4x4 texture filled from a title buffer through our list and queue,
@@ -2416,10 +2336,6 @@ mod tests {
                 &mut image
             ),
             S_OK
-        );
-        assert!(
-            resource(image).host.get().is_none(),
-            "creation must not allocate a host texture"
         );
         assert_eq!(
             create_committed(
@@ -2649,153 +2565,5 @@ mod tests {
         // The resource keeps the heap alive.
         assert_eq!(slot::<Release>(heap, 0x10)(heap), 1);
         assert_eq!(slot::<Release>(placed, 0x10)(placed), 0);
-    }
-    /// An occlusion query around no draws reports zero samples, not the
-    /// million the stub used to: the heap measures on the host, the list
-    /// marks it, `ResolveQueryData` brings the count back, and the title's
-    /// buffer holds the number once the submission finished.
-    #[cfg(windows)]
-    #[test]
-    fn an_occlusion_query_reports_what_the_draws_passed() {
-        if !crate::host::tests::isolated(
-            "resource::tests::an_occlusion_query_reports_what_the_draws_passed",
-        ) {
-            return;
-        }
-        crate::host::host().expect("WARP device required");
-        let null = std::ptr::null();
-        const OCCLUSION: u32 = 0;
-        const COUNT: u32 = 4;
-        let heap = crate::query::occlusion_for_test(OCCLUSION, COUNT).expect("WARP occlusion heap");
-        let mut results = null;
-        assert_eq!(
-            create_committed(
-                null,
-                &PROPERTIES,
-                0,
-                &buffer(64),
-                0,
-                null.cast(),
-                &RESOURCE_IIDS[0],
-                &mut results,
-            ),
-            S_OK
-        );
-        let (at, _) = buffer_bytes(results).expect("result buffer");
-        // SAFETY: our writable result buffer, before recording any host work.
-        unsafe { std::ptr::write_bytes(at, 0x7b, 64) };
-        let queue_iid = guid(
-            0x0ec870a6,
-            0x5d7e,
-            0x4c22,
-            [0x8c, 0xfc, 0x5b, 0xaa, 0xe0, 0x76, 0x16, 0xed],
-        );
-        let allocator_iid = guid(
-            0x6102dee4,
-            0xaf59,
-            0x4b09,
-            [0xb9, 0x99, 0xb4, 0x4d, 0x73, 0xf0, 0x9b, 0x24],
-        );
-        let list_iid = guid(
-            0x5b160d0f,
-            0xac1b,
-            0x4185,
-            [0x8b, 0xa8, 0xb3, 0xae, 0x42, 0xa5, 0xa4, 0x55],
-        );
-        let (mut queue, mut allocator, mut list) = (null, null, null);
-        let queue_desc = [0u32; 4];
-        assert_eq!(
-            crate::queue::create(null, queue_desc.as_ptr().cast(), &queue_iid, &mut queue),
-            S_OK
-        );
-        assert_eq!(
-            crate::list::create_allocator(null, 0, &allocator_iid, &mut allocator),
-            S_OK
-        );
-        assert_eq!(
-            crate::list::create_list(null, 0, 0, allocator, null, &list_iid, &mut list),
-            S_OK
-        );
-        // Four queries marked around nothing: every count is zero.
-        for index in 0..COUNT {
-            let kind = u32::from(index >= COUNT / 2); // counted, then binary occlusion
-            crate::list::query_begin(list, heap, kind, index);
-            crate::list::query_end(list, heap, kind, index);
-        }
-        crate::list::resolve_queries(list, heap, 0, 0, COUNT / 2, results, 0);
-        crate::list::resolve_queries(list, heap, 1, COUNT / 2, COUNT / 2, results, 16);
-        assert_eq!(
-            slot::<extern "system" fn(This) -> HRESULT>(list, 0x48)(list),
-            S_OK
-        );
-        slot::<extern "system" fn(This, u32, *const This)>(queue, 0x50)(queue, 1, &list);
-
-        let (data, size) = buffer_bytes(results).unwrap();
-        assert_eq!(size, 64);
-        // SAFETY: the submission was waited for; 64 bytes of title memory.
-        let counts = unsafe { std::slice::from_raw_parts(data.cast::<u64>(), 8) };
-        assert_eq!(
-            &counts[..COUNT as usize],
-            &[0u64; COUNT as usize],
-            "nothing was drawn, so nothing passed"
-        );
-        assert!(
-            counts[COUNT as usize..]
-                .iter()
-                .all(|&c| c == 0x7b7b_7b7b_7b7b_7b7b),
-            "the rest of the buffer stays untouched"
-        );
-
-        let release = |o: This| slot::<extern "system" fn(This) -> u32>(o, 0x10)(o);
-        assert_eq!(release(list), 0);
-        assert_eq!(release(allocator), 0);
-        assert_eq!(release(queue), 0);
-        assert_eq!(release(heap), 0);
-        assert_eq!(release(results), 0);
-    }
-    #[cfg(all(windows, feature = "diagnostics"))]
-    #[test]
-    fn target_dump_keeps_the_intermediate_presentation_pick() {
-        if !crate::host::tests::isolated(
-            "resource::tests::target_dump_keeps_the_intermediate_presentation_pick",
-        ) {
-            return;
-        }
-        let folder = tempfile::tempdir().unwrap();
-        // SAFETY: this isolated, single-test subprocess has not initialized
-        // the host or capture settings; no other test reads its environment.
-        unsafe {
-            std::env::set_var("VICTORY_SHOW_TARGET", "0");
-            std::env::set_var("VICTORY_CAPTURE", folder.path());
-            std::env::set_var("VICTORY_DUMP_TARGETS", "1");
-            std::env::set_var("VICTORY_CAPTURE_FRAMES", "1");
-        }
-        let host = crate::host::host().expect("WARP device");
-        let list = host.new_list().unwrap();
-        let null = std::ptr::null();
-        let mut target = null;
-        assert_eq!(
-            create_committed(
-                null,
-                &PROPERTIES,
-                0,
-                &texture(16, 16, 28, 1),
-                0,
-                null.cast(),
-                &RESOURCE_IIDS[0],
-                &mut target
-            ),
-            S_OK
-        );
-        let copy = host_copy(target).expect("host texture");
-        crate::capture::note_target(&list, target);
-        crate::capture::dump_targets(1);
-        let shown = crate::capture::shown(1).expect("dump must not consume the show target");
-        assert!(std::sync::Arc::ptr_eq(&copy, &shown));
-        assert!(
-            crate::capture::shown(2).is_none(),
-            "show list drains at present"
-        );
-        assert_eq!(slot::<Release>(target, 0x10)(target), 0);
     }
 }

@@ -88,12 +88,9 @@ enum Command {
         /// driver; a second time only what is not there yet).
         #[arg(long)]
         pipelines: bool,
-        /// Include runtime hashes and duplicate DXIL containers in the per-program listing.
+        /// Print one line per program and outcome.
         #[arg(long)]
         list: bool,
-        /// Report only aggregate computed descriptor failure categories.
-        #[arg(long, conflicts_with_all = ["validate", "pipelines", "list"])]
-        descriptor_failures: bool,
         /// Worker threads (default: every logical core).
         #[arg(long)]
         jobs: Option<usize>,
@@ -148,9 +145,8 @@ fn main() -> Result<()> {
     }
     let cli = Cli::parse();
     // A title run keeps its log on disk without being asked: it is the run
-    // most likely to end without unwinding (a crash, a device removal, or the
-    // title terminating the process), and the one whose log is worth having
-    // afterwards. Everything else stays on stderr unless
+    // most likely to end without unwinding, and the one whose log is worth
+    // having afterwards. Other commands stay on stderr unless
     // `VICTORY_LOG_FILE` asks for a file.
     let log_file = victory_core::logfile::log_file_from_env(match &cli.command {
         Command::Run { .. } => victory_core::Config::load()
@@ -189,10 +185,9 @@ fn main() -> Result<()> {
             validate,
             pipelines,
             list,
-            descriptor_failures,
-            cache: false,
             jobs,
-        } => translate::run(paths, validate, pipelines, list, descriptor_failures, jobs),
+            cache: false,
+        } => translate::run(paths, validate, pipelines, list, jobs),
         Command::Run {
             exe,
             unimplemented,
@@ -256,35 +251,5 @@ pub(crate) fn default_paths(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
         !all.is_empty(),
         "no paths given and none configured (see victory.example.toml)"
     );
-    for p in &all {
-        victory_core::ensure_outside_repo(p)?;
-    }
     Ok(all)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_paths_accepts_cli_paths() {
-        // CLI paths may include synthetic in-tree test fixtures.
-        let inside = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let res = default_paths(vec![inside.clone()]).unwrap();
-        assert_eq!(res, vec![inside]);
-    }
-
-    #[test]
-    fn default_paths_accepts_outside_path() {
-        let outside = std::env::temp_dir();
-        let res = default_paths(vec![outside.clone()]).unwrap();
-        assert_eq!(res, vec![outside]);
-    }
-
-    #[test]
-    fn default_paths_rejects_configured_inside_repo() {
-        let inside = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let err = victory_core::ensure_outside_repo(&inside).unwrap_err();
-        assert!(err.to_string().contains("inside"));
-    }
 }

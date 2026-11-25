@@ -105,32 +105,6 @@ struct KeyState {
 
 const _: () = assert!(size_of::<KeyState>() == 12 && size_of::<PadState>() == 28);
 
-/// Motor speeds a title asks for, 0 (off) to `u16::MAX` (full).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct Motors {
-    /// Low frequency (left grip).
-    low: u16,
-    /// High frequency (right grip).
-    high: u16,
-    left_trigger: u16,
-    right_trigger: u16,
-}
-
-impl Motors {
-    /// From the title's four levels in `[0, 1]`, in its order: low, high,
-    /// left trigger, right trigger. Out-of-range levels are clamped.
-    fn from_levels(levels: [f32; 4]) -> Motors {
-        let speed = |level: f32| (level.clamp(0.0, 1.0) * f32::from(u16::MAX)) as u16;
-        let [low, high, left_trigger, right_trigger] = levels.map(speed);
-        Motors {
-            low,
-            high,
-            left_trigger,
-            right_trigger,
-        }
-    }
-}
-
 /// Host input, or a fake in tests.
 trait Source: Send {
     /// The pad in host slot `slot`, `None` when the slot is empty.
@@ -142,9 +116,8 @@ trait Source: Send {
     fn scripted_keys(&mut self) -> Vec<KeyState> {
         Vec::new()
     }
-    /// Sets the motors of the pad in host slot `slot`. A host without some
-    /// motors (XInput has no trigger motors) ignores those speeds.
-    fn rumble(&mut self, slot: usize, motors: Motors);
+    /// Motor speeds: low frequency (left), high frequency (right).
+    fn rumble(&mut self, slot: usize, low: u16, high: u16);
 }
 
 fn fallback(keys: &[KeyState]) -> PadState {
@@ -384,10 +357,6 @@ struct State {
     pending: Vec<Event>,
     /// Device callbacks running now: token and thread.
     running: Vec<(u64, ThreadId)>,
-    /// Events waiting for the single delivery loop.
-    queue: VecDeque<Event>,
-    /// One thread drains `queue`; other producers only append.
-    delivering: bool,
 }
 
 pub struct Hub {
@@ -432,8 +401,6 @@ impl Hub {
                 callbacks: Vec::new(),
                 pending: Vec::new(),
                 running: Vec::new(),
-                queue: VecDeque::new(),
-                delivering: false,
             }),
             returned: Condvar::new(),
         }));
@@ -482,32 +449,12 @@ impl Hub {
         self.deliver(events);
     }
 
-    /// Runs callbacks one at a time, in the order they were queued, never
-    /// under our lock: they call back into us. A callback delivered from a
-    /// callback joins the same queue instead of nesting. One unregistered
-    /// since the event was queued does not run, and `UnregisterCallback`
-    /// waits for one that runs.
+    /// Runs callbacks, never under our lock: they call back into us. One
+    /// unregistered since the event was taken does not run, and
+    /// `UnregisterCallback` waits for one that runs.
     fn deliver(&self, events: Vec<Event>) {
-        {
-            let mut state = self.state();
-            state.queue.extend(events);
-            if state.delivering {
-                return;
-            }
-            state.delivering = true;
-        }
         let me = std::thread::current().id();
-        loop {
-            let e = {
-                let mut state = self.state();
-                match state.queue.pop_front() {
-                    Some(e) => e,
-                    None => {
-                        state.delivering = false;
-                        return;
-                    }
-                }
-            };
+        for e in events {
             let r = e.registration;
             {
                 let mut state = self.state();
@@ -617,7 +564,7 @@ fn host() -> Box<dyn Source> {
         fn keys(&mut self) -> Vec<KeyState> {
             Vec::new()
         }
-        fn rumble(&mut self, _: usize, _: Motors) {}
+        fn rumble(&mut self, _: usize, _: u16, _: u16) {}
     }
     Box::new(Nothing)
 }
@@ -736,13 +683,8 @@ fn relative(
         return fail(out, E_INVALIDARG);
     }
     let state = hub.state();
-    // As for the current reading: a device filter for a device that is gone
-    // fails, so a title polling it stops instead of waiting for readings.
-    if !device.is_null() && !state.slots[index].connected {
-        return fail(out, DEVICE_DISCONNECTED);
-    }
-    let history = &state.slots[index].history;
-    if history
+    if state.slots[index]
+        .history
         .front()
         .is_none_or(|oldest| reference.sequence < oldest.sequence)
     {
@@ -1017,21 +959,24 @@ extern "system" fn device_status(this: *const Device) -> u32 {
         0
     }
 }
-/// Grand Theft Auto VI sends trigger levels here too; they reach the host
-/// [`Source`], which drops what it cannot drive.
+// shortcut: trigger motors are dropped (XInput has none). The host API that
+// drives them without a redistributable is Windows.Gaming.Input (WinRT
+// `Gamepad.Vibration`), which needs WinRT bindings this crate lacks outside
+// diagnostics builds; Grand Theft Auto VI sends trigger levels in slot 0x50.
 extern "system" fn set_rumble(this: *const Device, params: *const [f32; 4]) {
     // SAFETY: one of our devices.
     let device = unsafe { &*this };
     if device.index >= PADS {
         return;
     }
-    let levels = if params.is_null() {
+    let [low, high, ..] = if params.is_null() {
         [0.0; 4]
     } else {
         // SAFETY: checked non-null; four motor levels.
         unsafe { *params }
     };
-    lock(&device.hub().source).rumble(device.index, Motors::from_levels(levels));
+    let speed = |level: f32| (level.clamp(0.0, 1.0) * f32::from(u16::MAX)) as u16;
+    lock(&device.hub().source).rumble(device.index, speed(low), speed(high));
 }
 extern "system" fn unsupported<const SLOT: usize>(_: *const c_void) -> HRESULT {
     tracing::warn!(
@@ -1119,19 +1064,14 @@ extern "system" fn key_state(this: *const Reading, count: u32, out: *mut KeyStat
     n as u32
 }
 extern "system" fn gamepad_state(this: *const Reading, out: *mut PadState) -> bool {
-    if out.is_null() {
-        return false;
+    match &reading(this).value {
+        Value::Pad(state) if !out.is_null() => {
+            // SAFETY: checked non-null.
+            unsafe { out.write(*state) };
+            true
+        }
+        _ => false,
     }
-    let is_pad = matches!(reading(this).value, Value::Pad(_));
-    // GameInput writes at-rest values even for a reading with no gamepad, so
-    // a title reusing its buffer cannot keep a held button or moved stick.
-    let state = match &reading(this).value {
-        Value::Pad(state) => *state,
-        _ => PadState::default(),
-    };
-    // SAFETY: checked non-null.
-    unsafe { out.write(state) };
-    is_pad
 }
 /// Kinds our devices do not have: no count, no state.
 extern "system" fn nothing(_: *const c_void) -> usize {
@@ -1185,8 +1125,7 @@ mod host {
 
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, GetKeyState, GetKeyboardLayout, HKL, MAPVK_VK_TO_VSC_EX, MapVirtualKeyW,
-        ToUnicodeEx,
+        GetAsyncKeyState, MAPVK_VK_TO_VSC_EX, MapVirtualKeyW,
     };
     use windows_sys::Win32::UI::Input::XboxController::{
         XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_BACK,
@@ -1239,29 +1178,11 @@ mod host {
         }
     }
 
-    /// XInput pads, and `VICTORY_NO_HOST_PAD` to ignore them: a host pad the
-    /// title mis-handles would otherwise keep the keyboard stand-in unplugged.
+    #[derive(Default)]
     pub(super) struct Host {
         empty_until: [Option<Instant>; PADS],
-        hide_pads: bool,
     }
 
-    impl Default for Host {
-        fn default() -> Self {
-            let hide_pads = std::env::var_os("VICTORY_NO_HOST_PAD").is_some();
-            if hide_pads {
-                tracing::info!("VICTORY_NO_HOST_PAD: ignoring XInput pads");
-            }
-            Host {
-                empty_until: [None; PADS],
-                hide_pads,
-            }
-        }
-    }
-
-    /// Only the diagnostics key script reaches this; a host pad reports
-    /// its own scan codes.
-    #[cfg(feature = "diagnostics")]
     fn key_state(vk: u8) -> KeyState {
         KeyState {
             // SAFETY: plain query.
@@ -1275,9 +1196,6 @@ mod host {
 
     impl Source for Host {
         fn pad(&mut self, slot: usize) -> Option<PadState> {
-            if self.hide_pads {
-                return None;
-            }
             if self.empty_until[slot].is_some_and(|until| Instant::now() < until) {
                 return None;
             }
@@ -1306,21 +1224,7 @@ mod host {
                     .collect();
                 down.extend(held);
             }
-            let state = keyboard_state(&down, caps_lock());
-            let layout = layout();
-            down.iter()
-                .map(|&vk| {
-                    // SAFETY: plain query.
-                    let scan_code = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC_EX) };
-                    let (code_point, dead_key) = character(vk, scan_code, &state, layout);
-                    KeyState {
-                        scan_code,
-                        code_point,
-                        virtual_key: vk,
-                        dead_key,
-                    }
-                })
-                .collect()
+            down.into_iter().map(key_state).collect()
         }
 
         #[cfg(any(test, feature = "diagnostics"))]
@@ -1335,14 +1239,10 @@ mod host {
             }
         }
 
-        // shortcut: trigger motors are dropped (XInput has none). The host
-        // API that drives them without a redistributable is
-        // Windows.Gaming.Input (WinRT `Gamepad.Vibration`), which needs WinRT
-        // bindings this crate lacks outside diagnostics builds.
-        fn rumble(&mut self, slot: usize, motors: Motors) {
+        fn rumble(&mut self, slot: usize, low: u16, high: u16) {
             let speeds = XINPUT_VIBRATION {
-                wLeftMotorSpeed: motors.low,
-                wRightMotorSpeed: motors.high,
+                wLeftMotorSpeed: low,
+                wRightMotorSpeed: high,
             };
             // SAFETY: a valid vibration; an empty slot just fails.
             unsafe { XInputSetState(slot as u32, &speeds) };
@@ -1388,82 +1288,6 @@ mod host {
             .collect()
     }
 
-    /// The keyboard state `ToUnicodeEx` reads with the keys `held` down:
-    /// each held key, the generic Shift, Ctrl and Alt from either side's key
-    /// (devices report sides only), and Caps Lock's toggle.
-    fn keyboard_state(held: &[u8], caps_lock: bool) -> [u8; 256] {
-        const DOWN: u8 = 0x80;
-        const TOGGLED: u8 = 1;
-        let mut state = [0u8; 256];
-        for &vk in held {
-            state[usize::from(vk)] = DOWN;
-            let generic = match vk {
-                0xA0 | 0xA1 => Some(0x10), // shift
-                0xA2 | 0xA3 => Some(0x11), // control
-                0xA4 | 0xA5 => Some(0x12), // alt
-                _ => None,
-            };
-            if let Some(g) = generic {
-                state[g] = DOWN;
-            }
-        }
-        if caps_lock {
-            state[0x14] |= TOGGLED;
-        }
-        state
-    }
-
-    fn caps_lock() -> bool {
-        // SAFETY: plain query.
-        let state = unsafe { GetKeyState(0x14) };
-        state & 1 != 0
-    }
-
-    /// The foreground window's keyboard layout (the title's while it has
-    /// focus; this thread's when there is no foreground window).
-    fn layout() -> HKL {
-        // SAFETY: plain queries; a null window gives thread 0, this thread.
-        unsafe {
-            GetKeyboardLayout(GetWindowThreadProcessId(
-                GetForegroundWindow(),
-                std::ptr::null_mut(),
-            ))
-        }
-    }
-
-    /// The character key `vk` types in `layout` with `state`: its code point
-    /// (0 when it types none, or several at once), and whether it is a dead
-    /// key, whose code point is then the accent's spacing form. Pending dead
-    /// keys are not combined: the thread's keyboard state is left alone.
-    fn character(vk: u8, scan_code: u32, state: &[u8; 256], layout: HKL) -> (u32, bool) {
-        /// `ToUnicodeEx` flag: keep the keyboard state (Windows 10 1607 on).
-        const KEEP_STATE: u32 = 4;
-        let mut text = [0u16; 8];
-        // SAFETY: the state is the 256 bytes the call reads; the buffer's
-        // length is passed with it.
-        let n = unsafe {
-            ToUnicodeEx(
-                u32::from(vk),
-                scan_code & 0xFF,
-                state.as_ptr(),
-                text.as_mut_ptr(),
-                text.len() as i32,
-                KEEP_STATE,
-                layout,
-            )
-        };
-        let units = match n {
-            0 => return (0, false),
-            ..0 => &text[..1],
-            n => &text[..(n as usize).min(text.len())],
-        };
-        let mut chars = char::decode_utf16(units.iter().copied());
-        match (chars.next(), chars.next()) {
-            (Some(Ok(c)), None) => (u32::from(c), n < 0),
-            _ => (0, false),
-        }
-    }
-
     /// The foreground window is one of ours (the title's or our fallback).
     fn focused() -> bool {
         let mut process = 0;
@@ -1472,17 +1296,6 @@ mod host {
             GetWindowThreadProcessId(GetForegroundWindow(), &mut process);
             process == GetCurrentProcessId()
         }
-    }
-
-    #[test]
-    fn host_pads_can_be_hidden_for_the_keyboard_stand_in() {
-        let mut host = Host {
-            empty_until: [None; PADS],
-            hide_pads: true,
-        };
-        // No XInput call is made, whatever the slots are.
-        assert!(host.pad(0).is_none());
-        assert!(host.pad(3).is_none());
     }
 
     #[test]
@@ -1506,32 +1319,6 @@ mod host {
             (1.0, -1.0, 1.0, 0.0)
         );
     }
-
-    #[test]
-    fn either_sides_modifier_holds_the_generic_one() {
-        let state = keyboard_state(&[0xA1, 0xA2, 0x41], false);
-        for vk in [0xA1, 0x10, 0xA2, 0x11, 0x41] {
-            assert_eq!(state[vk], 0x80, "{vk:#x}");
-        }
-        for vk in [0xA0, 0xA3, 0x12, 0x14] {
-            assert_eq!(state[vk], 0, "{vk:#x}");
-        }
-        assert_eq!(keyboard_state(&[], true)[0x14], 1);
-    }
-
-    #[test]
-    fn keys_type_their_characters() {
-        // Space and Enter type the same in every layout; F1 types nothing.
-        let layout = layout();
-        let typed = |vk: u8, held: &[u8]| {
-            // SAFETY: plain query.
-            let scan = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC_EX) };
-            character(vk, scan, &keyboard_state(held, false), layout)
-        };
-        assert_eq!(typed(0x20, &[0x20]), (0x20, false));
-        assert_eq!(typed(0x0D, &[0x0D]), (0x0D, false));
-        assert_eq!(typed(0x70, &[0x70]), (0, false));
-    }
 }
 
 #[cfg(test)]
@@ -1549,7 +1336,7 @@ mod tests {
         pads: [Option<PadState>; PADS],
         keys: Vec<KeyState>,
         scripted: Vec<KeyState>,
-        rumble: Vec<(usize, Motors)>,
+        rumble: Vec<(usize, u16, u16)>,
     }
 
     struct Fake(Arc<Mutex<FakeHost>>);
@@ -1564,8 +1351,8 @@ mod tests {
         fn scripted_keys(&mut self) -> Vec<KeyState> {
             self.0.lock().unwrap().scripted.clone()
         }
-        fn rumble(&mut self, slot: usize, motors: Motors) {
-            self.0.lock().unwrap().rumble.push((slot, motors));
+        fn rumble(&mut self, slot: usize, low: u16, high: u16) {
+            self.0.lock().unwrap().rumble.push((slot, low, high));
         }
     }
 
@@ -1682,26 +1469,6 @@ mod tests {
 
     fn release(reading: *const Reading) {
         slot::<extern "system" fn(*const Reading) -> u32, _>(reading, 0x10)(reading);
-    }
-
-    /// With the device as filter, walking from its readings fails once it is
-    /// disconnected (`GAMEINPUT_E_READING_NOT_FOUND` would have the title
-    /// keep polling it).
-    #[test]
-    fn walks_filtered_by_a_disconnected_pad_fail() {
-        let (hub, host) = fake();
-        host.lock().unwrap().pads[1] = Some(PadState::default());
-        hub.poll();
-        let first = current(hub, GAMEPAD_KIND, 1).unwrap();
-        host.lock().unwrap().pads[1].as_mut().unwrap().buttons = A;
-        hub.poll();
-        let second = current(hub, GAMEPAD_KIND, 1).unwrap();
-        host.lock().unwrap().pads[1] = None;
-        hub.poll();
-        assert_eq!(walk(hub, 0x28, second), Err(DEVICE_DISCONNECTED));
-        assert_eq!(walk(hub, 0x30, second), Err(DEVICE_DISCONNECTED));
-        release(first);
-        release(second);
     }
 
     #[test]
@@ -1821,23 +1588,6 @@ mod tests {
         for r in order {
             release(r);
         }
-    }
-
-    #[test]
-    fn a_keyboard_reading_resets_the_gamepad_state_it_is_given() {
-        let (hub, _) = fake();
-        let reading = current(hub, KEYBOARD_KIND, KEYBOARD).unwrap();
-        let get =
-            slot::<extern "system" fn(*const Reading, *mut PadState) -> bool, _>(reading, 0xb0);
-        let mut state = PadState {
-            buttons: 0xffff_ffff,
-            ..Default::default()
-        };
-        state.left_x = 0.75;
-        state.right_y = -0.5;
-        assert!(!get(reading, &mut state), "a keyboard has no gamepad state");
-        assert_eq!(state, PadState::default(), "but the output is at rest");
-        release(reading);
     }
 
     #[test]
@@ -1966,85 +1716,6 @@ mod tests {
     }
 
     #[test]
-    fn callbacks_from_registration_and_poll_are_serialized() {
-        use std::sync::atomic::AtomicBool;
-        static ACTIVE: AtomicU32 = AtomicU32::new(0);
-        static PEAK: AtomicU32 = AtomicU32::new(0);
-        static CALLS: AtomicU32 = AtomicU32::new(0);
-        static RELEASE: AtomicBool = AtomicBool::new(false);
-        extern "system" fn tracked(
-            _: u64,
-            _: *mut c_void,
-            _: *const Device,
-            _: u64,
-            _: u32,
-            _: u32,
-        ) {
-            let active = ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
-            PEAK.fetch_max(active, Ordering::SeqCst);
-            CALLS.fetch_add(1, Ordering::SeqCst);
-            while !RELEASE.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            ACTIVE.fetch_sub(1, Ordering::SeqCst);
-        }
-        let (hub, host) = fake();
-        type Register = extern "system" fn(
-            This,
-            *const Device,
-            u32,
-            u32,
-            u32,
-            *mut c_void,
-            Option<DeviceCallback>,
-            *mut u64,
-        ) -> HRESULT;
-        let register = slot::<Register, _>(&hub.object, 0x48);
-        ACTIVE.store(0, Ordering::SeqCst);
-        PEAK.store(0, Ordering::SeqCst);
-        CALLS.store(0, Ordering::SeqCst);
-        RELEASE.store(false, Ordering::SeqCst);
-        // Blocking enumeration delivers its first callback on the registering
-        // thread, which stays inside it while the poll thread runs.
-        let registrar = std::thread::spawn(move || {
-            let mut token = 0;
-            register(
-                &hub.object,
-                std::ptr::null(),
-                GAMEPAD_KIND,
-                1,
-                2,
-                std::ptr::null_mut(),
-                Some(tracked),
-                &mut token,
-            )
-        });
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while ACTIVE.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        assert_ne!(
-            ACTIVE.load(Ordering::SeqCst),
-            0,
-            "registration delivered a callback"
-        );
-        let poller = std::thread::spawn(move || {
-            host.lock().unwrap().pads[1] = Some(PadState::default());
-            hub.poll();
-        });
-        std::thread::sleep(Duration::from_millis(50));
-        assert_eq!(ACTIVE.load(Ordering::SeqCst), 1, "only one callback runs");
-        RELEASE.store(true, Ordering::SeqCst);
-        assert_eq!(registrar.join().unwrap(), S_OK);
-        poller.join().unwrap();
-        assert_eq!(PEAK.load(Ordering::SeqCst), 1);
-        assert!(
-            CALLS.load(Ordering::SeqCst) >= 2,
-            "initial and hotplug both ran"
-        );
-    }
-
-    #[test]
     fn devices_are_found_by_id_and_rumble_reaches_the_host() {
         let (hub, host) = fake();
         host.lock().unwrap().pads[2] = Some(PadState::default());
@@ -2065,35 +1736,10 @@ mod tests {
 
         type Rumble = extern "system" fn(*const Device, *const [f32; 4]);
         let rumble = slot::<Rumble, _>(device, 0x50);
-        rumble(device, &[0.5, 1.0, 0.25, 0.75]);
+        rumble(device, &[0.5, 1.0, 1.0, 1.0]);
         rumble(&hub.devices[FALLBACK], &[1.0; 4]);
         rumble(device, std::ptr::null());
-        let all = Motors {
-            low: 32767,
-            high: 65535,
-            left_trigger: 16383,
-            right_trigger: 49151,
-        };
-        assert_eq!(
-            host.lock().unwrap().rumble,
-            [(2, all), (2, Motors::default())]
-        );
-    }
-
-    #[test]
-    fn motor_levels_are_clamped_and_kept_in_order() {
-        let motors = Motors::from_levels([-1.0, 2.0, 0.0, 1.0]);
-        assert_eq!(
-            motors,
-            Motors {
-                low: 0,
-                high: u16::MAX,
-                left_trigger: 0,
-                right_trigger: u16::MAX,
-            }
-        );
-        // NaN clamps to NaN, which `as u16` turns into 0: a motor stays off.
-        assert_eq!(Motors::from_levels([f32::NAN; 4]), Motors::default());
+        assert_eq!(host.lock().unwrap().rumble, [(2, 32767, 65535), (2, 0, 0)]);
     }
 
     #[test]

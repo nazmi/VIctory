@@ -63,10 +63,6 @@ pub(crate) struct Shader {
     container: Vec<u8>,
     #[cfg(windows)]
     translated: OnceLock<Option<Translated>>,
-    /// Whether its native program runs in 64-lane console waves
-    /// (diagnostics: `VICTORY_SKIP_WAVE64`).
-    #[cfg(all(windows, feature = "diagnostics"))]
-    wave64: OnceLock<bool>,
 }
 
 impl std::fmt::Debug for Shader {
@@ -97,8 +93,6 @@ impl Shader {
             container: bytes.to_vec(),
             #[cfg(windows)]
             translated: OnceLock::new(),
-            #[cfg(all(windows, feature = "diagnostics"))]
-            wave64: OnceLock::new(),
         }
     }
 }
@@ -307,77 +301,9 @@ fn skipped_shader(p: &Pipeline) -> Option<&str> {
         .map(|shader| shader.hash.as_str())
 }
 
-/// The stages `VICTORY_SKIP_WAVE64` names (`mesh`, `compute`, `vertex`,
-/// `pixel`).
-#[cfg(all(windows, feature = "diagnostics"))]
-fn parse_skip_stages(value: &str) -> Vec<&'static str> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| {
-            let stage = ["mesh", "compute", "vertex", "pixel"]
-                .into_iter()
-                .find(|&k| k.eq_ignore_ascii_case(s));
-            if stage.is_none() {
-                tracing::warn!(
-                    stage = s,
-                    "VICTORY_SKIP_WAVE64 expects mesh, compute, vertex or pixel"
-                );
-            }
-            stage
-        })
-        .collect()
-}
-
-/// The stages to omit wave64 programs of, off when unset or empty. A console
-/// program written for 64-lane waves can hang a host with 32-lane waves
-/// (NVIDIA's), so this switch exists to keep such a title drawable there.
-#[cfg(all(windows, feature = "diagnostics"))]
-fn skip_wave64_stages() -> &'static [&'static str] {
-    static STAGES: OnceLock<Vec<&'static str>> = OnceLock::new();
-    STAGES.get_or_init(|| {
-        parse_skip_stages(&std::env::var("VICTORY_SKIP_WAVE64").unwrap_or_default())
-    })
-}
-
-#[cfg(all(windows, feature = "diagnostics"))]
-impl Shader {
-    /// Whether the container's native program runs in 64-lane console waves.
-    fn wave64(&self) -> bool {
-        *self.wave64.get_or_init(|| {
-            victory_shader::Container::parse(&self.container)
-                .ok()
-                .and_then(|c| {
-                    c.part(victory_shader::FourCC::DXIL)
-                        .map(|p| p.data.to_vec())
-                })
-                .and_then(|data| victory_shader::native_programs(&data).ok())
-                .is_some_and(|programs| programs.iter().any(|p| p.wave64))
-        })
-    }
-}
-
-/// The pipeline's first shader of a listed stage that runs 64-lane waves.
-#[cfg(all(windows, feature = "diagnostics"))]
-fn skipped_wave64(p: &Pipeline) -> Option<&'static str> {
-    let stages = skip_wave64_stages();
-    if stages.is_empty() {
-        return None;
-    }
-    p.shaders
-        .iter()
-        .find(|shader| stages.contains(&shader.stage) && shader.wave64())
-        .map(|shader| shader.stage)
-}
-
 #[cfg(all(windows, feature = "diagnostics"))]
 pub(crate) fn is_skipped(this: This) -> bool {
-    if this.is_null() {
-        return false;
-    }
-    let pipeline = pipeline(this);
-    skipped_shader(pipeline).is_some() || skipped_wave64(pipeline).is_some()
+    !this.is_null() && skipped_shader(pipeline(this)).is_some()
 }
 
 /// The shaders of `this`, as host pipelines are named (diagnostics).
@@ -953,18 +879,4 @@ mod tests {
         // SAFETY: as above.
         assert_ne!(unsafe { Prebuild::graphics(&stream) }.key(), title.host.key);
     }
-    #[cfg(all(windows, feature = "diagnostics"))]
-    #[test]
-    fn skip_wave64_takes_only_known_stage_names() {
-        use super::parse_skip_stages;
-        assert_eq!(parse_skip_stages("mesh,compute"), ["mesh", "compute"]);
-        assert_eq!(parse_skip_stages(" Mesh , PIXEL "), ["mesh", "pixel"]);
-        assert_eq!(parse_skip_stages(""), Vec::<&str>::new());
-        // An unknown stage is dropped, not silently matched to something.
-        assert_eq!(parse_skip_stages("geometry"), Vec::<&str>::new());
-        assert_eq!(parse_skip_stages("vertex,nonsense"), ["vertex"]);
-    }
 }
-
-#[cfg(all(test, windows))]
-mod depth_bounds_test;

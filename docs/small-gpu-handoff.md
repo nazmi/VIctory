@@ -113,3 +113,42 @@ draw (so only resources no host operation touches avoid allocation).
 **Still unverified, unchanged by this work:** stable world play, and any
 measured memory reduction. Both need a title run, and this machine's display
 driver has been removed as hung three times.
+
+## Measured after the upstream 291-commit merge (2026-11-25 13:33-13:37 UTC)
+
+The deferral above was lost when the merge took upstream's `resource.rs`
+wholesale; host copies were again made for every texture the title reserved.
+It is re-applied on `merge/up2` as commit `3931cae8`.
+
+What the runs measured, same machine (Radeon 780M, 32 GB shared memory),
+`game_scarlett_master.exe --execute`:
+
+| | copies made at reserve (before) | copies made on first use (after) |
+| --- | --- | --- |
+| host textures at the end | 3,894 | 1,515 |
+| host texture memory at the end | 9,583 MB | 4,803 MB |
+| `0x8007000E` "not enough memory" | 439 | 0 |
+| device removals | 97 | 0 |
+| run length | 104 s, ended at frame 3,214 | 240 s, ended at frame 4,096 (my timeout) |
+| draws dropped | 0 | 0 |
+
+The memory no longer grows: the copy count is flat at 1,515 and the bytes at
+4,803 MB for the whole three-and-a-half minutes, where the earlier run added
+4.7 GB in 100 s and then failed the next 4 MiB allocation.
+
+Stable world play is **still unverified**, and this is why: the run held
+30.0 fps with 8 ms of GPU work in a 33 ms frame, about 13 draws per frame.
+That is the boot/menu scene on a vsync-locked present, not the world. The
+frame budget is not the constraint in it, so nothing here says how the world
+holds up. Reaching the world needs input to the title, which `--execute` does
+not give; `scripts/play.ps1` is the path that does.
+
+**Remaining, from the same run:**
+
+- One pixel shader does not translate: `GFX10 code at 0x38c: barycentrics
+  read directly is not supported` (hash `98bd9f9ae5f9c7e3`). Its draws are
+  dropped, so it is a visible gap, not a silent one.
+- Two `victory_gpu::object method not implemented object="device"` slots,
+  `0x218` and `0x1c8`.
+- One descriptor warning: `buffer view empty or past its host copy first=0
+  count=0`.

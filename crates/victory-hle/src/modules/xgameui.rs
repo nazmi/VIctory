@@ -81,9 +81,6 @@ extern "system" fn text_entry_async(
 }
 /// Bytes of the result, its NUL included.
 extern "system" fn text_entry_size(_: This, block: *mut AsyncBlock, out: *mut u32) -> HRESULT {
-    if out.is_null() {
-        return xasync::E_INVALIDARG;
-    }
     let mut size = 0;
     let hr = xasync::XAsyncGetResultSize(block, &mut size);
     if hr < 0 {
@@ -98,9 +95,6 @@ extern "system" fn text_entry_result(
     buffer: *mut c_char,
     used: *mut u32,
 ) -> HRESULT {
-    if size > 0 && buffer.is_null() {
-        return xasync::E_INVALIDARG;
-    }
     let mut written = 0;
     let identity = (&raw const TEXT).cast();
     let hr = xasync::XAsyncGetResult(block, identity, size as usize, buffer.cast(), &mut written);
@@ -375,14 +369,6 @@ mod tests {
         let mut out = [0 as c_char; 7];
         let mut used = 0;
         let result = method::<Result_>(&OBJECT, 0x98);
-        assert_eq!(
-            method::<Size>(&OBJECT, 0x90)(this, &mut b, std::ptr::null_mut()),
-            xasync::E_INVALIDARG
-        );
-        assert_eq!(
-            result(this, &mut b, 7, std::ptr::null_mut(), &mut used),
-            xasync::E_INVALIDARG
-        );
         assert_eq!(result(this, &mut b, 7, out.as_mut_ptr(), &mut used), S_OK);
         assert_eq!((text(out.as_ptr()).as_deref(), used), (Some("abctyp"), 7));
         assert_eq!(limit("\u{e9}t\u{e9}s", 3), "\u{e9}t\u{e9}");

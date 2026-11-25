@@ -100,55 +100,21 @@ impl Heap {
     }
 }
 
-/// Why the APU heap could not give a block.
-#[derive(Debug)]
-enum HeapRefusal {
-    /// No free device-address range fits the request.
-    NoDeviceRange { size: usize, align: usize },
-    /// The host allocator returned null for the block.
-    HostAllocator { len_bytes: usize },
-}
-
-impl HeapRefusal {
-    /// Reports the refusal. Called with no lock held: a host refusal is
-    /// written to `crashes.log`, so its cause is on record if the title fails
-    /// after it.
-    fn report(&self) {
-        match *self {
-            Self::NoDeviceRange { size, align } => tracing::warn!(
-                size,
-                align,
-                "no free APU device-address range fits the request"
-            ),
-            Self::HostAllocator { len_bytes } => super::xmem::report_allocator_refusal(len_bytes),
-        }
-    }
-}
-
 /// Zeroed host memory and its device address.
-fn heap_alloc(size: usize, align: usize) -> Result<(*mut u8, u32), HeapRefusal> {
+fn heap_alloc(size: usize, align: usize) -> Option<(*mut u8, u32)> {
+    let layout = Layout::from_size_align(size.max(1), align.max(16)).ok()?;
     let mut heap = lock(&HEAP);
-    let fit = Layout::from_size_align(size.max(1), align.max(16))
-        .ok()
-        .and_then(|layout| {
-            let apu = heap.take(u32::try_from(layout.size()).ok()?, align as u32)?;
-            Some((layout, apu))
-        });
-    let Some((layout, apu)) = fit else {
-        return Err(HeapRefusal::NoDeviceRange { size, align });
-    };
+    let apu = heap.take(u32::try_from(layout.size()).ok()?, align as u32)?;
     // SAFETY: non-zero size.
     let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
     if ptr.is_null() {
         heap.give_back(apu, apu + layout.size() as u32);
-        return Err(HeapRefusal::HostAllocator {
-            len_bytes: layout.size(),
-        });
+        return None;
     }
     heap.blocks
         .insert(ptr as usize, Block { size, apu, layout });
     heap.by_apu.insert(apu, ptr as usize);
-    Ok((ptr, apu))
+    Some((ptr, apu))
 }
 
 fn heap_free(ptr: *mut u8) {
@@ -226,20 +192,11 @@ pub extern "system" fn ApuAlloc(
     align: u32,
     _flags: u32,
 ) -> HRESULT {
-    if out.is_null()
-        || size == 0
-        || align < 4
-        || !align.is_power_of_two()
-        || size.checked_add(align).is_none()
-    {
+    if out.is_null() || size == 0 || align < 4 || !align.is_power_of_two() {
         return E_INVALIDARG;
     }
-    let (ptr, address) = match heap_alloc(size as usize, align as usize) {
-        Ok(block) => block,
-        Err(refusal) => {
-            refusal.report();
-            return E_OUTOFMEMORY;
-        }
+    let Some((ptr, address)) = heap_alloc(size as usize, align as usize) else {
+        return E_OUTOFMEMORY;
     };
     // SAFETY: checked non-null; optional out parameter checked below.
     unsafe {
@@ -256,16 +213,10 @@ pub extern "system" fn ApuFree(ptr: *mut c_void) {
 }
 
 pub extern "system" fn ApuMapVirtualAddress(ptr: *const c_void) -> u32 {
-    if ptr.is_null() {
-        return 0;
-    }
     heap_map(ptr as usize)
 }
 
 pub extern "system" fn ApuIsVirtualAddressValid(ptr: *const c_void, align: u32) -> bool {
-    if ptr.is_null() {
-        return false;
-    }
     let apu = heap_map(ptr as usize);
     apu != 0 && (align == 0 || apu.is_multiple_of(align))
 }
@@ -303,14 +254,9 @@ pub extern "system" fn AcpHalAllocateShapeContexts(contexts: *mut ShapeContexts)
         if counts[i] == 0 {
             continue;
         }
-        let (ptr, apu) = match heap_alloc(counts[i] as usize * CONTEXT_BYTES[i], 256) {
-            Ok(block) => block,
-            Err(refusal) => {
-                arrays.iter().for_each(|&p| heap_free(p.cast()));
-                drop(allocated);
-                refusal.report();
-                return E_OUTOFMEMORY;
-            }
+        let Some((ptr, apu)) = heap_alloc(counts[i] as usize * CONTEXT_BYTES[i], 256) else {
+            arrays.iter().for_each(|&p| heap_free(p.cast()));
+            return E_OUTOFMEMORY;
         };
         (arrays[i], addresses[i]) = (ptr.cast(), apu);
     }
@@ -635,45 +581,10 @@ fn decode(context: Context, voice: &mut Voice) -> bool {
     if at < 32 {
         at = 32 + xma::packet(data, 0).map_or(0, |p| p.first_frame_bit as usize);
     }
-    let bank_data = |bank: u32| {
-        let (address, packets) = if bank == 0 {
-            (context.get(5), context.field(0, 0, 12))
-        } else {
-            (context.get(6), context.field(1, 0, 12))
-        };
-        let len = packets as usize * xma::PACKET_BYTES;
-        heap_bytes(address & !0x7ff, len).map(|data| (data, len * 8))
-    };
-    // A frame may straddle the end of one rolling input and the start of
-    // the other: the console keeps the partial bits in the next packet's
-    // `first_frame_bit` span. Finish it before switching banks, instead of
-    // dropping it and restarting at the other bank's first new frame.
-    let (frame, bank, mut next) = match xma::read_frame(data, at) {
-        Some(frame) => {
-            let next = frame.next.unwrap_or(0);
-            (frame, current, next)
-        }
-        None => {
-            let other = 1 - current;
-            let spanning = if valid & (1 << other) != 0 {
-                bank_data(other)
-                    .and_then(|(tail, _)| xma::read_frame_spanning(data, data.len() * 8, tail, at))
-            } else {
-                None
-            };
-            match spanning {
-                Some((frame, next)) => {
-                    context.set_field(0, 20 + current, 1, 0);
-                    context.set_field(4, 31, 1, other);
-                    (frame, other, next)
-                }
-                None => {
-                    // This input is used up.
-                    context.set_field(0, 20 + current, 1, 0);
-                    return true;
-                }
-            }
-        }
+    let Some(frame) = xma::read_frame(data, at) else {
+        // This input is used up.
+        context.set_field(0, 20 + current, 1, 0);
+        return true;
     };
     let decoder = voice.decoder.get_or_insert_with(|| {
         const RATES: [u32; 4] = [24_000, 32_000, 44_100, 48_000];
@@ -693,6 +604,7 @@ fn decode(context: Context, voice: &mut Voice) -> bool {
             );
         }
     }
+    let mut next = frame.next.unwrap_or(0);
     let loops = context.field(0, 12, 8);
     let loop_end = context.field(4, 0, 26) as usize;
     let ends_loop = loop_end != 0
@@ -718,7 +630,7 @@ fn decode(context: Context, voice: &mut Voice) -> bool {
         voice.skip = context.field(1, 17, 3) as usize * xma::SUBFRAME_SAMPLES;
     }
     if next == 0 {
-        context.set_field(0, 20 + bank, 1, 0);
+        context.set_field(0, 20 + current, 1, 0);
     }
     context.set_field(2, 0, 26, next as u32);
     true
@@ -1034,9 +946,6 @@ mod tests {
         assert_eq!(heap_unmap(apu + 4), Some(ptr.cast::<u8>().wrapping_add(4)));
         ApuFree(ptr);
         assert_eq!(ApuMapVirtualAddress(ptr), 0);
-        assert!(!ApuIsVirtualAddressValid(std::ptr::null(), 0));
-        assert_eq!(ApuMapVirtualAddress(std::ptr::null()), 0);
-        assert_eq!(ApuAlloc(&mut ptr, &mut apu, u32::MAX, 128, 1), E_INVALIDARG);
         assert_eq!(ApuAlloc(&mut ptr, &mut apu, 0x100, 6, 1), E_INVALIDARG);
     }
 
@@ -1414,86 +1323,6 @@ mod tests {
         // No loops left: both frames whole, and on to the third.
         assert_eq!(step(third), 4 * subframe);
         ApuFree(input);
-    }
-
-    /// One silent frame whose last eleven bits sit in the other rolling
-    /// input bank: a naive bank switch drops it, so the ring would get a
-    /// zero-padded block instead of the decoded frame.
-    #[test]
-    fn xma_frames_split_across_rolling_inputs_are_decoded() {
-        let _serial = lock(&CONTEXT_TESTS);
-        let mut request = ShapeContexts {
-            counts: [0, 0, 0, 0, 4, 0],
-            arrays: [std::ptr::null_mut(); 6],
-            apu: [0; 6],
-        };
-        assert_eq!(AcpHalAllocateShapeContexts(&mut request), S_OK);
-        let context = Context(request.arrays[4].cast::<u32>().wrapping_add(16));
-
-        let start = xma::PACKET_BYTES * 8 - 20;
-        let bits = 31usize;
-        let put = |data: &mut [u8], at: usize, value: u32, width: usize| {
-            for i in 0..width {
-                if value >> (width - 1 - i) & 1 == 1 {
-                    data[(at + i) / 8] |= 1 << (7 - (at + i) % 8);
-                }
-            }
-        };
-        let mut head = vec![0u8; xma::PACKET_BYTES];
-        put(&mut head, 0, 1 << 26, 32); // one frame, no interleaved streams
-        put(&mut head, start, bits as u32, 15);
-        put(&mut head, start + 15, 0b10, 2); // one 512-sample subframe
-        let mut tail = vec![0u8; xma::PACKET_BYTES];
-        put(&mut tail, 0, (1 << 26) | ((bits - 20) as u32) << 11, 32);
-
-        let (mut input0, mut apu0) = (std::ptr::null_mut(), 0);
-        assert_eq!(ApuAlloc(&mut input0, &mut apu0, 0x1000, 0x800, 1), S_OK);
-        let (mut input1, mut apu1) = (std::ptr::null_mut(), 0);
-        assert_eq!(ApuAlloc(&mut input1, &mut apu1, 0x1000, 0x800, 1), S_OK);
-        // SAFETY: both banks were allocated with a full packet's room.
-        unsafe {
-            std::ptr::copy_nonoverlapping(head.as_ptr(), input0.cast(), head.len());
-            std::ptr::copy_nonoverlapping(tail.as_ptr(), input1.cast(), tail.len());
-        }
-        let (mut output, mut output_apu) = (std::ptr::null_mut(), 0);
-        assert_eq!(
-            ApuAlloc(&mut output, &mut output_apu, 0x400, 0x100, 2),
-            S_OK
-        );
-
-        context.set(0, 1 | 1 << 20 | 1 << 21 | 4 << 22); // bank 0: one packet, both valid
-        context.set(1, 1 | 1 << 31 | 3 << 27); // bank 1: one packet, writable
-        context.set(2, start as u32);
-        context.set(5, apu0);
-        context.set(6, apu1);
-        context.set(7, output_apu);
-
-        let mut acp = std::ptr::null_mut();
-        assert_eq!(AcpHalCreate(&mut acp), S_OK);
-        // SAFETY: just created.
-        let m = unsafe { (*acp).vtable };
-        assert_eq!((m.connect)(acp, 0x1000, 0x1000), S_OK);
-        let submit = |command: u32, words: &[u32]| {
-            assert_eq!(
-                (m.submit)(acp, command, 0xf1, u32::MAX, words.as_ptr().cast(), 0),
-                S_OK
-            );
-        };
-        submit(ENABLE_XMA, &[1]);
-        xma().pump();
-
-        let frames = |x: &Xma| lock(&x.voices[1]).as_ref().map(|v| v.trace.frames);
-        assert_eq!(frames(&xma()), Some(1), "the split frame was decoded");
-        // It continues in bank 1, not bank 0.
-        assert_eq!(context.field(4, 31, 1), 1);
-        assert_eq!(context.field(2, 0, 26), 43);
-
-        submit(DISABLE_XMA, &[1]);
-        (m.release)(acp);
-        ApuFree(input0);
-        ApuFree(input1);
-        ApuFree(output);
-        assert_eq!(AcpHalReleaseShapeContexts(), S_OK);
     }
 
     #[test]

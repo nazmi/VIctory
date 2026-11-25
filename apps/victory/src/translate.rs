@@ -3,8 +3,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
 use victory_shader::emit::host::{self, Host};
@@ -69,30 +69,25 @@ struct Tally {
     ms_emitted: usize,
     ms_validated: usize,
     ms_pipelines: usize,
-    /// Reason → programs stopped by it, and the smallest recorded label.
+    /// Reason → programs stopped by it, and the first one.
     failed: BTreeMap<String, (usize, String)>,
-    /// With `--list`: per-program result rows, including runtime hashes.
+    /// With `--list`: one line per program and outcome.
     list: bool,
     lines: Vec<String>,
-    /// Refusals in the computed-descriptor categories, by reason.
-    descriptor_failures: Option<BTreeMap<String, usize>>,
 }
 
 impl Tally {
     fn fail(&mut self, reason: String, example: impl FnOnce() -> String) {
-        let example = example();
         if self.list {
-            self.lines.push(format!("{example}  {reason}"));
+            let e = example();
+            self.lines.push(format!("{e}  {reason}"));
+            self.failed.entry(reason).or_insert((0, e)).0 += 1;
+            return;
         }
-        self.record_failure(reason, 1, example);
-    }
-
-    fn record_failure(&mut self, reason: String, n: usize, example: String) {
-        let (count, sample) = self.failed.entry(reason).or_default();
-        if *count == 0 || example < *sample {
-            *sample = example;
-        }
-        *count += n;
+        self.failed
+            .entry(reason)
+            .or_insert_with(|| (0, example()))
+            .0 += 1;
     }
 
     fn merge(&mut self, other: Tally) {
@@ -139,15 +134,8 @@ impl Tally {
             *self.exports.entry(k).or_default() += n;
         }
         self.lines.extend(other.lines);
-        if let (Some(total), Some(failures)) =
-            (&mut self.descriptor_failures, other.descriptor_failures)
-        {
-            for (failure, count) in failures {
-                *total.entry(failure).or_default() += count;
-            }
-        }
         for (reason, (n, example)) in other.failed {
-            self.record_failure(reason, n, example);
+            self.failed.entry(reason).or_insert((0, example)).0 += n;
         }
     }
 }
@@ -162,10 +150,6 @@ struct Checks {
     keep: Option<Kept>,
     validator: Option<Validator>,
     host: Option<(Host, emit::HostShader)>,
-    /// Whether that host runs mesh shaders at all: an adapter without them
-    /// refuses every mesh pipeline with `E_FAIL`, which in the census reads
-    /// as a translator defect unless the refusal says what it is.
-    mesh: bool,
 }
 
 pub fn run(
@@ -173,7 +157,6 @@ pub fn run(
     validate: bool,
     pipelines: bool,
     list: bool,
-    descriptor_failures: bool,
     jobs: Option<usize>,
 ) -> Result<()> {
     // Dumped shaders and validator reports are game-derived (rule #1).
@@ -203,41 +186,18 @@ pub fn run(
     let threads =
         jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
     let seen = Mutex::new(HashSet::new());
-    let total = Mutex::new(Tally {
-        descriptor_failures: descriptor_failures.then(BTreeMap::new),
-        ..Tally::default()
-    });
+    let total = Mutex::new(Tally::default());
     let started = std::time::Instant::now();
     for root in &paths {
-        anyhow::ensure!(root.exists(), "path does not exist: {}", root.display());
-        let mut errors = Vec::new();
-        for entry in walkdir::WalkDir::new(root) {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(e) => {
-                    errors.push(format!("cannot walk {}: {e}", root.display()));
-                    continue;
-                }
-            };
-            if !entry.file_type().is_file() {
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if !entry.file_type().is_file() || entry.metadata().map_or(0, |m| m.len()) > MAX_FILE {
                 continue;
             }
-            let len = match entry.metadata() {
-                Ok(metadata) => metadata.len(),
-                Err(e) => {
-                    errors.push(format!("cannot inspect {}: {e}", entry.path().display()));
-                    continue;
-                }
-            };
-            if len > MAX_FILE {
+            let Ok(data) = std::fs::read(entry.path()) else {
                 continue;
-            }
-            let data = match std::fs::read(entry.path()) {
-                Ok(data) => data,
-                Err(e) => {
-                    errors.push(format!("cannot read {}: {e}", entry.path().display()));
-                    continue;
-                }
             };
             let jobs = sources(&data);
             let next = AtomicUsize::new(0);
@@ -247,17 +207,16 @@ pub fn run(
                         s.spawn(|| {
                             let mut t = Tally {
                                 list,
-                                descriptor_failures: descriptor_failures.then(BTreeMap::new),
                                 ..Tally::default()
                             };
-                            let host = pipelines.then(|| Host::new(false).ok()).flatten();
                             let mut checks = Checks {
                                 keep: (!pairs.is_empty()).then(|| kept.clone()),
                                 validator: validate
                                     .then(|| Validator::load(dll.as_deref()).ok())
                                     .flatten(),
-                                mesh: host.as_ref().is_some_and(Host::mesh_shaders),
-                                host: host.map(|h| (h, host::stub_ps())),
+                                host: pipelines
+                                    .then(|| Host::new(false).ok().map(|h| (h, host::stub_ps())))
+                                    .flatten(),
                             };
                             while let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
                                 translate(job, entry.path(), &seen, &mut t, &mut checks);
@@ -277,22 +236,8 @@ pub fn run(
                 );
             });
         }
-        for error in &errors {
-            eprintln!("{error}");
-        }
-        if !errors.is_empty() {
-            eprintln!("{} input error(s) under {}", errors.len(), root.display());
-        }
     }
     let t = total.into_inner().unwrap_or_else(|e| e.into_inner());
-    if let Some(failures) = t.descriptor_failures {
-        println!("programs checked for descriptor failures: {}", t.translated);
-        println!("    count  refusal");
-        for (what, count) in failures {
-            println!("  {count:>7}  {what}");
-        }
-        return Ok(());
-    }
     println!(
         "containers   {} ({} duplicates skipped)",
         t.containers, t.duplicates
@@ -531,28 +476,6 @@ pub(crate) fn report<T>(
     eprintln!("{}{}", if terminal { "\r" } else { "" }, line());
 }
 
-/// Containers to translate, by hash prefix (`VICTORY_TRANSLATE_ONLY=a1b2,c3d4`).
-///
-/// Empty translates everything, which is the normal case. The hash is the one
-/// `--list` prints and that a run's `does not translate` line carries as
-/// `hash=`, so a refusal seen in a run can be pasted here to translate that
-/// one container alone — the reason this exists: a full sweep takes minutes
-/// and buries the shader you are working on among thousands.
-fn translate_only(value: Option<&str>) -> Vec<String> {
-    value
-        .unwrap_or_default()
-        .split(',')
-        .map(|h| h.trim().to_ascii_lowercase())
-        .filter(|h| !h.is_empty())
-        .collect()
-}
-
-/// [`translate_only`] of the environment, read once.
-fn only_containers() -> &'static [String] {
-    static ONLY: OnceLock<Vec<String>> = OnceLock::new();
-    ONLY.get_or_init(|| translate_only(std::env::var("VICTORY_TRANSLATE_ONLY").ok().as_deref()))
-}
-
 fn translate(
     source: &Source,
     path: &Path,
@@ -560,27 +483,9 @@ fn translate(
     t: &mut Tally,
     checks: &mut Checks,
 ) {
-    let location = || format!("{}{}", path.display(), source.label());
+    let example = || format!("{}{}", path.display(), source.label());
     let Some(bytes) = source.bytes() else {
-        return t.fail("corrupt record".into(), location);
-    };
-    let list = t.list;
-    let only = only_containers();
-    // The hash is also needed to filter, so it is computed when either asks.
-    let hash = (list || !only.is_empty()).then(|| blake3::hash(&bytes).to_hex().to_string());
-    if !only.is_empty()
-        && !hash
-            .as_ref()
-            .is_some_and(|h| only.iter().any(|prefix| h.starts_with(prefix.as_str())))
-    {
-        return;
-    }
-    let example = || {
-        let location = location();
-        match &hash {
-            Some(hash) => format!("{location} hash={}", &hash[..16]),
-            None => location,
-        }
+        return t.fail("corrupt record".into(), example);
     };
     t.containers += 1;
     let Ok(container) = Container::parse(&bytes) else {
@@ -593,7 +498,7 @@ fn translate(
     else {
         return t.fail("no DXIL part (SM5 or older)".into(), example);
     };
-    if !lock(seen).insert(blake3::hash(dxil)) && !list {
+    if !lock(seen).insert(blake3::hash(dxil)) {
         t.duplicates += 1;
         return;
     }
@@ -603,30 +508,13 @@ fn translate(
     };
     for p in programs {
         t.programs += 1;
-        // Built exactly as the emitter builds it. Upstream added
-        // `range::build`, which bounds M0-relative moves; the census must see
-        // the same program the runtime does.
         match victory_shader::range::build(&p.patched_code(), p.wave64, p.vgprs) {
             Ok((program, structured)) => {
                 t.translated += 1;
                 t.instructions += program.blocks.iter().map(|b| b.insts.len()).sum::<usize>();
-                // `range::build` already ran structurisation, on the per-lane
-                // form; its failure is listed after the resources' and I/O's.
+                // Per-lane descriptors are traced on the per-lane form; its
+                // failure is listed after the resources' and I/O's.
                 let lanes = structured.as_ref().ok();
-                if let Some(failures) = &mut t.descriptor_failures {
-                    // Upstream's `track` reports one refusal string rather than
-                    // a structured category, so the category is the text. The
-                    // counts are what the census is for; the breakdown by
-                    // opcode and word source that this used to print needed
-                    // `resource::DescriptorFailure`, which upstream does not
-                    // have.
-                    if let Err(ShaderError::Unsupported { what, .. }) =
-                        resource::track(&program, &p.layout, p.stage, lanes)
-                    {
-                        *failures.entry(what.to_string()).or_default() += 1;
-                    }
-                    continue;
-                }
                 let res = match resource::track(&program, &p.layout, p.stage, lanes) {
                     Ok(r) => {
                         tally_resources(&p, &r, t);
@@ -680,7 +568,8 @@ fn translate(
                 if let (Some(r), Some(i), Some(s)) = (res, raised, structured) {
                     let label = || format!("{} {:?}", example(), p.stage);
                     *counter(t, p.stage, 0) += 1;
-                    match emit::emit(&container, &p, &program, &s, &i, &r) {
+                    let marks = emit::Options { view_marks: true };
+                    match emit::emit_with(&container, &p, &program, &s, &i, &r, marks) {
                         Ok(shader) => {
                             *counter(t, p.stage, 1) += 1;
                             check(shader, t, checks, label);
@@ -731,10 +620,6 @@ fn check(
         let made = match shader.stage {
             HwStage::Vs => h.pipeline(&shader, stub_ps).map(drop),
             HwStage::Cs => h.compute_pipeline(&shader).map(drop),
-            // An adapter without mesh shaders refuses every one of these with
-            // `Unspecified error`; say that instead, once per program, so the
-            // tally names the host and not the translator.
-            HwStage::Ms if !checks.mesh => Err("the host has no mesh shaders".to_owned()),
             HwStage::Ms => h.mesh_pipeline(&shader, stub_ps).map(drop),
             _ => host::stub_vs(&shader).and_then(|vs| h.pipeline(&vs, &shader).map(drop)),
         };
@@ -968,23 +853,14 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod tests {
-    /// Guards the process-wide `VICTORY_EMIT_DUMP`: one test sets it, the
-    /// scan tests call `run`, which reads it.
-    pub(super) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     /// Shader dumps are game-derived, so a dump directory in the repo is refused.
     #[test]
     fn emit_dump_inside_repo_is_refused() {
-        let _serial = env_lock();
         // SAFETY: no other test in this binary touches the environment.
         unsafe { std::env::set_var("VICTORY_EMIT_DUMP", env!("CARGO_MANIFEST_DIR")) };
         let missing = std::env::temp_dir().join("victory-translate-no-such-dir");
-        let err = super::run(vec![missing], false, false, false, false, Some(1)).unwrap_err();
+        let err = super::run(vec![missing], false, false, false, Some(1)).unwrap_err();
         // SAFETY: as above; unset so a later test's `run` is not refused.
         unsafe { std::env::remove_var("VICTORY_EMIT_DUMP") };
         assert!(
@@ -993,93 +869,6 @@ mod tests {
                 Some(victory_core::PolicyError::InsideRepo { .. })
             ),
             "{err}"
-        );
-    }
-
-    use super::translate_only;
-
-    #[test]
-    fn translate_only_reads_hash_prefixes() {
-        // Unset or empty: everything translates.
-        assert!(translate_only(None).is_empty());
-        assert!(translate_only(Some("")).is_empty());
-        assert!(translate_only(Some(" , ,")).is_empty());
-        // One or more prefixes, trimmed and lower-cased, so a hash copied from
-        // a log in either case matches.
-        assert_eq!(translate_only(Some("A1B2")), ["a1b2"]);
-        assert_eq!(
-            translate_only(Some(" a1b2 , 3c4d ")),
-            ["a1b2".to_string(), "3c4d".to_string()]
-        );
-    }
-
-    use super::Tally;
-    #[test]
-    fn failure_example_is_independent_of_worker_order() {
-        for list in [false, true] {
-            for reverse in [false, true] {
-                let mut first = Tally {
-                    list,
-                    ..Tally::default()
-                };
-                first.fail("reason".into(), || "z@0x0".into());
-                first.fail("reason".into(), || "a@0x0".into());
-                let mut second = Tally {
-                    list,
-                    ..Tally::default()
-                };
-                second.fail("reason".into(), || "m@0x0".into());
-                let mut total = Tally::default();
-                if reverse {
-                    std::mem::swap(&mut first, &mut second);
-                }
-                total.merge(first);
-                total.merge(second);
-                let (count, example) = &total.failed["reason"];
-                assert_eq!(*count, 3);
-                assert_eq!(example, "a@0x0");
-                assert_eq!(total.lines.len(), if list { 3 } else { 0 });
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod scan_tests {
-    use super::*;
-
-    /// `VICTORY_EMIT_DUMP` is process-wide, so the module that sets it and
-    /// these tests must not run at the same time.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        super::tests::env_lock()
-    }
-
-    #[test]
-    fn a_missing_translation_path_is_an_error() {
-        let _serial = env_lock();
-        let dir = tempfile::tempdir().unwrap();
-        let absent = dir.path().join("not-there");
-        let error = run(vec![absent.clone()], false, false, false, false, None).unwrap_err();
-        assert!(
-            error.to_string().contains(&absent.display().to_string()),
-            "the diagnostic names the path: {error}"
-        );
-    }
-
-    #[test]
-    fn an_empty_translation_directory_succeeds() {
-        let _serial = env_lock();
-        let dir = tempfile::tempdir().unwrap();
-        assert!(
-            run(
-                vec![dir.path().to_path_buf()],
-                false,
-                false,
-                false,
-                false,
-                None
-            )
-            .is_ok()
         );
     }
 }

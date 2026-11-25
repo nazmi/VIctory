@@ -69,6 +69,7 @@ fn build(words: &[u32], buffers: bool) -> HostShader {
         outputs: Vec::new(),
         prims: Vec::new(),
         mesh_stride: 0,
+        view_marks: false,
     })
     .expect("lower");
     // One access with each lane's own heap index, no wave operation.
@@ -88,6 +89,7 @@ fn build(words: &[u32], buffers: bool) -> HostShader {
         view_addresses: lowered.view_addresses,
         heap: lowered.heap,
         heap_writes: lowered.heap_writes,
+        view_marks: lowered.view_marks,
     };
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         v.validate(&mut shader.dxil.clone())
@@ -118,11 +120,13 @@ fn run(shader: &HostShader, views: &[View]) -> Vec<(&'static str, Vec<u32>)> {
     let _one = super::valu_tests::ONE_AT_A_TIME
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let force_warp = std::env::var("VICTORY_WARP").is_ok_and(|v| v == "1");
-    for &(label, warp) in super::valu_tests::backends(force_warp) {
-        let Ok(host) = Host::new(warp) else {
-            eprintln!("no SM 6.6 {label} device; skipped");
-            continue;
+    for (label, warp) in [("hardware", false), ("warp", true)] {
+        let host = match Host::new(warp) {
+            Ok(host) => host,
+            Err(e) => {
+                eprintln!("no SM 6.6 {label} device ({e}); skipped");
+                continue;
+            }
         };
         let (root, pso) = match host.compute_pipeline(shader) {
             Ok(p) => p,
@@ -237,38 +241,6 @@ fn lanes_sample_the_entry_their_offset_names_in_the_console_waterfall() {
     let shader = build(WATERFALL_INDEXED_WAVE32, false);
     for (label, red) in sampled(&shader) {
         // Even lanes hold entry 0's offset, odd lanes entry 1's.
-        let want: Vec<f32> = (0..32).map(|l| [1.0, 2.0][l & 1]).collect();
-        assert_eq!(red, want, "{label}");
-    }
-}
-
-/// [`lanes_sample_the_entry_their_offset_names_in_the_console_waterfall`]
-/// with a 1D sample (`dim:SQ_RSRC_IMG_1D`, x only): translated as a 2D
-/// read (y = 0) of the 2D textures the host makes for 1D ones, it validates
-/// and every lane still reads its own texture.
-#[test]
-fn a_1d_sample_reads_the_one_texel_high_2d_texture() {
-    use crate::resource::tests::WATERFALL_INDEXED_WAVE32;
-    const SAMPLE_2D: u32 = 0xF09C_0F08;
-    let mut words = WATERFALL_INDEXED_WAVE32.to_vec();
-    let at = words
-        .iter()
-        .position(|&w| w == SAMPLE_2D)
-        .expect("the sample");
-    // DIM, bits 5:3 of the first dword: 1 (2D) to 0 (1D).
-    words[at] = SAMPLE_2D & !(7 << 3);
-    let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-    let text = crate::gfx10::decode(&code)
-        .expect("decode")
-        .iter()
-        .map(|i| i.text(false))
-        .find(|t| t.starts_with("image_sample"))
-        .expect("the sample's text");
-    assert!(text.contains("dim:SQ_RSRC_IMG_1D"), "{text}");
-    let shader = build(&words, false);
-    let results = sampled(&shader);
-    assert!(!results.is_empty());
-    for (label, red) in results {
         let want: Vec<f32> = (0..32).map(|l| [1.0, 2.0][l & 1]).collect();
         assert_eq!(red, want, "{label}");
     }

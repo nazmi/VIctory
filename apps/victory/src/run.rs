@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 
@@ -56,21 +56,17 @@ pub fn run(
     // Before the import registry is first used: it holds the module only
     // when the host's FidelityFX serves.
     victory_hle::modules::fidelityfx::use_host_dir(cfg.fidelityfx_dir.as_deref());
-    let exe = resolve_game_exe(cfg.game_dir.as_deref(), exe);
-    let original = std::fs::read(&exe).with_context(|| match cfg.game_dir.as_deref() {
-        // A bare name that was not found is a path mistake worth naming.
-        Some(dir) => format!(
-            "reading {} (a bare file name is looked up in the configured \
-             game_dir, {})",
-            exe.display(),
-            dir.display()
-        ),
-        None => format!("reading {}", exe.display()),
-    })?;
+    let original = std::fs::read(exe).with_context(|| format!("reading {}", exe.display()))?;
     let prepared = victory_loader::prepare(&original)?;
     let hash = prepared.original_hash.to_hex();
+    let title_dir = exe.parent().unwrap_or(Path::new("."));
     match victory_game::identify(&hash) {
-        Some(build) => println!("build          {} ({hash})", build.label),
+        Some(build) => {
+            println!("build          {} ({hash})", build.label);
+            if execute {
+                check_startup_archive(&title_dir.join(build.startup_archive))?;
+            }
+        }
         None => println!("build          unknown ({hash})"),
     }
 
@@ -78,7 +74,7 @@ pub fn run(
     victory_hle::modules::d3d12x::use_shader_cache(cfg.cache_subdir("shaders")?);
     let image = victory_loader::load(&prepared, &images)?;
     victory_hle::runtime::set_main_image(image.base());
-    victory_hle::runtime::set_image_path(image.base(), &exe);
+    victory_hle::runtime::set_image_path(image.base(), exe);
     println!(
         "mapped at      {:#x} (preferred {:#x})",
         image.base(),
@@ -90,7 +86,6 @@ pub fn run(
         HostPolicy::default()
     });
     let wanted = |dll: &str| title_dll(&resolver.host, dll);
-    let title_dir = exe.parent().unwrap_or(Path::new("."));
     // A missing manifest leaves id 0 and no storage quota.
     let manifest =
         std::fs::read_to_string(title_dir.join("MicrosoftGame.config")).unwrap_or_default();
@@ -116,6 +111,32 @@ pub fn run(
     for (name, dll) in &dlls {
         println!("title dll      {name} at {:#x}", dll.base());
         victory_hle::runtime::set_image_path(dll.base(), &title_dir.join(name));
+    }
+    let imported: Vec<&str> = image
+        .info()
+        .imports
+        .iter()
+        .map(|m| m.dll.as_str())
+        .collect();
+    let mapped: Vec<&str> = dlls.iter().map(|(name, _)| name.as_str()).collect();
+    let absent = absent_title_dlls(&imported, &mapped, &wanted);
+    if !absent.is_empty() {
+        let message = format!(
+            "{} not in {}, and neither the host nor VIctory provides {}: the package is \
+             incomplete; copy every file of the package next to the executable",
+            absent.join(", "),
+            title_dir.display(),
+            if absent.len() == 1 { "it" } else { "them" },
+        );
+        println!("missing dlls   {message}");
+        // None of their imports can be bound, so the title stops at its first
+        // call into one (Grand Theft Auto VI 1.0.2.1 at +0x2237178 during
+        // System Init, #930) with nothing saying why. Stubs only if asked for.
+        if execute && matches!(unimplemented, Unimplemented::Trap) {
+            anyhow::bail!(
+                "the title's own DLLs are missing: {message} (`--unimplemented zero` runs it anyway)"
+            );
+        }
     }
 
     let policy = match unimplemented {
@@ -147,7 +168,6 @@ pub fn run(
         println!("not executing (pass --execute to start the title)");
         return Ok(0);
     }
-    report_commit();
     victory_loader::report_crashes();
     victory_loader::log_crashes_to(temp.with_file_name("crashes.log"));
     victory_hle::runtime::use_console_timers();
@@ -173,32 +193,25 @@ pub fn run(
     Ok(code)
 }
 
-/// The bytes the title asks Windows for in one mapping on its first boot:
-/// 99,776 64 KiB physical pages (issue #23).
 #[cfg(windows)]
-const FIRST_BOOT_BYTES: usize = 99_776 * (64 << 10);
+fn check_startup_archive(path: &Path) -> Result<()> {
+    use std::io::Read;
 
-/// The host's commit headroom, and a warning when the title's first big
-/// mapping will not fit: its paging file is the usual reason (README,
-/// Getting started).
-#[cfg(windows)]
-fn report_commit() {
-    let Some((available, limit)) = victory_hle::modules::xmem::commit_headroom() else {
-        return;
-    };
-    let gib = |bytes: usize| bytes as f64 / (1u64 << 30) as f64;
-    println!(
-        "commit         {:.1} GiB available of {:.1} GiB (first boot asks {:.1} GiB)",
-        gib(available),
-        gib(limit),
-        gib(FIRST_BOOT_BYTES)
+    let mut magic = [0; 4];
+    std::fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut magic))
+        .with_context(|| {
+            format!(
+                "Cannot read startup archive {}. Check that the file from your package is present and readable.",
+                path.display()
+            )
+        })?;
+    anyhow::ensure!(
+        magic == *b"9FPR",
+        "Invalid RPF9 header in {}. Restore the startup archive from your package.",
+        path.display()
     );
-    if available < FIRST_BOOT_BYTES {
-        println!(
-            "               short of it: the title may stop here; \
-             raise the paging file (README, Getting started)"
-        );
-    }
+    Ok(())
 }
 
 /// The debugging aids (README): scheduled stack dumps, watched values and
@@ -235,7 +248,11 @@ fn watch(base: usize, size: usize) {
     let Ok(list) = std::env::var("VICTORY_WATCH") else {
         return;
     };
-    let rvas = watch_rvas(&list, size);
+    let rvas: Vec<usize> = list
+        .split(',')
+        .filter_map(|r| usize::from_str_radix(r.trim().trim_start_matches("0x"), 16).ok())
+        .filter(|&rva| rva + 4 <= size)
+        .collect();
     std::thread::spawn(move || {
         let mut seen = vec![None; rvas.len()];
         loop {
@@ -250,17 +267,6 @@ fn watch(base: usize, size: usize) {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     });
-}
-
-/// The RVAs `VICTORY_WATCH` asks for, kept only when four bytes fit in the
-/// image. `rva + 4` would wrap for a large value and pass the check, making
-/// the polling thread read in front of the image base instead.
-#[cfg(all(windows, feature = "diagnostics"))]
-fn watch_rvas(list: &str, size: usize) -> Vec<usize> {
-    list.split(',')
-        .filter_map(|r| usize::from_str_radix(r.trim().trim_start_matches("0x"), 16).ok())
-        .filter(|&rva| rva.checked_add(4).is_some_and(|end| end <= size))
-        .collect()
 }
 
 /// Debugging aid: `VICTORY_POKE=<rva>:<byte>,...` (hex) writes the byte at
@@ -295,6 +301,25 @@ fn poke(base: usize, size: usize) {
 #[cfg(windows)]
 fn title_dll(host: &victory_hle::HostPolicy, dll: &str) -> bool {
     !host.allows(dll) && !victory_hle::registry().iter().any(|m| m.serves(dll))
+}
+
+/// The DLLs among `imported` (the main image's static imports) that must
+/// come from the title's folder (`wanted`) but were not mapped from it:
+/// none of their imports can be bound. Each named once, case ignored.
+#[cfg(any(windows, test))]
+fn absent_title_dlls(
+    imported: &[&str],
+    mapped: &[&str],
+    wanted: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut absent: Vec<String> = Vec::new();
+    for &dll in imported {
+        let known = |list: &[&str]| list.iter().any(|m| m.eq_ignore_ascii_case(dll));
+        if wanted(dll) && !known(mapped) && !absent.iter().any(|a| a.eq_ignore_ascii_case(dll)) {
+            absent.push(dll.to_owned());
+        }
+    }
+    absent
 }
 
 /// Title DLLs the title loads itself (`LoadLibrary`) that nothing imports,
@@ -421,17 +446,45 @@ impl LoaderLock {
     }
 }
 
+#[cfg(test)]
+mod absent_tests {
+    use super::absent_title_dlls;
+
+    #[test]
+    fn title_dlls_missing_from_the_folder_are_named_once() {
+        // The host provides kernel32, our runtime d3d12_xs; the rest are the
+        // title's own (#930: the four DLLs beside the executable missing).
+        let wanted = |dll: &str| {
+            !["KERNEL32.dll", "d3d12_xs.dll"]
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case(dll))
+        };
+        let imported = [
+            "KERNEL32.dll",
+            "d3d12_xs.dll",
+            "XboxBvhBuilder.dll",
+            "MSVCP140.dll",
+            "Bink2Scarlett.dll",
+            "xboxbvhbuilder.dll",
+        ];
+        let mapped = ["msvcp140.dll"];
+        assert_eq!(
+            absent_title_dlls(&imported, &mapped, &wanted),
+            ["XboxBvhBuilder.dll", "Bink2Scarlett.dll"]
+        );
+    }
+
+    #[test]
+    fn a_complete_package_has_nothing_absent() {
+        let wanted = |dll: &str| dll.starts_with("Title");
+        assert!(absent_title_dlls(&["Title.dll", "Host.dll"], &["TITLE.DLL"], &wanted).is_empty());
+        assert!(absent_title_dlls(&[], &[], &wanted).is_empty());
+    }
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     use std::sync::{Arc, Mutex};
-
-    #[cfg(feature = "diagnostics")]
-    #[test]
-    fn watch_rejects_rvas_that_wrap() {
-        let list = format!("0,{:x}", usize::MAX);
-        assert_eq!(super::watch_rvas(&list, 4), vec![0]);
-        assert_eq!(super::watch_rvas("0x10,1c,20", 0x20), vec![0x10, 0x1c]);
-    }
 
     #[test]
     fn loader_lock_is_reentrant_and_exclusive() {
@@ -494,54 +547,4 @@ mod cpu_check_tests {
 #[cfg(not(windows))]
 pub fn run(_: &Path, _: Unimplemented, _: bool, _: bool, _: Console) -> Result<u32> {
     anyhow::bail!("running titles requires Windows")
-}
-
-/// The title's executable: `exe` as given when it exists, or, for a relative
-/// name that does not, the same name inside the configured `game_dir`. So
-/// `victory run game_scarlett_master.exe` works once `[paths].game_dir` is set.
-fn resolve_game_exe(game_dir: Option<&Path>, exe: &Path) -> PathBuf {
-    if exe.is_absolute() || exe.exists() {
-        return exe.to_owned();
-    }
-    match game_dir.map(|dir| dir.join(exe)) {
-        Some(in_game) if in_game.is_file() => in_game,
-        _ => exe.to_owned(),
-    }
-}
-
-#[cfg(test)]
-mod exe_tests {
-    use std::path::{Path, PathBuf};
-
-    use super::resolve_game_exe;
-
-    #[test]
-    fn a_bare_name_is_looked_up_in_the_game_dir() {
-        let game = tempfile::tempdir().unwrap();
-        let title = game.path().join("game_scarlett_master.exe");
-        std::fs::write(&title, b"MZ").unwrap();
-
-        // Found in the game folder.
-        assert_eq!(
-            resolve_game_exe(Some(game.path()), Path::new("game_scarlett_master.exe")),
-            title
-        );
-        // An absolute path is used as given, wherever it points.
-        let absolute = game.path().join("elsewhere.exe");
-        assert_eq!(resolve_game_exe(Some(game.path()), &absolute), absolute);
-        // Nothing configured, or nothing there: unchanged, so the read fails
-        // with the path the user typed.
-        let missing = PathBuf::from("absent.exe");
-        assert_eq!(resolve_game_exe(None, &missing), missing);
-        assert_eq!(resolve_game_exe(Some(game.path()), &missing), missing);
-    }
-
-    #[test]
-    fn an_entry_in_the_game_dir_must_be_a_file() {
-        let game = tempfile::tempdir().unwrap();
-        std::fs::create_dir(game.path().join("sub")).unwrap();
-        // A directory of that name is not the title.
-        let name = PathBuf::from("sub");
-        assert_eq!(resolve_game_exe(Some(game.path()), &name), name);
-    }
 }
