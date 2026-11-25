@@ -1205,6 +1205,101 @@ fn typed_store(format: u32) -> bool {
     ok
 }
 
+/// Mip levels `texture` really has.
+#[cfg(windows)]
+fn host_mips(texture: &ID3D12Resource) -> u32 {
+    // SAFETY: a live texture; a plain query.
+    u32::from(unsafe { texture.GetDesc() }.MipLevels).max(1)
+}
+
+/// Clamps a shader resource view's mip range to the levels `texture` has.
+///
+/// `VICTORY_RENDER_SCALE` gives a smaller render target a shorter chain than
+/// the title's descriptor names, and the host refuses a view past it ("The
+/// Dimensions of the View are invalid ... MostDetailedMip"). The title's
+/// top level is still the top level of the smaller picture, so clamping keeps
+/// what it meant.
+#[cfg(windows)]
+fn clamp_srv_mips(texture: &ID3D12Resource, desc: &mut D3D12_SHADER_RESOURCE_VIEW_DESC) {
+    let mips = host_mips(texture);
+    fn clamp(most: &mut u32, levels: &mut u32, mips: u32) {
+        *most = (*most).min(mips.saturating_sub(1));
+        let left = mips.saturating_sub(*most).max(1);
+        *levels = if *levels == u32::MAX {
+            left
+        } else {
+            (*levels).min(left).max(1)
+        };
+    }
+    // SAFETY: reading the union member the view dimension selects (and that
+    // is the one the caller filled).
+    unsafe {
+        match desc.ViewDimension {
+            D3D12_SRV_DIMENSION_TEXTURE1D => {
+                let t = &mut desc.Anonymous.Texture1D;
+                clamp(&mut t.MostDetailedMip, &mut t.MipLevels, mips);
+            }
+            D3D12_SRV_DIMENSION_TEXTURE1DARRAY => {
+                let t = &mut desc.Anonymous.Texture1DArray;
+                clamp(&mut t.MostDetailedMip, &mut t.MipLevels, mips);
+            }
+            D3D12_SRV_DIMENSION_TEXTURE2D => {
+                let t = &mut desc.Anonymous.Texture2D;
+                clamp(&mut t.MostDetailedMip, &mut t.MipLevels, mips);
+            }
+            D3D12_SRV_DIMENSION_TEXTURE2DARRAY => {
+                let t = &mut desc.Anonymous.Texture2DArray;
+                clamp(&mut t.MostDetailedMip, &mut t.MipLevels, mips);
+            }
+            D3D12_SRV_DIMENSION_TEXTURE3D => {
+                let t = &mut desc.Anonymous.Texture3D;
+                clamp(&mut t.MostDetailedMip, &mut t.MipLevels, mips);
+            }
+            D3D12_SRV_DIMENSION_TEXTURECUBE => {
+                let t = &mut desc.Anonymous.TextureCube;
+                clamp(&mut t.MostDetailedMip, &mut t.MipLevels, mips);
+            }
+            D3D12_SRV_DIMENSION_TEXTURECUBEARRAY => {
+                let t = &mut desc.Anonymous.TextureCubeArray;
+                clamp(&mut t.MostDetailedMip, &mut t.MipLevels, mips);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Clamps an unordered access view's mip to the levels `texture` has.
+#[cfg(windows)]
+fn clamp_uav_mips(texture: &ID3D12Resource, desc: &mut D3D12_UNORDERED_ACCESS_VIEW_DESC) {
+    let mips = host_mips(texture);
+    // SAFETY: reading the union member the view dimension selects.
+    unsafe {
+        match desc.ViewDimension {
+            D3D12_UAV_DIMENSION_TEXTURE1D => {
+                let t = &mut desc.Anonymous.Texture1D;
+                t.MipSlice = t.MipSlice.min(mips.saturating_sub(1));
+            }
+            D3D12_UAV_DIMENSION_TEXTURE1DARRAY => {
+                let t = &mut desc.Anonymous.Texture1DArray;
+                t.MipSlice = t.MipSlice.min(mips.saturating_sub(1));
+            }
+            D3D12_UAV_DIMENSION_TEXTURE2D => {
+                let t = &mut desc.Anonymous.Texture2D;
+                t.MipSlice = t.MipSlice.min(mips.saturating_sub(1));
+            }
+            D3D12_UAV_DIMENSION_TEXTURE2DARRAY => {
+                let t = &mut desc.Anonymous.Texture2DArray;
+                t.MipSlice = t.MipSlice.min(mips.saturating_sub(1));
+            }
+            D3D12_UAV_DIMENSION_TEXTURE3D => {
+                let t = &mut desc.Anonymous.Texture3D;
+                t.MipSlice = t.MipSlice.min(mips.saturating_sub(1));
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Makes the host descriptor for `view` at `at` (in any host view heap):
 /// the host resource it views, if it can.
 pub(crate) fn make_view(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<ID3D12Resource> {
@@ -1255,6 +1350,9 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
                 ) {
                     return None;
                 }
+                if let Some(d) = desc.as_mut() {
+                    clamp_srv_mips(texture, d);
+                }
                 // SAFETY: a live texture and a slot of our heap.
                 unsafe {
                     device.CreateShaderResourceView(
@@ -1301,6 +1399,9 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
                 true,
             ) {
                 return None;
+            }
+            if let Some(d) = desc.as_mut() {
+                clamp_uav_mips(texture, d);
             }
             // SAFETY: a live texture and a slot of our heap.
             unsafe {

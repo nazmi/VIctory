@@ -1987,13 +1987,50 @@ const QUAD_STRIP: u32 = 20;
 
 /// Fixed-function state, straight onto the host list.
 pub(crate) fn viewports(list: &HostList, viewports: &[D3D12_VIEWPORT]) {
+    // `VICTORY_RENDER_SCALE`: the target is that much smaller, so the viewport
+    // into it is too (`resource::render_scale`).
+    #[cfg(windows)]
+    let scaled: Vec<D3D12_VIEWPORT> = if crate::console::render_scale() < 1.0 {
+        viewports
+            .iter()
+            .map(|v| D3D12_VIEWPORT {
+                TopLeftX: crate::resource::scaled_f32(v.TopLeftX),
+                TopLeftY: crate::resource::scaled_f32(v.TopLeftY),
+                Width: crate::resource::scaled_f32(v.Width),
+                Height: crate::resource::scaled_f32(v.Height),
+                MinDepth: v.MinDepth,
+                MaxDepth: v.MaxDepth,
+            })
+            .collect()
+    } else {
+        viewports.to_vec()
+    };
+    #[cfg(not(windows))]
+    let scaled: Vec<D3D12_VIEWPORT> = viewports.to_vec();
     // SAFETY: an open list.
-    unsafe { list.list.RSSetViewports(viewports) };
+    unsafe { list.list.RSSetViewports(&scaled) };
 }
 
 pub(crate) fn scissors(list: &HostList, rects: &[RECT]) {
+    // `VICTORY_RENDER_SCALE`: as for viewports.
+    #[cfg(windows)]
+    let scaled: Vec<RECT> = if crate::console::render_scale() < 1.0 {
+        rects
+            .iter()
+            .map(|r| RECT {
+                left: crate::resource::scaled_i32(r.left),
+                top: crate::resource::scaled_i32(r.top),
+                right: crate::resource::scaled_i32(r.right),
+                bottom: crate::resource::scaled_i32(r.bottom),
+            })
+            .collect()
+    } else {
+        rects.to_vec()
+    };
+    #[cfg(not(windows))]
+    let scaled: Vec<RECT> = rects.to_vec();
     // SAFETY: an open list.
-    unsafe { list.list.RSSetScissorRects(rects) };
+    unsafe { list.list.RSSetScissorRects(&scaled) };
 }
 
 pub(crate) fn blend_factor(list: &HostList, factor: Option<&[f32; 4]>) {

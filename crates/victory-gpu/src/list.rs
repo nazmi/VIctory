@@ -568,7 +568,43 @@ extern "system" fn copy_texture_region(
         crate::texture::host_written(dst.resource);
         let mut to_location = dst;
         to_location.resource = to.as_raw().cast_const().cast();
-        let host_box = (!source_box.is_null()).then(|| source_box.cast::<D3D12_BOX>());
+        // `VICTORY_RENDER_SCALE`: both textures are smaller, so the copy's
+        // destination offset and source box are scaled with them.
+        // Only between two textures the render scale shrank: a block-
+        // compressed copy needs 4-pixel aligned coordinates, which halving
+        // breaks ("The destination coordinates are not aligned properly for
+        // the format used with the destination").
+        #[cfg(windows)]
+        let scale_copy = src.kind != FOOTPRINT
+            && crate::resource::render_scaled(dst.resource)
+            && crate::resource::render_scaled(src.resource);
+        #[cfg(windows)]
+        let scaled_box = (scale_copy && !source_box.is_null()).then(|| {
+            // SAFETY: the title passes a box of six dimensions.
+            let b = unsafe { *source_box };
+            D3D12_BOX {
+                left: crate::resource::scaled32(b[0]),
+                top: crate::resource::scaled32(b[1]),
+                front: crate::resource::scaled32(b[2]),
+                right: crate::resource::scaled32(b[3]),
+                bottom: crate::resource::scaled32(b[4]),
+                back: crate::resource::scaled32(b[5]),
+            }
+        });
+        #[cfg(windows)]
+        let host_box = scaled_box
+            .as_ref()
+            .map(|b| std::ptr::from_ref(b).cast::<D3D12_BOX>());
+        #[cfg(windows)]
+        let (x, y, z) = if scale_copy {
+            (
+                crate::resource::scaled(u64::from(x)) as u32,
+                crate::resource::scaled(u64::from(y)) as u32,
+                z,
+            )
+        } else {
+            (x, y, z)
+        };
         #[cfg(feature = "diagnostics")]
         {
             let text = || {
@@ -591,6 +627,71 @@ extern "system" fn copy_texture_region(
                 None => list.note_op(text),
             }
         }
+        // A copy that reaches past the destination removes the device, and a
+        // host texture can hold less than the title's box names (a shorter
+        // mip chain, a smaller render scale). Clip to what is there and say
+        // so; the part that fits still lands.
+        #[cfg(windows)]
+        let (x, y, host_box) = {
+            // SAFETY: a live texture; a plain query.
+            let desc = unsafe { to.GetDesc() };
+            let (dw, dh) = crate::resource::subresource_size(to, dst.kind);
+            let block = crate::resource::block_compressed(desc.Format.0 as u32);
+            let align = |v: u32| if block { v & !3 } else { v };
+            // SAFETY: `host_box` points at a box this call built (or is null).
+            let mut boxed = host_box.map(|b| unsafe { *b });
+            let mut width = boxed.map_or(0, |b| b.right.saturating_sub(b.left));
+            let mut height = boxed.map_or(0, |b| b.bottom.saturating_sub(b.top));
+            if x >= dw || y >= dh || (boxed.is_some() && (width == 0 || height == 0)) {
+                static SAID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let n = SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if n.is_power_of_two() {
+                    tracing::warn!(
+                        n,
+                        x,
+                        y,
+                        dw,
+                        dh,
+                        width,
+                        height,
+                        "a texture copy starts outside its destination; skipped"
+                    );
+                }
+                return;
+            }
+            if let Some(b) = boxed.as_mut() {
+                let fit_w = align(dw - x);
+                let fit_h = align(dh - y);
+                if width > fit_w || height > fit_h {
+                    static SAID: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let n = SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if n.is_power_of_two() {
+                        tracing::warn!(
+                            n,
+                            x,
+                            y,
+                            dw,
+                            dh,
+                            width,
+                            height,
+                            fit_w,
+                            fit_h,
+                            "a texture copy reaches past its destination; clipped"
+                        );
+                    }
+                    width = width.min(fit_w).max(align(4).max(1));
+                    height = height.min(fit_h).max(align(4).max(1));
+                    b.right = b.left + width;
+                    b.bottom = b.top + height;
+                }
+            }
+            (
+                x,
+                y,
+                boxed.map(|b| std::ptr::from_ref(&b).cast::<D3D12_BOX>()),
+            )
+        };
         const _: () =
             assert!(size_of::<CopyLocation>() == size_of::<D3D12_TEXTURE_COPY_LOCATION>());
         // SAFETY: an open list; both locations in the host's layout, naming

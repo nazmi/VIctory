@@ -1021,6 +1021,68 @@ pub(crate) fn host_copy(this: This) -> Option<std::sync::Arc<HostTexture>> {
 /// The host description of a title texture: the same, without the
 /// console's layout and flags, in a format the host takes for its use.
 #[cfg(windows)]
+/// Whether `this` is a texture the render scale shrank: a render target or
+/// depth target while `VICTORY_RENDER_SCALE` is below 1.
+#[cfg(windows)]
+pub(crate) fn render_scaled(this: This) -> bool {
+    const RENDER_TARGET: u32 = 1;
+    !this.is_null()
+        && crate::console::render_scale() < 1.0
+        && resource(this).desc.flags & (RENDER_TARGET | DEPTH) != 0
+}
+
+/// The width and height of subresource `kind` of `texture`.
+#[cfg(windows)]
+pub(crate) fn subresource_size(
+    texture: &windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+    kind: u32,
+) -> (u32, u32) {
+    // SAFETY: a live texture; a plain query.
+    let d = unsafe { texture.GetDesc() };
+    let mips = u32::from(d.MipLevels).max(1);
+    let mip = kind % mips;
+    ((d.Width >> mip).max(1) as u32, (d.Height >> mip).max(1))
+}
+
+/// Whether `format` (a host DXGI format) is block compressed: 4x4 blocks,
+/// which copies must align to.
+#[cfg(windows)]
+pub(crate) fn block_compressed(format: u32) -> bool {
+    // BC1-BC7 in the host's numbering: 70..=84, the typeless twins included.
+    const BC: [u32; 15] = [70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84];
+    BC.contains(&format)
+}
+
+/// `value` scaled by the render scale, at least 1.
+#[cfg(windows)]
+pub(crate) fn scaled(value: u64) -> u64 {
+    crate::console::scaled(value)
+}
+
+/// `value` scaled by the render scale, at least 1.
+#[cfg(windows)]
+pub(crate) fn scaled32(value: u32) -> u32 {
+    scaled(u64::from(value)) as u32
+}
+
+/// `value` (points, or pixels along an axis) scaled by the render scale.
+#[cfg(windows)]
+pub(crate) fn scaled_f32(value: f32) -> f32 {
+    let scale = crate::console::render_scale();
+    if scale >= 1.0 { value } else { value * scale }
+}
+
+/// `value` (an integer pixel index or extent) scaled by the render scale.
+#[cfg(windows)]
+pub(crate) fn scaled_i32(value: i32) -> i32 {
+    let scale = crate::console::render_scale();
+    if scale >= 1.0 {
+        value
+    } else {
+        (f64::from(value) * f64::from(scale)).round() as i32
+    }
+}
+
 fn host_desc(desc: &ResourceDesc) -> Option<ResourceDesc> {
     const PC_FLAGS: u32 = 0xf; // render target, depth, UAV, no shader access
     if desc.dimension == BUFFER {
@@ -1048,6 +1110,24 @@ fn host_desc(desc: &ResourceDesc) -> Option<ResourceDesc> {
     // their unordered access views plain UNORM.
     if d.flags & UNORDERED != 0 && SRGB.iter().any(|&(srgb, _)| srgb == d.format) {
         d.format = family(d.format);
+    }
+    // `VICTORY_RENDER_SCALE`: render targets and depth targets that the GPU
+    // draws into are made smaller (viewports and copy boxes scale with them).
+    const RENDER_TARGET: u32 = 1;
+    if d.flags & (RENDER_TARGET | DEPTH) != 0 {
+        let (width, height) = (scaled(d.width), scaled32(d.height));
+        // The mip chain must fit the smaller size: the debug layer refuses
+        // ("MipLevels must be 0 or <= 11 when the largest texture dimension
+        // is 1") a 20x20 with a chain a 10x10 cannot hold.
+        let most = 32 - (width.max(u64::from(height)) as u32).max(1).leading_zeros();
+        let mips = if d.mip_levels == 0 {
+            0
+        } else {
+            d.mip_levels.min(most as u16).max(1)
+        };
+        d.width = width;
+        d.height = height;
+        d.mip_levels = mips;
     }
     Some(d)
 }
