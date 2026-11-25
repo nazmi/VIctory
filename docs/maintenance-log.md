@@ -1665,3 +1665,17 @@ refused/held features rather than claiming full fork compatibility. Priority
 candidate: conservative uniform-diamond shader jump threading, independently
 of the fork's incompatible unspill/approximate wave64 paths. Source guarded
 or approximate/GPU scheduling changes need separate proof before acceptance.
+
+Ztrx probe update: exact source shader-threading tests2/0, ported proof tests2/0.
+An end-to-end synthetic witness (descriptor-vs-number, then mask-vs-number)
+**already emits with the current local translator**, so the candidate cannot
+claim to recover those refusals. Keep `integrate/ztrx-threading` as unmerged
+scratch with that explicit failing acceptance assertion; do not integrate an
+unproved fallback or force the test to pass. No production integration change.
+Next concrete recovery: `VICTORY_PIPELINE_WAIT_MS` is advertised in our README
+but still unused in make.rs (hardcoded500 ms). Port fork configuration plus
+shared reservation/refund semantics onto our existing worker queue. Acceptance:
+concurrent reservations total at most one frame budget, unused time returned,
+old-frame refunds cannot affect the new frame, zero disables waiting, existing
+workers/cache records remain intact. Add isolated tests, run source/candidate
+and full coordinator gate, no-ff merge if accepted.
