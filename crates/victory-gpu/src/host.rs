@@ -37,6 +37,10 @@ const RTV_RING: u32 = 1024;
 
 pub(crate) struct Host {
     pub(crate) device: ID3D12Device,
+    /// The actual device's adapter, for the OS residency budget (which on
+    /// integrated GPUs includes shared RAM, uploads and readbacks).
+    memory_adapter: Option<IDXGIAdapter3>,
+    uma: bool,
     pub(crate) depth_bounds_supported: bool,
     queue: ID3D12CommandQueue,
     fence: ID3D12Fence,
@@ -210,6 +214,30 @@ fn create() -> windows::core::Result<Host> {
             D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device)?;
         }
         let device = device.ok_or_else(windows::core::Error::empty)?;
+        let memory_adapter = CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0))
+            .and_then(|factory| factory.EnumAdapterByLuid::<IDXGIAdapter3>(device.GetAdapterLuid()))
+            .ok();
+        let mut architecture = D3D12_FEATURE_DATA_ARCHITECTURE::default();
+        let uma = device
+            .CheckFeatureSupport(
+                D3D12_FEATURE_ARCHITECTURE,
+                (&raw mut architecture).cast(),
+                size_of_val(&architecture) as u32,
+            )
+            .is_ok()
+            && architecture.UMA.as_bool();
+        if let Some(adapter) = &memory_adapter
+            && let Ok(desc) = adapter.GetDesc1()
+        {
+            let end = desc
+                .Description
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(desc.Description.len());
+            tracing::info!(adapter = %String::from_utf16_lossy(&desc.Description[..end]), uma,
+                dedicated_mb = desc.DedicatedVideoMemory / (1 << 20),
+                shared_mb = desc.SharedSystemMemory / (1 << 20), "host GPU memory architecture");
+        }
         let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS2::default();
         let depth_bounds_supported = device
             .CheckFeatureSupport(
@@ -267,6 +295,8 @@ fn create() -> windows::core::Result<Host> {
         }
         Ok(Host {
             device,
+            memory_adapter,
+            uma,
             depth_bounds_supported,
             queue,
             fence,
@@ -284,6 +314,43 @@ fn create() -> windows::core::Result<Host> {
             next_rtv: AtomicU32::new(0),
             presenter: Mutex::new(None),
         })
+    }
+}
+
+impl Host {
+    /// The OS budget is dynamic; texture byte counts alone omit staging,
+    /// buffers, descriptor heaps and driver allocations. UMA uses LOCAL for
+    /// uploads/readbacks too, so adding NON_LOCAL would misrepresent it.
+    fn log_memory_budget(&self) {
+        let Some(adapter) = &self.memory_adapter else {
+            return;
+        };
+        let segments = if self.uma {
+            &[DXGI_MEMORY_SEGMENT_GROUP_LOCAL][..]
+        } else {
+            &[
+                DXGI_MEMORY_SEGMENT_GROUP_LOCAL,
+                DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,
+            ][..]
+        };
+        for &segment in segments {
+            let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+            // SAFETY: the adapter belongs to this live device; one output
+            // structure for node zero, which this single-node backend uses.
+            if unsafe { adapter.QueryVideoMemoryInfo(0, segment, &mut info) }.is_ok() {
+                tracing::info!(
+                    segment = if segment == DXGI_MEMORY_SEGMENT_GROUP_LOCAL {
+                        "local"
+                    } else {
+                        "non-local"
+                    },
+                    used_mb = info.CurrentUsage / (1 << 20),
+                    budget_mb = info.Budget / (1 << 20),
+                    over_budget = info.CurrentUsage > info.Budget,
+                    "host GPU memory budget"
+                );
+            }
+        }
     }
 }
 
@@ -312,6 +379,23 @@ fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn memory_budget_uses_the_devices_adapter() {
+        if !isolated("host::tests::memory_budget_uses_the_devices_adapter") {
+            return;
+        }
+        let host = host().expect("WARP device");
+        let adapter = host.memory_adapter.as_ref().expect("device's DXGI adapter");
+        // SAFETY: plain identity queries on live objects.
+        let (desc, luid) = unsafe { (adapter.GetDesc1().unwrap(), host.device.GetAdapterLuid()) };
+        assert_eq!(desc.AdapterLuid.LowPart, luid.LowPart);
+        assert_eq!(desc.AdapterLuid.HighPart, luid.HighPart);
+        assert_ne!(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32, 0);
+        // Some software drivers do not expose budgets. Logging must tolerate
+        // that without losing the device or switching to a hardware adapter.
+        host.log_memory_budget();
+    }
 
     /// Execute one exact test in a fresh process. A D3D call can block before
     /// the fence wait, so only the parent process can enforce this deadline.
@@ -2217,6 +2301,9 @@ impl Meter {
             );
             let (textures, bytes, used, shared, saved, replaced) =
                 crate::resource::texture_counts();
+            if let Some(host) = host() {
+                host.log_memory_budget();
+            }
             tracing::info!(
                 "host textures: {textures} ({:.0} MB, {:.0} MB of them used by lists), title textures sharing one {shared} (saving {:.0} MB), replacing one {replaced}; \
                  copies between textures of one memory {:.1}/frame, depth twin copies {:.1}/frame",

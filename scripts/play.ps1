@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Game,
     [string]$Cache = "$env:LOCALAPPDATA\victory\cache",
     [string]$Data = "$env:LOCALAPPDATA\victory\data",
-    [string]$Exe = "$PSScriptRoot\..\target\release\victory.exe"
+    [string]$Exe = "$PSScriptRoot\..\target\release\victory.exe",
+    [switch]$SmallGpu
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,10 +20,18 @@ foreach ($setting in 'VICTORY_KEYS', 'VICTORY_CAPTURE', 'VICTORY_CAPTURE_FRAMES'
 [System.IO.Directory]::CreateDirectory($Data) | Out-Null
 $env:VICTORY_CACHE_DIR = $Cache
 $env:VICTORY_DATA_DIR = $Data
+$runArgs = @('run', $Game, '--execute')
+if ($SmallGpu) {
+    # The title selects its smaller render configuration from the console
+    # model. The reported display mode alone does not change that choice.
+    $runArgs += @('--console', 'series-s')
+    $env:VICTORY_MODE = '1280x720'
+    Write-Host 'Small GPU: Series S profile, reported display 1280x720.'
+}
 $log = Join-Path ([System.IO.Path]::GetTempPath()) 'victory-play.log'
 # Native stderr is diagnostic text; preserve the executable's actual exit status.
 $ErrorActionPreference = 'Continue'
-& $Exe run $Game --execute 2>&1 | Out-File -LiteralPath $log -Encoding utf8
+& $Exe @runArgs 2>&1 | Out-File -LiteralPath $log -Encoding utf8
 $exitCode = $LASTEXITCODE
 Write-Host "Exited with $exitCode; log: $log"
 if ($null -eq $exitCode) { exit 1 }

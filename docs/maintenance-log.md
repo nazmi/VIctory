@@ -1775,3 +1775,63 @@ there** — the threading, memory instrumentation, ray-tracing, in-place-memory
 and optimizer bodies the review already held as coupled work needing
 independent semantic ports. Nothing was imported from those for this pass, and
 `docs/ztrx-integration-review.md` remains the record of why.
+
+### Radeon 780M / small GPU work: 2026-11-25
+
+Isolated from concurrent ztrx work at base a7d7a540 on
+`fix/small-gpu-memory`, worktree `VIctory-small-gpu`. Existing integration
+checkout loader edits are untouched. Worker inventory used gpt-6.1-sol, low,
+read-only. Toolchain confirmed 1.98.1 x86_64-pc-windows-msvc.
+
+Plan and acceptance criteria:
+1. Defer host texture allocation until a host operation needs it. Preserve
+   copied clear values, initial states, memory sharing, aliases, and list
+   ownership. Synthetic WARP regressions must prove no allocation at resource
+   creation, correct first-use contents/state, and shared memory behavior.
+2. Add an explicit small-GPU launcher option selecting Series S and a smaller
+   reported display mode; document that the title controls internal resolution
+   and that this is not a guarantee of complete world rendering or stability.
+3. Run affected GPU tests serially on WARP, formatting, both workspace Clippy
+   gates, workspace tests, and policy. Keep logs/build output outside the tree.
+   Record actual coverage and unresolved streaming cache growth before handoff.
+
+Observed user-supplied runtime evidence: host texture allocations grow to
+roughly 9.5 GB, then buffer allocations fail and the device is removed.
+This sequence establishes memory pressure, not the sole cause of removal.
+Unsupported mesh translation is a separate blocker in that older run.
+Do not copy raw title logs or title data into this repository.
+
+Implementation complete on the isolated support branch (not integrated into
+DeepSeek's checkout): host texture creation is deferred using OnceLock;
+initial states and caller clear values are retained; alias/drop inspection
+never materializes unused copies. Added actual-adapter/UMA budget reporting
+and the explicit `scripts/play.ps1 -SmallGpu` Series S / reported 720p mode.
+Independent gpt-6.1-sol review found one test-timeout gap, fixed by using the
+existing isolated WARP subprocess helper. No remaining actionable findings.
+Details and the integration/streaming follow-up are in `docs/small-gpu-handoff.md`.
+
+Validation on the final code: fmt0; default Clippy0; all-features Clippy0;
+workspace tests0 (745 parent tests passed, 11 existing ignores; child summaries
+are additional, not distinct coverage); GPU diagnostics129 passed, 0 failed,
+1 existing ignore; policy228 files0; release build0 and executable CLI smoke0.
+New allocation/state/lifetime and adapter identity tests executed on WARP.
+Data-dependent coverage without title inputs remains unavailable, and the
+software device cannot establish 780M rendering correctness or stability.
+Synthetic launcher checks passed for normal and SmallGpu modes, including
+spaced paths, retained shader safety settings, cleared scripted input, and
+child exit status7. Parser accepts the script. No title run performed.
+
+A read-only physical 780M probe confirmed UMA, SM6.6, mesh tier1 and wave
+lanes32-64. Observed LOCAL budget16439 MiB, NON_LOCAL0; driver32.0.32029.2010.
+This validates capabilities/budget queries only, not game execution. Existing
+workspace shader semantics tests also run their own small hardware/WARP probes
+when available; no gameplay or streaming workload was exercised.
+
+Local logs/probe fixtures: ../maintenance-logs/small-gpu-* (outside repo).
+Release executable: ../small-gpu-target/release/victory.exe; pass this through
+`-Exe` to this checkout's launcher, as its default target path is not used.
+The integration checkout and its in-progress work were left untouched.
+Pending: semantic port after ztrx lands, repeat combined checks, then measure
+Series S on the physical GPU. Unbounded placed/loose caches and staging still
+need allocation-generation invalidation with descriptor/list lifetime safety.
+There is no evidence yet that memory peaks or device removal are resolved.

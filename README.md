@@ -143,6 +143,34 @@ returns VIctory's exit code.
 
 ### Selecting the Series S profile
 
+For a small GPU such as the Radeon 780M, the PowerShell launcher can select
+Series S and report a 1280x720 display mode together:
+
+```powershell
+.\scripts\play.ps1 -Game '<game dir>\<the title exe>' -SmallGpu
+```
+
+This keeps the existing shader safety settings. It does not force every
+internal render target to 720p: the title chooses those from its console
+profile. Use a build from this checkout (`cargo build --release -p victory`),
+or pass `-Exe` with the full path to that build.
+
+Host copies of textures are now allocated on first host use (a descriptor,
+barrier, copy or draw), rather than when the title creates the resource.
+Unused texture resources therefore reserve only their console-side memory.
+Already viewed textures and their upload buffers can still accumulate during
+streaming; there is no hard host memory cap or automatic cache eviction.
+This reduces one source of duplicate allocation, but does not establish that
+world rendering fits a particular GPU or fix unsupported shaders.
+
+The log identifies the actual host adapter and whether it uses shared memory
+(UMA), then reports OS GPU memory usage and budget beside the five-second
+texture statistics. On UMA, uploads and readbacks consume the same local
+budget; the advertised dedicated VRAM figure alone is not the usable limit
+([Microsoft's memory architecture documentation](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_feature_data_architecture)).
+An `over_budget=true` line identifies residency pressure, not a hard allocation
+limit or proof of what caused a device removal.
+
 GTA VI chooses its render configuration from the console model, not from the
 display modes VIctory advertises through DXGI. To use the lower-resolution
 profile, pass `--console series-s` when starting the title:
