@@ -262,6 +262,15 @@ unsafe fn emulate_amd_only(info: *mut EXCEPTION_POINTERS) -> bool {
                     context.Rip += len as u64;
                     return true;
                 }
+                if let Some((dest, len)) = rdpid(&bytes[..n]) {
+                    // The console's `rdpid` reads TSC_AUX, which the OS sets to
+                    // the processor number. A title that pins work per
+                    // processor by it gets this host's, not the console's.
+                    let cpu = windows_sys::Win32::System::Threading::GetCurrentProcessorNumber();
+                    *gpr(context, dest) = u64::from(cpu);
+                    context.Rip += len as u64;
+                    return true;
+                }
                 let Some(len) = sse4a(code, &mut context.Anonymous.FltSave.XmmRegisters) else {
                     return false;
                 };
@@ -495,6 +504,31 @@ fn cmp_flags(a: u64, b: u64) -> u32 {
         | ((((a ^ b) & (a ^ r)) >> 63) as u32) << 11
 }
 const CMP_FLAGS: u32 = 0x8d5;
+
+/// `rdpid r64` (`f3 [rex] 0f c7 /7`, a register operand): its destination
+/// register (CONTEXT order) and instruction length, or `None` for anything
+/// else. The console's CPU has it (Zen 2); Intel CPUs after Ice Lake have it
+/// too, but Windows does not always report it as enabled, and a title that
+/// reads it treats a fault as fatal.
+fn rdpid(code: &[u8]) -> Option<(u8, usize)> {
+    if *code.first()? != 0xf3 {
+        return None;
+    }
+    let (rex, at) = if code.get(1)? & 0xf0 == 0x40 {
+        (*code.get(1)?, 2)
+    } else {
+        (0, 1)
+    };
+    if code.get(at..at + 2)? != [0x0f, 0xc7] {
+        return None;
+    }
+    let modrm = *code.get(at + 2)?;
+    // Register operand only (mod 3), group /7.
+    if modrm >> 6 != 3 || (modrm >> 3) & 7 != 7 {
+        return None;
+    }
+    Some((((modrm & 7) | (rex & 1) << 3) & 15, at + 3))
+}
 
 /// SSE4a's `extrq`/`insertq` (register forms, the only ones there are) on
 /// the saved XMM registers; returns the instruction's length.
@@ -851,6 +885,24 @@ mod tests {
     #[inline(never)]
     fn panics_here() {
         panic!("a test panic");
+    }
+
+    /// `rdpid`'s ModRM: a register operand in group /7, with REX.B extending
+    /// the destination past rdi.
+    #[test]
+    fn rdpid_reads_its_register_and_length() {
+        // f3 0f c7 f8 -> rdpid rax
+        assert_eq!(rdpid(&[0xf3, 0x0f, 0xc7, 0xf8]), Some((0, 4)));
+        // f3 0f c7 ff -> rdpid rdi (rm = 7, no REX)
+        assert_eq!(rdpid(&[0xf3, 0x0f, 0xc7, 0xff]), Some((7, 4)));
+        // f3 41 0f c7 f8 -> rdpid r8 (REX.B, rm = 0)
+        assert_eq!(rdpid(&[0xf3, 0x41, 0x0f, 0xc7, 0xf8]), Some((8, 5)));
+        // Not rdpid: group /6, a memory operand, or the wrong opcode.
+        assert_eq!(rdpid(&[0xf3, 0x0f, 0xc7, 0xf0]), None);
+        assert_eq!(rdpid(&[0xf3, 0x0f, 0xc7, 0x38]), None);
+        assert_eq!(rdpid(&[0xf2, 0x0f, 0xc7, 0xf8]), None);
+        // Truncated instruction: no complete decode.
+        assert_eq!(rdpid(&[0xf3, 0x0f, 0xc7]), None);
     }
 
     /// In a child process of the next test: logs crashes to the file it is
@@ -1319,6 +1371,34 @@ mod tests {
         assert!(emulate_in(&code, 0, &mut context));
         assert_eq!(context.Rip, 3);
         assert_eq!(zeroed(&mem), [false, true, false]);
+    }
+
+    /// `rdpid r64` faults on a CPU that lacks it; the emulation writes the
+    /// processor number and steps over the instruction.
+    #[test]
+    fn emulated_rdpid_writes_a_processor_number() {
+        for (code, dest_is_r8) in [
+            (vec![0xf3, 0x0f, 0xc7, 0xf8], false),      // rdpid rax
+            (vec![0xf3, 0x41, 0x0f, 0xc7, 0xf8], true), // rdpid r8
+        ] {
+            // SAFETY: an all-zero context is valid.
+            let mut context: CONTEXT = unsafe { std::mem::zeroed() };
+            context.Rax = 0xdead_beef;
+            context.R8 = 0xdead_beef;
+            assert!(emulate_in(&code, 0, &mut context), "{code:02x?}");
+            assert_eq!(context.Rip as usize, code.len(), "stepped over");
+            let written = if dest_is_r8 { context.R8 } else { context.Rax };
+            // SAFETY: no preconditions.
+            let cpu = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcessorNumber() };
+            // The OS may migrate the thread between the two calls, so only the
+            // shape is pinned: a plausible processor number replaced the
+            // sentinel, and nothing else was touched.
+            assert!(written < 4096, "processor number out of range: {written}");
+            assert_ne!(written, 0xdead_beef, "the sentinel was left in place");
+            let _ = cpu;
+            let untouched = if dest_is_r8 { context.Rax } else { context.R8 };
+            assert_eq!(untouched, 0xdead_beef, "another register was written");
+        }
     }
 
     #[test]
