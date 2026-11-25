@@ -224,3 +224,46 @@ share of the frame and are CPU-side.
 
 `VICTORY_DISPLAY` is kept (safe default: the console's 4K) because it changes
 what the title hands over, but it does not reduce internal rendering.
+
+## Render scale (2026-11-25 15:0x UTC)
+
+`VICTORY_RENDER_SCALE=<ratio>` (0 < ratio <= 1, 1 by default) makes every
+render target and depth target that ratio as large, and scales what has to
+agree with them: viewports, scissor rectangles, the window the title asks
+for, a shrunken texture's mip chain, shader-resource and unordered view mip
+ranges, and texture copy boxes and offsets. Series S with the launcher's
+`VICTORY_PRESENT_LARGEST` and this at 0.5 gives a 1920x1080 render, a
+1920x1080 window and a 1920x1080 present texture, with the title card and
+loading screen composited correctly.
+
+Measured, release build, Series X profile, same texture count either way:
+
+| | 1,569-1,583 host textures |
+| --- | --- |
+| `VICTORY_RENDER_SCALE=1.0` | 4,814 MB |
+| `VICTORY_RENDER_SCALE=0.5` | 2,174-2,191 MB |
+
+**No GPU-millisecond claim.** The menu and the intro cost 2-8 ms on the GPU
+at either scale, so there is nothing there for the scale to save. The scenes
+that cost 400-600 ms (the world) were not reached: a pre-existing copy fault
+ends the run at frame ~1,300-1,600 first.
+
+### Pre-existing: a BC1 copy removes the device
+
+With the debug layer on, and at **scale 1.0 as well**:
+
+```
+ID3D12CommandList::CopyTextureRegion: The destination region extends past,
+at least, one of the edges of the destination subresource. When the
+destination format is BC1_TYPELESS, the source format is R32G32_TYPELESS,
+DstX is 0, DstY is 4752 ... requires the destination subresource to have
+1320 width, 6072 height ... only has 5808 width, 5808 height
+```
+
+The source is a texel texture and the destination block compressed, which
+D3D12 does not convert; the box the title names does not fit its own
+destination. Diagnostics that log every copy into a block-compressed
+destination through `copy_texture_region` never fired, so the call comes from
+another path — the twin or copy helpers in `draw.rs`, or `CopyResource`.
+Until that is found, a run ends about 40 seconds in, which is what keeps the
+world out of reach regardless of the render scale.
