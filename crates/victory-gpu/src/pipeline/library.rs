@@ -19,13 +19,15 @@
 //!    The list holds only for the library bytes it was saved with and for
 //!    what names the pipelines (the translator, this module and `host`).
 //!
-//! All library calls are serialised: the interface does not promise that
-//! stores, loads and serialising may overlap.
+//! Loads and stores of each name are serialised; unrelated names load in
+//! parallel. Stores share a lock that serialisation takes exclusively, so
+//! the serialised size cannot change between sizing and writing.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::core::{HSTRING, Interface, PCWSTR};
@@ -48,16 +50,23 @@ struct Library {
     /// The blob the library was made from: it must outlive the library.
     _blob: Vec<u8>,
     /// Pipelines stored since the last save.
-    added: u64,
+    added: AtomicU64,
+    metadata: Mutex<Metadata>,
+}
+
+#[derive(Default)]
+struct Metadata {
     /// Title pipelines the pre-build put in the library or found there, by
     /// key, and whether that list changed since the last save.
     prebuilt: HashSet<String>,
     prebuilt_changed: bool,
 }
 
-// SAFETY: D3D12 objects are free-threaded; every call is made under the
-// mutex that holds the library.
+// SAFETY: D3D12 libraries are free-threaded; same-name calls and stores
+// during serialisation take the locks described above. The blob is immutable.
 unsafe impl Send for Library {}
+// SAFETY: as above; mutable metadata is behind its own mutex.
+unsafe impl Sync for Library {}
 
 const LIBRARY_FILE: &str = "host-pipelines.bin";
 const EARLY_FILE: &str = "early-pipelines.txt";
@@ -65,8 +74,8 @@ const PREBUILT_FILE: &str = "prebuilt-pipelines.txt";
 /// Title pipelines listed for an early start, at most.
 const EARLY_MAX: usize = 8192;
 
-fn library() -> Option<&'static Mutex<Library>> {
-    static LIBRARY: OnceLock<Option<Mutex<Library>>> = OnceLock::new();
+fn library() -> Option<&'static Library> {
+    static LIBRARY: OnceLock<Option<Library>> = OnceLock::new();
     LIBRARY
         .get_or_init(|| {
             let device = crate::host::host()?.device.cast::<ID3D12Device1>().ok()?;
@@ -78,12 +87,15 @@ fn library() -> Option<&'static Mutex<Library>> {
             if let (Some(l), Some(list)) = (library.as_mut(), read(PREBUILT_FILE))
                 && !l._blob.is_empty()
             {
-                l.prebuilt = listed(&list, &tag);
+                l.metadata
+                    .get_mut()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .prebuilt = listed(&list, &tag);
             }
             if library.is_none() {
                 tracing::warn!("no host pipeline library: pipelines are not kept");
             }
-            library.map(Mutex::new)
+            library
         })
         .as_ref()
 }
@@ -108,9 +120,8 @@ fn open(device: &ID3D12Device1, blob: Vec<u8>) -> Option<Library> {
                 return Some(Library {
                     library,
                     _blob: blob,
-                    added: 0,
-                    prebuilt: HashSet::new(),
-                    prebuilt_changed: false,
+                    added: AtomicU64::new(0),
+                    metadata: Mutex::default(),
                 });
             }
             Err(e) => {
@@ -124,9 +135,8 @@ fn open(device: &ID3D12Device1, blob: Vec<u8>) -> Option<Library> {
     Some(Library {
         library,
         _blob: Vec::new(),
-        added: 0,
-        prebuilt: HashSet::new(),
-        prebuilt_changed: false,
+        added: AtomicU64::new(0),
+        metadata: Mutex::default(),
     })
 }
 
@@ -173,7 +183,8 @@ fn listed(list: &[u8], tag: &str) -> HashSet<String> {
 /// Whether the pre-build has the title pipeline `key` in the library.
 pub(crate) fn prebuilt(key: &str) -> bool {
     library().is_some_and(|l| {
-        l.lock()
+        l.metadata
+            .lock()
             .unwrap_or_else(|e| e.into_inner())
             .prebuilt
             .contains(key)
@@ -183,9 +194,25 @@ pub(crate) fn prebuilt(key: &str) -> bool {
 /// The pre-build has the title pipeline `key` in the library now.
 pub(crate) fn note_prebuilt(key: String) {
     if let Some(l) = library() {
-        let mut l = l.lock().unwrap_or_else(|e| e.into_inner());
+        let mut l = l.metadata.lock().unwrap_or_else(|e| e.into_inner());
         l.prebuilt_changed |= l.prebuilt.insert(key);
     }
+}
+
+/// Stores must not change the library while its bytes are serialised.
+static STORES: RwLock<()> = RwLock::new(());
+static NAMES: [Mutex<()>; 64] = [const { Mutex::new(()) }; 64];
+
+fn name_stripe(name: &str) -> usize {
+    name.bytes()
+        .fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b.into()))
+        % NAMES.len()
+}
+
+fn lock_name(name: &str) -> MutexGuard<'static, ()> {
+    NAMES[name_stripe(name)]
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 /// A pipeline's name in the library: the hash of what its host
@@ -217,10 +244,11 @@ pub(crate) fn pipeline(
         MADE.fetch_add(1, Ordering::Relaxed);
         return create();
     };
-    if let Ok(pso) = load(
-        &library.lock().unwrap_or_else(|e| e.into_inner()).library,
-        PCWSTR(wide.as_ptr()),
-    ) {
+    let loaded = {
+        let _name = lock_name(name);
+        load(&library.library, PCWSTR(wide.as_ptr()))
+    };
+    if let Ok(pso) = loaded {
         LOADED.fetch_add(1, Ordering::Relaxed);
         return Ok(pso);
     }
@@ -229,11 +257,12 @@ pub(crate) fn pipeline(
     LAST.set(Some((name.to_owned(), false)));
     let pso = create()?;
     MADE.fetch_add(1, Ordering::Relaxed);
-    let mut l = library.lock().unwrap_or_else(|e| e.into_inner());
+    let _name = lock_name(name);
+    let _store = STORES.read().unwrap_or_else(|e| e.into_inner());
     // SAFETY: a live pipeline; a name already stored (a description that
     // differs) is refused, which leaves the library as it was.
-    if unsafe { l.library.StorePipeline(PCWSTR(wide.as_ptr()), &pso) }.is_ok() {
-        l.added += 1;
+    if unsafe { library.library.StorePipeline(PCWSTR(wide.as_ptr()), &pso) }.is_ok() {
+        library.added.fetch_add(1, Ordering::Relaxed);
     }
     Ok(pso)
 }
@@ -246,34 +275,70 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-/// Writes the library and the early list if pipelines were added since the
-/// last save and `SAVE_EVERY` has passed (or `now`).
+const SAVE_EVERY: Duration = Duration::from_secs(20);
+
+fn save_interval(saves: u32, cost: Duration) -> Duration {
+    SAVE_EVERY
+        .saturating_mul(1 << saves.min(16))
+        .min(Duration::from_secs(160))
+        .max(cost.saturating_mul(30).min(Duration::from_secs(600)))
+}
+
+struct Schedule {
+    next: Option<Instant>,
+    saves: u32,
+}
+
+/// Writes a dirty library snapshot and companion lists. Periodic saves skip
+/// an overlapping save; the final save waits for it to finish publishing.
 pub(crate) fn save(now: bool) {
-    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-    const SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
+    static SCHEDULE: Mutex<Schedule> = Mutex::new(Schedule {
+        next: None,
+        saves: 0,
+    });
     let (Some(dir), Some(library)) = (DIR.get(), library()) else {
         return;
     };
-    {
-        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-        if !now && last.is_some_and(|t| t.elapsed() < SAVE_EVERY) {
-            return;
+    let mut schedule = match SCHEDULE.try_lock() {
+        Ok(schedule) => schedule,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) if now => {
+            SCHEDULE.lock().unwrap_or_else(|e| e.into_inner())
         }
-        *last = Some(std::time::Instant::now());
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    if !now && schedule.next.is_some_and(|next| Instant::now() < next) {
+        return;
     }
+    let started = Instant::now();
+    let wait = if save_files(dir, library) {
+        let wait = save_interval(schedule.saves, started.elapsed());
+        schedule.saves = schedule.saves.saturating_add(1);
+        wait
+    } else {
+        SAVE_EVERY
+    };
+    schedule.next = Some(Instant::now() + wait);
+}
+
+fn save_files(dir: &std::path::Path, library: &Library) -> bool {
     let (blob, prebuilt) = {
-        let mut l = library.lock().unwrap_or_else(|e| e.into_inner());
-        if l.added == 0 && !l.prebuilt_changed && !USED_CHANGED.swap(false, Ordering::Relaxed) {
-            return;
+        let _stores = STORES.write().unwrap_or_else(|e| e.into_inner());
+        let mut l = library.metadata.lock().unwrap_or_else(|e| e.into_inner());
+        if library.added.load(Ordering::Relaxed) == 0
+            && !l.prebuilt_changed
+            && !USED_CHANGED.swap(false, Ordering::Relaxed)
+        {
+            return false;
         }
         // SAFETY: a buffer of the size the library asks for.
         let bytes = unsafe {
-            let mut bytes = vec![0u8; l.library.GetSerializedSize()];
-            l.library.Serialize(&mut bytes).map(|()| bytes)
+            let mut bytes = vec![0u8; library.library.GetSerializedSize()];
+            library.library.Serialize(&mut bytes).map(|()| bytes)
         };
         match bytes {
             Ok(bytes) => {
-                l.added = 0;
+                library.added.store(0, Ordering::Relaxed);
                 l.prebuilt_changed = false;
                 // Kept beside the bytes it holds for (also when a run adds
                 // pipelines).
@@ -281,8 +346,9 @@ pub(crate) fn save(now: bool) {
                 (bytes, prebuilt)
             }
             Err(e) => {
+                USED_CHANGED.store(true, Ordering::Relaxed);
                 tracing::warn!(error = %e, "host pipeline library not serialised");
-                return;
+                return false;
             }
         }
     };
@@ -301,6 +367,7 @@ pub(crate) fn save(now: bool) {
         });
     let (created, distinct) = created();
     let (shaders_cached, shaders_translated) = crate::shader_cache::counts();
+    let saved = written.is_ok();
     match written {
         Ok(()) => tracing::info!(
             bytes = blob.len(),
@@ -314,8 +381,20 @@ pub(crate) fn save(now: bool) {
             shaders_translated,
             "host pipeline library saved"
         ),
-        Err(e) => tracing::warn!(error = %e, "host pipeline library not saved"),
+        Err(e) => {
+            // The snapshot was removed from the dirty state before disk I/O;
+            // retry it on the next save, including both companion lists.
+            library.added.fetch_add(1, Ordering::Relaxed);
+            library
+                .metadata
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .prebuilt_changed = true;
+            USED_CHANGED.store(true, Ordering::Relaxed);
+            tracing::warn!(error = %e, "host pipeline library not saved");
+        }
     }
+    saved
 }
 
 /// Writes `bytes` to a temporary file beside `path`, then renames it over
@@ -426,6 +505,37 @@ pub(crate) fn note_used(key: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn periodic_saves_back_off_and_account_for_write_cost() {
+        assert_eq!(save_interval(0, Duration::ZERO), Duration::from_secs(20));
+        assert_eq!(save_interval(1, Duration::ZERO), Duration::from_secs(40));
+        assert_eq!(save_interval(3, Duration::ZERO), Duration::from_secs(160));
+        assert_eq!(
+            save_interval(u32::MAX, Duration::ZERO),
+            Duration::from_secs(160)
+        );
+        assert_eq!(
+            save_interval(0, Duration::from_secs(3)),
+            Duration::from_secs(90)
+        );
+        assert_eq!(save_interval(0, Duration::MAX), Duration::from_secs(600));
+    }
+
+    #[test]
+    fn same_name_operations_exclude_each_other_but_other_names_can_load() {
+        let first = name("graphics", b"root", &[b"shader"], "state");
+        let second = (0..100)
+            .map(|i| format!("{i:032x}"))
+            .find(|other| name_stripe(other) != name_stripe(&first))
+            .unwrap();
+        let first_lock = lock_name(&first);
+        assert!(NAMES[name_stripe(&first)].try_lock().is_err());
+        let second_lock = NAMES[name_stripe(&second)].try_lock().unwrap();
+        drop(second_lock);
+        drop(first_lock);
+        assert!(NAMES[name_stripe(&first)].try_lock().is_ok());
+    }
 
     #[test]
     fn names_change_with_what_goes_into_the_pipeline() {
