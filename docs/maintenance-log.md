@@ -1881,3 +1881,25 @@ The earlier TDR did not recur, but one clean run does not retire it.
 configurations 0 errors; workspace 754 passed / 0 failed / 12 existing
 ignores; asset policy 0 failures. Run logs outside the repo under
 `C:\Users\nazmi\victory-runs\`.
+
+## 2026-11-25 13:55 UTC — PR #453 (`88b34a4473`) reviewed, held
+
+The run's one refused pixel shader was `barycentrics read directly`
+(`emit/lower.rs:1414`), which `docs/isa-gaps.md` counts at 34 programs. Rather
+than invent a DXIL semantic kind for it, PR #453 — "pixel barycentrics through
+SV_Barycentrics (values and computed interpolation)" — was fetched and probed
+against `b2f08b94` in `VIctory-up2`.
+
+Its three commits are `21c585aa` (read as values), `87e9d414` (computed
+interpolation) and `88b34a44` (refuse a second perspective mode). `21c585aa`
+applies with 2 resolvable conflicts in `emit/lower.rs`. `87e9d414` conflicts at
+5 sites in `fn interp` and 3 in `io.rs`, because upstream rewrote the same
+interpolation emission: 3,877 changed lines in `lower.rs` between the PR's base
+`ffe310eb` and the integrated `940d32f6`. Upstream also grew `Interp::Interpolated`
+an `unless` list and `fn avoids` in the exact code the PR restructures.
+
+Verdict: **deferred**. Combining them by hand means writing `v_interp_p1/p2`
+evaluation in unreviewed shader semantics with no hardware check behind it; a
+wrong i or j is a silent wrong pixel, not a visible failure. The cherry-pick
+was aborted and the worktree returned to `b2f08b94`. Next action: re-port onto
+`940d32f6` and compare its output against known values before accepting.
