@@ -13,7 +13,7 @@ use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Interface, PCWSTR, w};
 
@@ -126,6 +126,9 @@ pub(crate) fn fail(what: std::fmt::Arguments) -> ! {
     }
 }
 
+/// How long one submission may take before the device is presumed lost.
+const WAIT_MS: u32 = 30_000;
+
 /// The host GPU, created on first use; `None` without one (a run then
 /// behaves as before: nothing executes).
 pub(crate) fn host() -> Option<&'static Host> {
@@ -138,6 +141,17 @@ pub(crate) fn host() -> Option<&'static Host> {
         }
     })
     .as_ref()
+}
+
+/// Whether the shared device has been removed: a test that probes the GPU
+/// cannot observe anything on it afterwards, so it reports instead of failing
+/// with an error unrelated to what it checks. A real run stops at the first
+/// removal anyway (see [`Host::run`]).
+#[cfg(test)]
+pub(crate) fn device_gone() -> bool {
+    let Some(host) = host() else { return true };
+    // SAFETY: a plain query.
+    unsafe { host.device.GetDeviceRemovedReason() }.is_err()
 }
 
 fn create() -> windows::core::Result<Host> {
@@ -713,7 +727,21 @@ impl Host {
                     .and_then(|()| self.fence.SetEventOnCompletion(*submitted, self.event));
                 match waited {
                     Ok(()) => {
-                        WaitForSingleObject(self.event, INFINITE);
+                        // Bounded: a device removed mid-submission never
+                        // signals its fence, and an unbounded wait then hangs
+                        // the process instead of reporting the loss. A world
+                        // frame is the slowest submission this project makes;
+                        // 30 s is far past it.
+                        let ms = WaitForSingleObject(self.event, WAIT_MS);
+                        if ms == windows::Win32::Foundation::WAIT_TIMEOUT {
+                            let reason = self.device.GetDeviceRemovedReason();
+                            tracing::error!(
+                                error = %reason.map_or_else(|e| e.to_string(), |()| "not removed".into()),
+                                ms = WAIT_MS,
+                                "host submission did not finish; the device may be lost"
+                            );
+                            break;
+                        }
                     }
                     Err(e) => tracing::warn!(error = %e, "host submission not waited for"),
                 }
