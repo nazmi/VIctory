@@ -203,6 +203,20 @@ fn fit(parent: HWND, x: i32, y: i32, width: i32, height: i32) -> (i32, i32, i32,
     let known =
         unsafe { wm::SystemParametersInfoW(wm::SPI_GETWORKAREA, 0, (&raw mut area).cast(), 0) };
     let limit = window_limit();
+    // `VICTORY_RENDER_SCALE`: the picture is that much smaller, so a window
+    // the console's size would show it stretched. Ask for the smaller one;
+    // the display mode the title sees is unchanged (it ignores it anyway).
+    let scale = victory_gpu::console::render_scale();
+    let (width, height) = if scale < 1.0 {
+        let shrunk = (
+            (f64::from(width) * f64::from(scale)).round() as i32,
+            (f64::from(height) * f64::from(scale)).round() as i32,
+        );
+        tracing::info!(width, height, to = ?shrunk, scale, "title window scaled with the render scale");
+        shrunk
+    } else {
+        (width, height)
+    };
     let fitted = fit_with_limit(&area, width, height, limit);
     if !parent.is_null() || known == 0 || fitted == (width, height) {
         return (x, y, width, height);

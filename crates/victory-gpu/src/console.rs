@@ -56,3 +56,40 @@ pub fn current() -> Console {
         Console::SeriesX
     }
 }
+
+/// How much smaller than the title asks to render its render targets and
+/// depth targets (`VICTORY_RENDER_SCALE`, 0 < ratio <= 1; 1 by default).
+///
+/// The title picks its render size from the console and ignores what the
+/// display and the window say, so on a host that cannot afford 4K the only
+/// lever left is the allocations themselves. Every render target and depth
+/// target is made `ratio` times as large, and the window, the viewports,
+/// the scissor rectangles and the texture copy boxes are scaled to match, so
+/// the frame stays coherent.
+pub fn render_scale() -> f32 {
+    static SCALE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| {
+        let Ok(text) = std::env::var("VICTORY_RENDER_SCALE") else {
+            return 1.0;
+        };
+        match text.trim().parse::<f32>() {
+            Ok(v) if v > 0.0 && v <= 1.0 => v,
+            _ => {
+                tracing::warn!(
+                    value = %text,
+                    "ignoring invalid VICTORY_RENDER_SCALE; expected a ratio above 0 and at most 1"
+                );
+                1.0
+            }
+        }
+    })
+}
+
+/// `value` scaled by the render scale, at least 1.
+pub fn scaled(value: u64) -> u64 {
+    let scale = render_scale();
+    if scale >= 1.0 {
+        return value;
+    }
+    ((value as f64 * f64::from(scale)).round() as u64).max(1)
+}
