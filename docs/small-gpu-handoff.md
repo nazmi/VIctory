@@ -68,3 +68,48 @@ and combined checks on the result before using it as the main build. Then
 compare the same scene under Series S on the 780M using texture totals and
 the new budget lines. Title-run stability and sustained streaming remain
 unverified by this branch.
+
+## Continued 2026-11-25: one cache closed, one made visible
+
+The branch is merged into `integration/maintenance` (`0071544e`, merge parents
+`7acc3a16` and `35e7bf11`) and pushed. It merged clean: no file overlap with
+the ztrx work that landed in between (that touched `crash.rs` and its own
+assessment doc). Combined gate on the merge: fmt 0 differing, both Clippy
+configurations 0 errors, policy 228 files, workspace **764 passed, 0 failed**.
+
+**Closed: `LOOSE` in `shadow.rs`** (`d592c4de`). Windows of title memory
+outside any buffer were held as strong `Arc<Shadow>`s for the rest of the run —
+one 4 MiB copy per window ever touched. They are now held weakly and the map is
+pruned of dead entries as it grows, which is the pattern `EXACT` in the same
+file already uses for per-view copies. The invariant that makes it safe is the
+one that comment states: a copy is found again for as long as anything shows
+it. A heap slot, a bindless hull and a list with a write to copy back all hold
+the `Arc`, so an entry only dies when no consumer can be looking at it.
+
+Dropping a copy loses nothing: a `Shadow` starts empty, its bytes come from a
+`refresh` before the read that needs them, and a pending GPU write keeps the
+`Arc` alive through its list.
+
+Tested by holding a window, asking again (the same copy returns), dropping it,
+asserting it is no longer listed, and asserting it is made afresh on the next
+ask. Negative control: leaking one strong reference fails the test with "the
+window is still held after its last user dropped it".
+
+**Made visible: `PLACED_TEXTURES`** (`28bcc31f`). Placed textures are created
+by `texture_at`, which bypasses `Texture::new`, so `TEXTURES`/`TEXTURE_BYTES`
+never counted them and their growth was absent from the memory line. They are
+counted now, reported as `placed textures N (never released)`. The count only,
+not the bytes: a byte figure needs a `D3D12_RESOURCE_DESC` and this module has
+its own description type, so the number would be a guess.
+
+**Not attempted, deliberately.** Releasing placed textures as a cache eviction
+would dangle a descriptor: every entry is a COM resource that heap slots made
+from it still point at. Doing it properly needs to know which textures live
+descriptors still show — the ownership coordination this handoff already
+names. Also untouched: texture upload staging retained beyond the texture
+bytes, and the descriptor and barrier paths that materialize textures before a
+draw (so only resources no host operation touches avoid allocation).
+
+**Still unverified, unchanged by this work:** stable world play, and any
+measured memory reduction. Both need a title run, and this machine's display
+driver has been removed as hung three times.
