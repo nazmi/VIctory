@@ -965,3 +965,6 @@ mod tests {
         assert_eq!(parse_skip_stages("vertex,nonsense"), ["vertex"]);
     }
 }
+
+#[cfg(all(test, windows))]
+mod depth_bounds_test;
