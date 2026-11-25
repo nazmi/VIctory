@@ -1067,16 +1067,25 @@ mod tests {
     #[test]
     fn extended_paths_clean_dot_parts() {
         let dir = tempfile::tempdir().unwrap();
-        mount_at('J', dir.path());
+        let letter = mount(dir.path()).unwrap();
         let tr = |s: &str| translate(&w(s)[..s.encode_utf16().count()]).map(|v| text(&v));
         let root = dir.path().display();
         assert_eq!(
-            tr(r"\\?\J:/a/./b/../f.txt"),
+            tr(&format!(r"\\?\{letter}:/a/./b/../f.txt")),
             Some(format!(r"\\?\{root}\a\f.txt"))
         );
-        assert_eq!(tr(r"\\?\J:"), Some(format!(r"\\?\{root}\")));
-        assert_eq!(tr(r"\\?\J:name"), Some(format!(r"\\?\{root}\name")));
-        assert_eq!(tr(r"\\?\J:/a/b"), Some(format!(r"\\?\{root}\a\b")));
+        assert_eq!(
+            tr(&format!(r"\\?\{letter}:")),
+            Some(format!(r"\\?\{root}\"))
+        );
+        assert_eq!(
+            tr(&format!(r"\\?\{letter}:name")),
+            Some(format!(r"\\?\{root}\name"))
+        );
+        assert_eq!(
+            tr(&format!(r"\\?\{letter}:/a/b")),
+            Some(format!(r"\\?\{root}\a\b"))
+        );
     }
 
     #[test]
@@ -1088,12 +1097,21 @@ mod tests {
             (r"\\server\share", r"\\?\UNC\server\share"),
             (r"\\?\UNC\server\share", r"\\?\UNC\server\share"),
         ] {
-            mount_at('J', Path::new(root));
+            let letter = mount(Path::new(root)).unwrap();
             for tail in ["", "/", "/.", "/..", "/a/.."] {
-                assert_eq!(tr(&format!(r"\\?\J:{tail}")), Some(format!(r"{expected}\")));
+                assert_eq!(
+                    tr(&format!(r"\\?\{letter}:{tail}")),
+                    Some(format!(r"{expected}\"))
+                );
             }
-            assert_eq!(tr(r"\\?\J:/a/"), Some(format!(r"{expected}\a\")));
-            assert_eq!(tr(r"\\?\J:/a/./b/../f"), Some(format!(r"{expected}\a\f")));
+            assert_eq!(
+                tr(&format!(r"\\?\{letter}:/a/")),
+                Some(format!(r"{expected}\a\"))
+            );
+            assert_eq!(
+                tr(&format!(r"\\?\{letter}:/a/./b/../f")),
+                Some(format!(r"{expected}\a\f"))
+            );
         }
     }
 }
