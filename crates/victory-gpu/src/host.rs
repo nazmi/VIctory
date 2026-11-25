@@ -323,15 +323,21 @@ pub(crate) mod tests {
         }
         static SERIAL: Mutex<()> = Mutex::new(());
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let mut child = test_child(name);
+        let mut child = test_child(name, false);
         let status = wait_child(&mut child, std::time::Duration::from_secs(60))
             .unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(status.success(), "{name}: WARP subprocess failed: {status}");
         false
     }
 
-    fn test_child(name: &str) -> std::process::Child {
-        std::process::Command::new(std::env::current_exe().unwrap())
+    fn test_child(name: &str, quiet: bool) -> std::process::Child {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        if quiet {
+            command
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+        }
+        command
             .args(["--exact", name, "--nocapture", "--test-threads=1"])
             .env("VICTORY_GPU_TEST_CHILD", name)
             .spawn()
@@ -380,7 +386,7 @@ pub(crate) mod tests {
             std::thread::sleep(std::time::Duration::from_secs(60));
             return;
         }
-        let mut child = test_child(NAME);
+        let mut child = test_child(NAME, true);
         assert!(wait_child(&mut child, std::time::Duration::from_millis(100)).is_err());
         assert!(child.try_wait().unwrap().is_some());
     }
@@ -391,7 +397,7 @@ pub(crate) mod tests {
         if std::env::var("VICTORY_GPU_TEST_CHILD").as_deref() == Ok(NAME) {
             panic!("synthetic child failure");
         }
-        let mut child = test_child(NAME);
+        let mut child = test_child(NAME, true);
         assert!(
             !wait_child(&mut child, std::time::Duration::from_secs(10))
                 .unwrap()
