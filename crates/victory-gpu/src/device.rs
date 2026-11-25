@@ -416,13 +416,10 @@ static FUNCTIONS: Table<160> = {
     f[27] = resource::create_committed as *const (); // 0xd8
     f[28] = resource::create_heap as *const (); // 0xe0
     f[29] = resource::create_placed as *const (); // 0xe8
-    f[34] = object::ignore as *const (); // 0x110 MakeResident: memory is always resident
-    f[35] = object::ignore as *const (); // 0x118 Evict: memory is never evicted
     f[36] = fence::create as *const (); // 0x120
     f[37] = removed_reason as *const (); // 0x128
     f[38] = resource::copyable_footprints as *const (); // 0x130
     f[39] = query::create as *const (); // 0x138
-    f[40] = object::ignore as *const (); // 0x140 SetStablePowerState: a profiling setting
     f[41] = signature::create as *const (); // 0x148
     f[48] = queue::create_x as *const (); // 0x180
     f[61] = descriptor::create_sampler_x as *const (); // 0x1e8
@@ -595,31 +592,6 @@ mod tests {
             check(device, 8, waves.as_mut_ptr().cast(), 16),
             E_INVALIDARG
         );
-    }
-
-    #[test]
-    fn make_resident_succeeds_without_doing_anything() {
-        type MakeResident = extern "system" fn(This, u32, *const This) -> HRESULT;
-        let device = device();
-        let make_resident = slot::<MakeResident>(device, 0x110);
-        assert_eq!(make_resident(device, 0, std::ptr::null()), S_OK);
-    }
-
-    #[test]
-    fn evict_succeeds_without_doing_anything() {
-        type Evict = extern "system" fn(This, u32, *const This) -> HRESULT;
-        let device = device();
-        let evict = slot::<Evict>(device, 0x118);
-        assert_eq!(evict(device, 0, std::ptr::null()), S_OK);
-    }
-
-    #[test]
-    fn set_stable_power_state_is_accepted() {
-        type SetStablePowerState = extern "system" fn(This, i32) -> HRESULT;
-        let device = device();
-        let set = slot::<SetStablePowerState>(device, 0x140);
-        assert_eq!(set(device, 1), S_OK);
-        assert_eq!(set(device, 0), S_OK);
     }
 
     #[test]

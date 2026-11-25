@@ -125,30 +125,21 @@ fn verbatim(root: &[u16], tail: &[u16]) -> Vec<u16> {
     while out.last() == Some(&backslash) {
         out.pop();
     }
-    for part in parts(tail) {
-        out.push(backslash);
-        out.extend_from_slice(part);
-    }
-    out
-}
-
-const PARENT: [u16; 2] = [b'.' as u16; 2];
-
-/// The names in the title's `tail`, cleaned up as the host would on a drive
-/// of its own: no empty parts, no `.`, and `..` takes the name before it,
-/// or nothing at the root.
-fn parts(tail: &[u16]) -> Vec<&[u16]> {
     let dot = u16::from(b'.');
     let mut parts: Vec<&[u16]> = Vec::new();
     for part in tail.split(|c| SEPARATORS.contains(c)) {
         match part {
             [] => {}
             [d] if *d == dot => {}
-            _ if part == PARENT => drop(parts.pop()),
+            [d, e] if [*d, *e] == [dot; 2] => drop(parts.pop()),
             _ => parts.push(part),
         }
     }
-    parts
+    for part in parts {
+        out.push(backslash);
+        out.extend_from_slice(part);
+    }
+    out
 }
 
 /// The host path, NUL-terminated, for `path` (without its NUL) if it is on
@@ -169,40 +160,8 @@ pub(crate) fn translate(path: &[u16]) -> Option<Vec<u16>> {
     let drives = drives();
     let (_, root) = drives.iter().find(|(l, _)| *l == letter)?;
     let tail = &rest[2..];
-    if !prefix.is_empty() {
-        // Extended paths disable host cleanup. Resolve dot parts against
-        // the virtual root, as for long paths, and keep root separators.
-        let mut out = verbatim(root, tail);
-        if parts(tail).is_empty() || tail.last().is_some_and(|c| SEPARATORS.contains(c)) {
-            out.push(b'\\'.into());
-        }
-        out.push(0);
-        return Some(out);
-    }
     if prefix.is_empty() && root.len() + tail.len() >= LONG {
         let mut out = verbatim(root, tail);
-        out.push(0);
-        return Some(out);
-    }
-    // The host resolves `..` against the host folder, which has a parent;
-    // to the title the root is a drive's, where `..` stops. So those are
-    // resolved here. (After `\\?\` they are names, to the host as well.)
-    let separator = |c: &u16| SEPARATORS.contains(c);
-    if prefix.is_empty() && tail.split(separator).any(|part| part == PARENT) {
-        let backslash = u16::from(b'\\');
-        let mut out = root.to_vec();
-        while out.last().is_some_and(separator) {
-            out.pop();
-        }
-        let parts = parts(tail);
-        for part in &parts {
-            out.push(backslash);
-            out.extend_from_slice(part);
-        }
-        // The root itself, and a path that ended in a separator, end in one.
-        if parts.is_empty() || tail.last().is_some_and(separator) {
-            out.push(backslash);
-        }
         out.push(0);
         return Some(out);
     }
@@ -567,7 +526,7 @@ pub extern "C" fn _wfsopen(path: *const u16, mode: *const u16, share: i32) -> Fi
 // fail there instead of faulting into its handler; Grand Theft Auto VI's
 // synchronous reads (title+0x313fc0) read straight into 4 KiB-aligned
 // destinations and retry a failed `ReadFile` forever. So the destination
-// is opened first, and kept open until the read is done.
+// is opened first.
 
 pub extern "system" fn ReadFile(
     file: *mut c_void,
@@ -576,18 +535,10 @@ pub extern "system" fn ReadFile(
     read: *mut u32,
     overlapped: *mut c_void,
 ) -> i32 {
-    use windows_sys::Win32::Foundation::{ERROR_IO_PENDING, GetLastError};
-    let writing = victory_gpu::kernel_will_write(buffer as usize, len as usize);
-    let done = host!("kernel32.dll", "ReadFile": extern "system" fn(*mut c_void, *mut u8, u32, *mut u32, *mut c_void) -> i32)(
+    let _writing = victory_gpu::kernel_will_write(buffer as usize, len as usize);
+    host!("kernel32.dll", "ReadFile": extern "system" fn(*mut c_void, *mut u8, u32, *mut u32, *mut c_void) -> i32)(
         file, buffer, len, read, overlapped,
-    );
-    // shortcut: an overlapped read still pending keeps its blocks open for
-    // good (they are copied at every refresh), since its end is not seen.
-    // SAFETY: reads the thread's last error, which stays as it is.
-    if done == 0 && !overlapped.is_null() && unsafe { GetLastError() } == ERROR_IO_PENDING {
-        std::mem::forget(writing);
-    }
-    done
+    )
 }
 
 /// The host CRT reads large requests straight into the caller's buffer.
@@ -874,59 +825,6 @@ mod tests {
         assert_eq!(host, Some(cwd.join("a.rpf").display().to_string()));
     }
 
-    /// To the title a virtual drive's root is a drive root, where `..`
-    /// stops; the host folder behind it has a parent.
-    #[test]
-    fn parent_parts_stop_at_the_drive_root() {
-        let dir = tempfile::tempdir().unwrap();
-        let title = dir.path().join("title");
-        std::fs::create_dir(&title).unwrap();
-        let root = title.to_string_lossy().into_owned();
-        let letter = mount(&title).unwrap();
-        // Through a call: the file lands in the drive's folder, not beside it.
-        const GENERIC_WRITE: u32 = 0x4000_0000;
-        const CREATE_ALWAYS: u32 = 2;
-        let close = host!("kernel32.dll", "CloseHandle": extern "system" fn(Handle) -> i32);
-        let null = std::ptr::null_mut();
-        let path = w(&format!(r"{letter}:\..\outside.bin"));
-        let h = CreateFileW(
-            path.as_ptr(),
-            GENERIC_WRITE,
-            0,
-            null,
-            CREATE_ALWAYS,
-            0,
-            null,
-        );
-        assert_ne!(h as isize, -1);
-        close(h);
-        assert!(!dir.path().join("outside.bin").exists(), "left the drive");
-        assert!(title.join("outside.bin").is_file());
-
-        let tr = |s: String| translate(&w(&s)[..s.encode_utf16().count()]).map(|v| text(&v));
-        for (path, host) in [
-            (r":\..\outside.bin", r"\outside.bin"),
-            (r":/../outside.bin", r"\outside.bin"),
-            (r":..\outside.bin", r"\outside.bin"),
-            (r":\a\..\..\b\c.bin", r"\b\c.bin"),
-            (r":\a\.\..\..\..\b\", r"\b\"),
-            (r":\..", r"\"),
-            // Inside the drive: the file it always named.
-            (r":\a\..\b.bin", r"\b.bin"),
-        ] {
-            assert_eq!(
-                tr(format!("{letter}{path}")),
-                Some(format!("{root}{host}")),
-                "{path}"
-            );
-        }
-        // Names that only contain dots are names.
-        assert_eq!(
-            tr(format!(r"{letter}:\a..b\..c")),
-            Some(format!(r"{root}\a..b\..c"))
-        );
-    }
-
     #[test]
     fn long_title_paths_work_on_the_host() {
         let dir = tempfile::tempdir().unwrap();
@@ -1060,58 +958,5 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, ["present.txt"]);
-    }
-
-    /// A title that already uses `\\?\` must get the same clean-up as a
-    /// long non-extended path: that form turns off the host's own resolution.
-    #[test]
-    fn extended_paths_clean_dot_parts() {
-        let dir = tempfile::tempdir().unwrap();
-        let letter = mount(dir.path()).unwrap();
-        let tr = |s: &str| translate(&w(s)[..s.encode_utf16().count()]).map(|v| text(&v));
-        let root = dir.path().display();
-        assert_eq!(
-            tr(&format!(r"\\?\{letter}:/a/./b/../f.txt")),
-            Some(format!(r"\\?\{root}\a\f.txt"))
-        );
-        assert_eq!(
-            tr(&format!(r"\\?\{letter}:")),
-            Some(format!(r"\\?\{root}\"))
-        );
-        assert_eq!(
-            tr(&format!(r"\\?\{letter}:name")),
-            Some(format!(r"\\?\{root}\name"))
-        );
-        assert_eq!(
-            tr(&format!(r"\\?\{letter}:/a/b")),
-            Some(format!(r"\\?\{root}\a\b"))
-        );
-    }
-
-    #[test]
-    fn extended_paths_keep_host_root_forms() {
-        let tr = |s: &str| translate(&s.encode_utf16().collect::<Vec<_>>()).map(|v| text(&v));
-        for (root, expected) in [
-            (r"C:\", r"\\?\C:"),
-            (r"\\?\C:\", r"\\?\C:"),
-            (r"\\server\share", r"\\?\UNC\server\share"),
-            (r"\\?\UNC\server\share", r"\\?\UNC\server\share"),
-        ] {
-            let letter = mount(Path::new(root)).unwrap();
-            for tail in ["", "/", "/.", "/..", "/a/.."] {
-                assert_eq!(
-                    tr(&format!(r"\\?\{letter}:{tail}")),
-                    Some(format!(r"{expected}\"))
-                );
-            }
-            assert_eq!(
-                tr(&format!(r"\\?\{letter}:/a/")),
-                Some(format!(r"{expected}\a\"))
-            );
-            assert_eq!(
-                tr(&format!(r"\\?\{letter}:/a/./b/../f")),
-                Some(format!(r"{expected}\a\f"))
-            );
-        }
     }
 }

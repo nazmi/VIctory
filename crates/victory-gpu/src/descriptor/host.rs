@@ -44,6 +44,12 @@ pub(crate) struct HostHeap {
     /// byte stride of the buffer view there, 0 for none. Mapped at the
     /// address kept beside it.
     strides: Option<(ID3D12Resource, usize)>,
+    /// View heaps: the view-mark table translated shaders read
+    /// (`victory_shader::emit`, "Write marks"), two dwords per slot as the
+    /// stride table has one: the mark bit and phase of the unordered buffer
+    /// view there, `VIEW_MARK_NONE` for none. Mapped at the address kept
+    /// beside it.
+    marks: Option<(ID3D12Resource, usize)>,
     /// Per title slot, the title address of the buffer view it holds, as a
     /// buffer descriptor's dwords 0 and 1 (shaders reading a descriptor's
     /// address as data, `crate::memory`): the buffer, its mapping and host
@@ -53,21 +59,36 @@ pub(crate) struct HostHeap {
     pub(crate) viewed: std::sync::Arc<crate::bindless::Viewed>,
 }
 
+/// Host heaps' GPU ranges (start, bytes, bytes per slot, sampler), for
+/// device-removed reports: a shader indexing a heap past its end faults.
+static GPU_RANGES: Mutex<Vec<(u64, u64, u64, bool)>> = Mutex::new(Vec::new());
+
+/// For device-removed reports: where host GPU address `va` lies against
+/// the host descriptor heaps.
+pub(crate) fn near_heaps(va: u64) -> String {
+    let ranges = GPU_RANGES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut text = String::new();
+    for &(start, bytes, step, sampler) in ranges.iter() {
+        let kind = if sampler { "sampler" } else { "view" };
+        let place = if va < start {
+            format!("{:#x} below", start - va)
+        } else if va < start + bytes {
+            format!("inside, slot {}", (va - start) / step)
+        } else {
+            format!(
+                "{:#x} past its end (slot {})",
+                va - start - bytes,
+                (va - start) / step
+            )
+        };
+        text.push_str(&format!("; {kind} heap {start:#x}+{bytes:#x}: {place}"));
+    }
+    text
+}
+
 /// The host's limit for shader-visible view heaps on resource binding
 /// tiers 1 and 2; tier 3 hardware may take more.
 const PORTABLE_VIEWS: u32 = 1_000_000;
-
-/// The D3D12 limit for shader-visible sampler heaps, on every binding tier.
-const PORTABLE_SAMPLERS: u32 = 2_048;
-
-/// Slots a sampler heap gets for a title request: the host's 2048 limit at
-/// most. Translated shaders clamp their sampler indices below
-/// `HEAP_SAMPLERS`, which is the same number, so a capped heap loses no slot
-/// a shader can name — while an uncapped request for more would fail heap
-/// creation and lose every sampler binding at once.
-fn sampler_slots(requested: u32) -> u32 {
-    requested.min(PORTABLE_SAMPLERS)
-}
 
 /// Slots past the title's in a view heap, for tables a draw needs made
 /// afresh (constant buffers copied per draw). A list holds the slots it
@@ -107,6 +128,17 @@ impl HostHeap {
             .then(|| host.upload_buffer(u64::from(count.max(victory_shader::emit::HEAP_VIEWS)) * 4))
             .flatten()
             .map(|(buffer, data)| (buffer, data as usize));
+        let marks = (!sampler)
+            .then(|| {
+                let bytes = u64::from(count.max(victory_shader::emit::HEAP_VIEWS)) * 8;
+                let (buffer, data) = host.upload_buffer(bytes)?;
+                crate::host::name(&buffer, || "view marks".into());
+                // Every slot unmarked (all ones) until a view is made there.
+                // SAFETY: our mapped buffer of `bytes` bytes.
+                unsafe { std::ptr::write_bytes(data, 0xFF, bytes as usize) };
+                Some((buffer, data as usize))
+            })
+            .flatten();
         // The larger dynamic range only where the host takes it on top of
         // every title slot; else the smaller one, and the cap after that.
         // Translated shaders clamp their indices below `HEAP_VIEWS` or
@@ -115,23 +147,9 @@ impl HostHeap {
             victory_shader::emit::HEAP_VIEWS,
             victory_shader::emit::HEAP_SAMPLERS,
         );
-        let requested = count;
         let (heap, count, extra) = if sampler {
-            // D3D12 caps shader-visible sampler heaps at 2048 on every binding
-            // tier; translated shaders already clamp their sampler indices
-            // below `HEAP_SAMPLERS` (the same 2048), so capping the host heap
-            // costs nothing a shader can reach and avoids losing the heap
-            // entirely when the title asks for more.
-            let supported = sampler_slots(count);
-            if supported < count {
-                tracing::warn!(
-                    requested = count,
-                    supported,
-                    "host sampler heap capped; higher sampler slots are unavailable"
-                );
-            }
-            match make(supported.max(samplers)) {
-                Ok(heap) => (heap, supported, 0),
+            match make(count.max(samplers)) {
+                Ok(heap) => (heap, count, 0),
                 Err(e) => {
                     tracing::warn!(error = %e, count, sampler, "no host descriptor heap");
                     return None;
@@ -167,15 +185,20 @@ impl HostHeap {
                 host.device.GetDescriptorHandleIncrementSize(kind),
             )
         };
-        tracing::debug!(requested, count, sampler, "host descriptor heap");
-        // DRED identifies matching allocations by name. Descriptor handles
-        // have their own increment and cannot locate a faulting GPU VA.
-        crate::host::name(&heap, || {
-            let kind = if sampler { "sampler" } else { "view" };
-            format!("{kind} descriptor heap ({} slots)", count + extra)
-        });
-        // SAFETY: a live heap.
-        let total = unsafe { heap.GetDesc().NumDescriptors };
+        tracing::debug!(count, sampler, "host descriptor heap");
+        // SAFETY: a live shader-visible heap.
+        let (gpu, total) = unsafe {
+            (
+                heap.GetGPUDescriptorHandleForHeapStart().ptr,
+                heap.GetDesc().NumDescriptors,
+            )
+        };
+        GPU_RANGES.lock().unwrap_or_else(|e| e.into_inner()).push((
+            gpu,
+            u64::from(total) * u64::from(step),
+            u64::from(step),
+            sampler,
+        ));
         let h = HostHeap {
             heap,
             cpu,
@@ -192,6 +215,7 @@ impl HostHeap {
                 _ => total,
             },
             strides,
+            marks,
             addresses: std::sync::OnceLock::new(),
             viewed: Default::default(),
         };
@@ -392,12 +416,13 @@ impl HostHeap {
     /// Makes slot `index` (a dynamic one) from `view`; a null view if the
     /// host cannot.
     pub(crate) fn make_at(&self, index: u32, view: &View) {
-        let kept = make(view, self.cpu(index));
+        let (kept, mark) = make_marked(view, self.cpu(index));
         if kept.is_none() {
             null_for(view, self.cpu(index));
         }
         self.keep(index, kept.flatten());
         self.set_stride(index, Some(view));
+        self.set_mark(index, mark);
     }
 
     /// Makes slot `index` (a dynamic one) a raw view, shader resource or
@@ -461,6 +486,7 @@ impl HostHeap {
         }
         self.keep(index, buffer.map(|b| (b.clone(), None)));
         self.write_stride(index, 4);
+        self.set_mark(index, None);
     }
 
     /// Makes slot `index` read nothing: a null view, or a plain sampler.
@@ -472,6 +498,7 @@ impl HostHeap {
         }
         self.keep(index, None);
         self.set_stride(index, None);
+        self.set_mark(index, None);
         if index < self.count {
             self.viewed.set(index, None, false);
         }
@@ -502,6 +529,29 @@ impl HostHeap {
     /// The view-stride table, for root SRV `VIEW_STRIDES`.
     pub(crate) fn strides(&self) -> Option<&ID3D12Resource> {
         self.strides.as_ref().map(|(buffer, _)| buffer)
+    }
+
+    /// Enters slot `index`'s view-mark entry: the mark bit and phase of the
+    /// unordered buffer view there ([`crate::shadow::Shadow::mark_entry`]),
+    /// none for anything else.
+    pub(crate) fn set_mark(&self, index: u32, entry: Option<(u32, u32)>) {
+        let Some((_, data)) = &self.marks else { return };
+        if index >= self.count.max(victory_shader::emit::HEAP_VIEWS) {
+            return;
+        }
+        let entry = entry.unwrap_or((victory_shader::emit::VIEW_MARK_NONE, 0));
+        // SAFETY: two dwords of the mapped table, which has two per slot
+        // below the larger of the title's count and `HEAP_VIEWS`.
+        unsafe {
+            let at = (*data as *mut u32).add(2 * index as usize);
+            at.write_volatile(entry.0);
+            at.add(1).write_volatile(entry.1);
+        }
+    }
+
+    /// The view-mark table, for the root SRV of shaders marking their writes.
+    pub(crate) fn marks(&self) -> Option<&ID3D12Resource> {
+        self.marks.as_ref().map(|(buffer, _)| buffer)
     }
 
     /// Slot `index` now views `resource` (or nothing of the host's).
@@ -607,6 +657,9 @@ impl HostHeap {
         self.keep(index + 1, buffer.map(|b| (b.clone(), None)));
         self.write_stride(index, 4);
         self.write_stride(index + 1, 4);
+        // Writes through these are title memory's, marked in its page table.
+        self.set_mark(index, None);
+        self.set_mark(index + 1, None);
     }
 
     /// The shader-visible handle of slot `index`.
@@ -670,11 +723,12 @@ impl HostHeap {
             // ran the host out of memory (run b2).
             let later = !for_draw && is_placed_texture(&view);
             made[index as usize] = if later { 0 } else { key };
-            let kept = if later {
-                None
+            let (kept, mark) = if later {
+                (None, None)
             } else {
-                make(&view, self.cpu(index))
+                make_marked(&view, self.cpu(index))
             };
+            self.set_mark(index, mark);
             if kept.is_none() && !self.sampler {
                 null_for(&view, self.cpu(index));
             }
@@ -731,51 +785,10 @@ macro_rules! once {
     }};
 }
 
-/// The words of a shader view of a 1D texture or 1D array as the 2D view
-/// of the host's copy (`resource::host_dimension`): same mips and slices,
-/// plane 0. The 2D forms have `PlaneSlice` before the clamp (word 6 of a
-/// 2D view, word 8 of a 2D array).
-fn srv_words_2d(words: &mut [u32; 10]) {
-    const TEXTURE1D: u32 = 2;
-    const TEXTURE1DARRAY: u32 = 3;
-    match words[1] {
-        TEXTURE1D => {
-            words[1] = D3D12_SRV_DIMENSION_TEXTURE2D.0 as u32;
-            words[7] = words[6];
-            words[6] = 0;
-        }
-        TEXTURE1DARRAY => {
-            words[1] = D3D12_SRV_DIMENSION_TEXTURE2DARRAY.0 as u32;
-            words[9] = words[8];
-            words[8] = 0;
-        }
-        _ => {}
-    }
-}
-
-/// [`srv_words_2d`] for unordered access views: the 2D forms add
-/// `PlaneSlice` at their end.
-fn uav_words_2d(words: &mut [u32; 10]) {
-    const TEXTURE1D: u32 = 2;
-    const TEXTURE1DARRAY: u32 = 3;
-    match words[1] {
-        TEXTURE1D => {
-            words[1] = D3D12_UAV_DIMENSION_TEXTURE2D.0 as u32;
-            words[3] = 0;
-        }
-        TEXTURE1DARRAY => {
-            words[1] = D3D12_UAV_DIMENSION_TEXTURE2DARRAY.0 as u32;
-            words[5] = 0;
-        }
-        _ => {}
-    }
-}
-
 /// A view description from its words, with the format as the host has it.
 fn srv_desc(words: &[u32; 10]) -> D3D12_SHADER_RESOURCE_VIEW_DESC {
     let mut words = *words;
     words[0] = crate::resource::pc_format(words[0]);
-    srv_words_2d(&mut words);
     // SAFETY: 40 bytes in the host's layout.
     unsafe {
         std::ptr::from_ref(&words)
@@ -787,7 +800,6 @@ fn srv_desc(words: &[u32; 10]) -> D3D12_SHADER_RESOURCE_VIEW_DESC {
 fn uav_desc(words: &[u32; 10]) -> D3D12_UNORDERED_ACCESS_VIEW_DESC {
     let mut words = *words;
     words[0] = crate::resource::pc_format(words[0]);
-    uav_words_2d(&mut words);
     // SAFETY: 40 bytes in the host's layout.
     unsafe {
         std::ptr::from_ref(&words)
@@ -863,24 +875,22 @@ fn write_address(data: usize, index: usize, view: Option<&View>) {
 /// The title memory a buffer shader or unordered access view reads: its
 /// address and length.
 pub(crate) fn buffer_range(view: &View) -> Option<(u64, u64)> {
-    let (base, bytes, words): (u64, u64, &[u32; 10]) = match view {
-        View::Shader(r, Some(desc)) => {
-            let (at, bytes) = crate::resource::buffer_bytes(*r as crate::object::This)?;
-            (at as u64, bytes, desc)
-        }
+    let (base, words): (u64, &[u32; 10]) = match view {
+        View::Shader(r, Some(desc)) => (
+            crate::resource::buffer_bytes(*r as crate::object::This)?.0 as u64,
+            desc,
+        ),
         View::Placed(false, resource, desc) if resource[0] == 1 => (
             u64::from(desc[10]) | u64::from(desc[11]) << 32,
-            u64::from(resource[4]) | u64::from(resource[5]) << 32,
             desc[..10].try_into().ok()?,
         ),
         View::Unordered(r, _, Some(desc)) => {
-            let (at, bytes) = crate::resource::buffer_bytes(*r as crate::object::This)?;
-            return unordered_range(at as u64, bytes, desc);
+            let base = crate::resource::buffer_bytes(*r as crate::object::This)?.0 as u64;
+            return unordered_range(base, desc);
         }
         View::Placed(true, resource, desc) if resource[0] == 1 => {
             let base = u64::from(desc[10]) | u64::from(desc[11]) << 32;
-            let bytes = u64::from(resource[4]) | u64::from(resource[5]) << 32;
-            return unordered_range(base, bytes, desc[..10].try_into().ok()?);
+            return unordered_range(base, desc[..10].try_into().ok()?);
         }
         _ => return None,
     };
@@ -888,24 +898,10 @@ pub(crate) fn buffer_range(view: &View) -> Option<(u64, u64)> {
     let element = element_size(&desc);
     // SAFETY: a buffer view's union member.
     let buffer = unsafe { desc.Anonymous.Buffer };
-    let count = counted(buffer.NumElements, buffer.FirstElement, element, bytes);
     Some((
         base + buffer.FirstElement * element,
-        u64::from(count) * element,
+        u64::from(buffer.NumElements) * element,
     ))
-}
-
-/// A buffer view's element count, with a zero count read as the console
-/// reads it: to the end of the buffer (from its first element), at least
-/// one element. The host refuses a view of no elements, and removes the
-/// device for it, so a title's zero count is filled from the buffer's
-/// bytes wherever a host view (or the range it reads) is made.
-fn counted(count: u32, first: u64, element: u64, bytes: u64) -> u32 {
-    if count != 0 || element == 0 {
-        return count;
-    }
-    let first = first * element;
-    (bytes.saturating_sub(first) / element).clamp(1, u64::from(u32::MAX)) as u32
 }
 
 /// The host copy a buffer view's bytes are in (the one its host view
@@ -916,9 +912,8 @@ pub(crate) fn view_copy(view: &View) -> Option<(std::sync::Arc<crate::shadow::Sh
     Some((shadow, address, len))
 }
 
-/// [`buffer_range`] of an unordered access view of memory at `base`, in a
-/// buffer of `bytes`.
-fn unordered_range(base: u64, bytes: u64, words: &[u32; 10]) -> Option<(u64, u64)> {
+/// [`buffer_range`] of an unordered access view of memory at `base`.
+fn unordered_range(base: u64, words: &[u32; 10]) -> Option<(u64, u64)> {
     let desc = uav_desc(words);
     // SAFETY: a buffer view's union member.
     let buffer = unsafe { desc.Anonymous.Buffer };
@@ -929,10 +924,9 @@ fn unordered_range(base: u64, bytes: u64, words: &[u32; 10]) -> Option<(u64, u64
     } else {
         crate::resource::element(desc.Format.0 as u32)?.0
     };
-    let count = counted(buffer.NumElements, buffer.FirstElement, element, bytes);
     Some((
         base + buffer.FirstElement * element,
-        u64::from(count) * element,
+        u64::from(buffer.NumElements) * element,
     ))
 }
 
@@ -961,9 +955,6 @@ fn buffer_srv(
         once!(len, "buffer view of elements without a size");
         return None;
     }
-    // A zero count reads to the end of the buffer on the console; the host
-    // would refuse the view (and remove the device for it).
-    buffer.NumElements = counted(buffer.NumElements, buffer.FirstElement, element, len);
     // The copy its own bytes are in, its first element counted from there.
     let start = address + buffer.FirstElement * element;
     let Some((shadow, own)) =
@@ -1051,8 +1042,6 @@ fn buffer_uav(
         once!(len, "unordered buffer view of elements without a size");
         return None;
     }
-    // As for a shader view: a zero count reads to the end of the buffer.
-    buffer.NumElements = counted(buffer.NumElements, buffer.FirstElement, element, len);
     let start = address + buffer.FirstElement * element;
     let (shadow, own) =
         crate::shadow::for_view(start, u64::from(buffer.NumElements) * element, element)?;
@@ -1084,7 +1073,23 @@ fn buffer_uav(
             at,
         )
     };
+    MARK.with(|m| m.set(shadow.mark_entry(start)));
     Some(Some((shadow.buffer.clone(), own.then_some(shadow))))
+}
+
+thread_local! {
+    /// The view-mark entry of the unordered buffer view [`make`] last made
+    /// on this thread ([`make_marked`]).
+    static MARK: std::cell::Cell<Option<(u32, u32)>> = const { std::cell::Cell::new(None) };
+}
+
+/// [`make`], and the view-mark entry of the view if it is an unordered
+/// buffer view whose writes shaders mark (`victory_shader::emit`, "Write
+/// marks").
+fn make_marked(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> (Option<Kept>, Option<(u32, u32)>) {
+    MARK.with(|m| m.set(None));
+    let kept = make(view, at);
+    (kept, MARK.with(std::cell::Cell::take))
 }
 
 /// Whether the host can make a shader (or unordered access) view of
@@ -1238,30 +1243,6 @@ fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
             let resource = *resource as crate::object::This;
             if let Some(copy) = crate::resource::host_copy(resource) {
                 let texture = &copy.texture;
-                // The title's views of textures with a stencil plane, as it
-                // describes them (format, dimension, component mapping, a
-                // pad, then first level, levels, plane): each distinct one
-                // once. They say how its shaders read the stencil plane
-                // (the lighting takes each pixel's material class and its
-                // "inside a room" bit from it).
-                #[cfg(feature = "diagnostics")]
-                {
-                    // SAFETY: the shared host copy owns a live resource.
-                    let own = unsafe { texture.GetDesc() }.Format.0;
-                    if matches!(own, 19..=22 | 44..=47) {
-                        static SEEN: Mutex<Vec<(i32, Option<[u32; 10]>)>> = Mutex::new(Vec::new());
-                        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-                        if seen.len() < 64 && !seen.contains(&(own, *desc)) {
-                            seen.push((own, *desc));
-                            tracing::info!(
-                                ?resource,
-                                texture_format = own,
-                                view = ?desc,
-                                "shader view of a depth-stencil texture"
-                            );
-                        }
-                    }
-                }
                 let mut desc = desc.as_ref().map(srv_desc);
                 if desc.is_none() && !default_view(resource) {
                     return None;
@@ -1458,10 +1439,18 @@ fn null_uav_desc(dimension: Option<u32>) -> D3D12_UNORDERED_ACCESS_VIEW_DESC {
         ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
         ..Default::default()
     };
-    // 1D and 1D arrays as 2D ones, as the translation declares them
-    // (`resource::host_dimension`).
     match dimension.map(|d| D3D12_UAV_DIMENSION(d as i32)) {
-        Some(D3D12_UAV_DIMENSION_TEXTURE2DARRAY | D3D12_UAV_DIMENSION_TEXTURE1DARRAY) => {
+        Some(D3D12_UAV_DIMENSION_TEXTURE1D) => {
+            desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1D;
+        }
+        Some(D3D12_UAV_DIMENSION_TEXTURE1DARRAY) => {
+            desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1DARRAY;
+            desc.Anonymous.Texture1DArray = D3D12_TEX1D_ARRAY_UAV {
+                ArraySize: 1,
+                ..Default::default()
+            };
+        }
+        Some(D3D12_UAV_DIMENSION_TEXTURE2DARRAY) => {
             desc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
             desc.Anonymous.Texture2DArray = D3D12_TEX2D_ARRAY_UAV {
                 ArraySize: 1,
@@ -1568,60 +1557,6 @@ mod tests {
         assert!(!within(64, u64::MAX, 1, 16));
     }
 
-    /// A zero element count is the console's "to the end of the buffer". The
-    /// host removes the device for a view of no elements, so the count is
-    /// filled from the buffer's bytes, and the view reads that far.
-    #[test]
-    fn a_zero_element_count_reads_to_the_end_of_the_buffer() {
-        assert_eq!(counted(0, 0, 16, 64), 4);
-        assert_eq!(counted(0, 3, 16, 64), 1, "from the first element");
-        assert_eq!(counted(0, 5, 16, 64), 1, "at least one, if past the end");
-        assert_eq!(counted(0, 0, 16, 0), 1);
-        assert_eq!(counted(7, 0, 16, 64), 7, "a count the title gave stands");
-        assert_eq!(counted(0, 0, 0, 64), 0, "no element size");
-        let Some(heap) = HostHeap::new(false, 4) else {
-            return; // no host GPU
-        };
-        // Four 456-byte elements, the view counted 0: title-placed buffer
-        // and view descriptions, as device 0x230/0x238 take them.
-        let address = 0x1_0000_0000u64;
-        let resource: [u32; 14] = [1, 0, 0, 0, 4 * 456, 0, 1, 1 | 1 << 16, 0, 1, 0, 1, 0, 0];
-        let placed = |unordered: bool| {
-            // The two descriptions' unions start at different words: the
-            // shader view's after its 4-component mapping (word 2), the
-            // unordered one's after the format and dimension. The count
-            // (zero: to the end) is word 6 of a shader view, word 4 of an
-            // unordered one; the stride follows it.
-            let mut words = [0u32; 10];
-            words[1] = 1; // buffer
-            if unordered {
-                words[5] = 456;
-            } else {
-                words[2] = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                words[7] = 456;
-            }
-            let mut desc = [0u32; 16];
-            desc[..10].copy_from_slice(&words);
-            (desc[10], desc[11]) = (address as u32, (address >> 32) as u32);
-            View::Placed(unordered, resource, desc)
-        };
-        for unordered in [false, true] {
-            let view = placed(unordered);
-            assert!(
-                make_view(&view, heap.cpu(u32::from(unordered))).is_some(),
-                "a zero count is not a view of no elements: {view:?}"
-            );
-            // The empty view was what removed the device (the world's).
-            // SAFETY: a plain device query.
-            assert!(unsafe { host().unwrap().device.GetDeviceRemovedReason() }.is_ok());
-            assert_eq!(
-                buffer_range(&view),
-                Some((address, 4 * 456)),
-                "reads to the end of the buffer"
-            );
-        }
-    }
-
     /// A null texture UAV keeps the title's dimension (3D for the world's
     /// wind field), and is 2D when the title names none.
     #[test]
@@ -1635,128 +1570,11 @@ mod tests {
         // SAFETY: the member the dimension names.
         assert_eq!(unsafe { d.Anonymous.Texture2DArray.ArraySize }, 1);
         let dimension = |d| null_uav_desc(d).ViewDimension;
-        // 1D and 1D arrays as the host's 2D copies of them.
-        assert_eq!(dimension(Some(2)), D3D12_UAV_DIMENSION_TEXTURE2D);
-        assert_eq!(dimension(Some(3)), D3D12_UAV_DIMENSION_TEXTURE2DARRAY);
+        assert_eq!(dimension(Some(2)), D3D12_UAV_DIMENSION_TEXTURE1D);
         assert_eq!(dimension(Some(4)), D3D12_UAV_DIMENSION_TEXTURE2D);
         assert_eq!(dimension(None), D3D12_UAV_DIMENSION_TEXTURE2D);
         // Multisampled UAVs need a cap; they stay 2D.
         assert_eq!(dimension(Some(6)), D3D12_UAV_DIMENSION_TEXTURE2D);
-    }
-
-    /// The title's 1D shader views become 2D views of the same mips and
-    /// slices, the clamp moved past `PlaneSlice` (0); 2D and buffer views
-    /// are left as they are.
-    #[test]
-    fn one_d_shader_views_become_2d_views() {
-        let clamp = 0.5f32.to_bits();
-        // TEXTURE1D: mip 1, 3 levels, clamp.
-        let d = srv_desc(&[28, 2, 0x1688, 0, 1, 3, clamp, 0, 0, 0]);
-        assert_eq!(d.ViewDimension, D3D12_SRV_DIMENSION_TEXTURE2D);
-        // SAFETY: the member the dimension names.
-        let t = unsafe { d.Anonymous.Texture2D };
-        assert_eq!((t.MostDetailedMip, t.MipLevels, t.PlaneSlice), (1, 3, 0));
-        assert_eq!(t.ResourceMinLODClamp, 0.5);
-        assert_eq!(d.Shader4ComponentMapping, 0x1688);
-        // TEXTURE1DARRAY: mip 0, 1 level, slices 2..6, clamp.
-        let d = srv_desc(&[28, 3, 0x1688, 0, 0, 1, 2, 4, clamp, 0]);
-        assert_eq!(d.ViewDimension, D3D12_SRV_DIMENSION_TEXTURE2DARRAY);
-        // SAFETY: the member the dimension names.
-        let t = unsafe { d.Anonymous.Texture2DArray };
-        assert_eq!(
-            (t.MipLevels, t.FirstArraySlice, t.ArraySize, t.PlaneSlice),
-            (1, 2, 4, 0)
-        );
-        assert_eq!(t.ResourceMinLODClamp, 0.5);
-        // A 2D view and a buffer view keep their words.
-        let d = srv_desc(&[28, 4, 0x1688, 0, 1, 3, 0, clamp, 0, 0]);
-        assert_eq!(d.ViewDimension, D3D12_SRV_DIMENSION_TEXTURE2D);
-        // SAFETY: the member the dimension names.
-        assert_eq!(unsafe { d.Anonymous.Texture2D.ResourceMinLODClamp }, 0.5);
-        let d = srv_desc(&[28, 1, 0x1688, 0, 7, 0, 9, 0, 0, 0]);
-        assert_eq!(d.ViewDimension, D3D12_SRV_DIMENSION_BUFFER);
-        // SAFETY: the member the dimension names.
-        let buffer = unsafe {
-            (
-                d.Anonymous.Buffer.FirstElement,
-                d.Anonymous.Buffer.NumElements,
-            )
-        };
-        assert_eq!(buffer, (7, 9));
-    }
-
-    /// The title's 1D unordered access views become 2D ones, plane 0.
-    #[test]
-    fn one_d_unordered_views_become_2d_views() {
-        let d = uav_desc(&[28, 2, 2, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(d.ViewDimension, D3D12_UAV_DIMENSION_TEXTURE2D);
-        // SAFETY: the member the dimension names.
-        let t = unsafe { d.Anonymous.Texture2D };
-        assert_eq!((t.MipSlice, t.PlaneSlice), (2, 0));
-        let d = uav_desc(&[28, 3, 1, 3, 5, 0, 0, 0, 0, 0]);
-        assert_eq!(d.ViewDimension, D3D12_UAV_DIMENSION_TEXTURE2DARRAY);
-        // SAFETY: the member the dimension names.
-        let t = unsafe { d.Anonymous.Texture2DArray };
-        assert_eq!(
-            (t.MipSlice, t.FirstArraySlice, t.ArraySize, t.PlaneSlice),
-            (1, 3, 5, 0)
-        );
-    }
-
-    /// A 1D texture's host copy is a 2D texture one texel high, and a view
-    /// the title made as 1D is accepted on it by the real device.
-    #[cfg(windows)]
-    #[test]
-    fn one_d_texture_is_a_2d_host_texture_its_1d_view_fits() {
-        let Some(host) = host() else {
-            return; // no host GPU
-        };
-        assert_eq!(crate::resource::host_dimension(2), 3);
-        assert_eq!(crate::resource::host_dimension(3), 3);
-        assert_eq!(crate::resource::host_dimension(4), 4);
-        let desc = D3D12_RESOURCE_DESC {
-            Dimension: D3D12_RESOURCE_DIMENSION(crate::resource::host_dimension(2) as i32),
-            Width: 16,
-            Height: 1,
-            DepthOrArraySize: 1,
-            MipLevels: 1,
-            Format: DXGI_FORMAT_R10G10B10A2_UNORM,
-            SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
-            ..Default::default()
-        };
-        let mut texture: Option<ID3D12Resource> = None;
-        // SAFETY: plain object creation into our out parameter.
-        let made = unsafe {
-            host.device.CreateCommittedResource(
-                &D3D12_HEAP_PROPERTIES {
-                    Type: D3D12_HEAP_TYPE_DEFAULT,
-                    ..Default::default()
-                },
-                D3D12_HEAP_FLAG_NONE,
-                &desc,
-                D3D12_RESOURCE_STATE_COMMON,
-                None,
-                &mut texture,
-            )
-        };
-        let (Ok(()), Some(texture)) = (made, texture) else {
-            return; // the adapter refuses the format
-        };
-        let Some(heap) = HostHeap::new(false, 4) else {
-            return;
-        };
-        // The title's TEXTURE1D view (format 24, all of its one level).
-        let view = srv_desc(&[24, 2, 0x1688, 0, 0, u32::MAX, 0, 0, 0, 0]);
-        // SAFETY: a live texture and a slot of our heap.
-        unsafe {
-            host.device
-                .CreateShaderResourceView(&texture, Some(&view), heap.cpu(0))
-        };
-        // SAFETY: a live device.
-        assert!(unsafe { host.device.GetDeviceRemovedReason() }.is_ok());
     }
 
     /// A null 3D UAV made on the real device leaves it alive.
@@ -1869,17 +1687,5 @@ mod tests {
         let last = first + heap.dynamic - 1;
         heap.release(last, 1);
         assert_eq!(heap.dynamic(2), None);
-    }
-    #[test]
-    fn a_sampler_heap_request_is_capped_at_the_host_limit() {
-        use super::{PORTABLE_SAMPLERS, sampler_slots};
-        assert_eq!(sampler_slots(16), 16);
-        assert_eq!(sampler_slots(2048), 2048);
-        // Past the D3D12 limit the heap is capped rather than refused: the
-        // shaders cannot name a slot above 2048 anyway.
-        assert_eq!(sampler_slots(4096), PORTABLE_SAMPLERS);
-        assert_eq!(sampler_slots(u32::MAX), PORTABLE_SAMPLERS);
-        // And the cap equals what translated shaders clamp to.
-        assert_eq!(PORTABLE_SAMPLERS, victory_shader::emit::HEAP_SAMPLERS);
     }
 }

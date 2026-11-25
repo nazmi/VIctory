@@ -6,7 +6,6 @@
 //! [`ensure_outside_repo`] on the destination first. The static half of the
 //! rule is `cargo xtask policy`, which checks what git tracks.
 
-use std::io;
 use std::path::{Component, Path, PathBuf};
 
 /// Marker file at the root of the source tree.
@@ -40,25 +39,9 @@ pub enum PolicyError {
 /// 2. none of its ancestors contains the [`ROOT_MARKER`] file (catches
 ///    other clones/copies of the repository).
 pub fn ensure_outside_repo(path: &Path) -> Result<(), PolicyError> {
-    let result = ensure_outside_repo_with(path, |path| std::fs::canonicalize(path));
-    #[cfg(windows)]
-    if let Err(PolicyError::Io { source, .. }) = &result
-        && source.kind() == io::ErrorKind::PermissionDenied
-    {
-        // An AppContainer can open a directory without access to its DOS volume name.
-        // Compare both paths in the same namespace and still check the resolved ancestors.
-        return ensure_outside_repo_with(path, canonicalize_native);
-    }
-    result
-}
+    let resolved = resolve(path)?;
 
-fn ensure_outside_repo_with(
-    path: &Path,
-    canonicalize: impl Fn(&Path) -> io::Result<PathBuf>,
-) -> Result<(), PolicyError> {
-    let resolved = resolve(path, &canonicalize)?;
-
-    if let Ok(root) = canonicalize(&compiled_workspace_root())
+    if let Ok(root) = std::fs::canonicalize(compiled_workspace_root())
         && root.join(ROOT_MARKER).is_file()
         && resolved.starts_with(&root)
     {
@@ -81,10 +64,7 @@ fn ensure_outside_repo_with(
 
 /// Canonicalizes the longest existing prefix of `path` and re-appends the
 /// rest, so that paths which do not exist yet can still be compared.
-fn resolve(
-    path: &Path,
-    canonicalize: impl Fn(&Path) -> io::Result<PathBuf>,
-) -> Result<PathBuf, PolicyError> {
+fn resolve(path: &Path) -> Result<PathBuf, PolicyError> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -99,19 +79,13 @@ fn resolve(
     let mut existing = absolute.as_path();
     let mut rest = Vec::new();
     loop {
-        match canonicalize(existing) {
+        match std::fs::canonicalize(existing) {
             Ok(canon) => {
                 let mut out = canon;
                 for component in rest.iter().rev() {
                     out.push(component);
                 }
                 return Ok(normalize(&out));
-            }
-            Err(source) if cfg!(windows) && source.kind() == io::ErrorKind::PermissionDenied => {
-                return Err(PolicyError::Io {
-                    path: path.to_path_buf(),
-                    source,
-                });
             }
             Err(source) => match (existing.parent(), existing.file_name()) {
                 (Some(parent), Some(name)) => {
@@ -131,44 +105,6 @@ fn resolve(
                 }
             },
         }
-    }
-}
-
-#[cfg(windows)]
-fn canonicalize_native(path: &Path) -> io::Result<PathBuf> {
-    use std::fs::OpenOptions;
-    use std::os::windows::{ffi::OsStringExt, fs::OpenOptionsExt, io::AsRawHandle};
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, GetFinalPathNameByHandleW, VOLUME_NAME_NT,
-    };
-
-    let file = OpenOptions::new()
-        .access_mode(0)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?;
-    let mut name = vec![0u16; 512];
-    loop {
-        // SAFETY: the live file owns the handle, and the buffer is writable for its given length.
-        let len = unsafe {
-            GetFinalPathNameByHandleW(
-                file.as_raw_handle(),
-                name.as_mut_ptr(),
-                name.len() as u32,
-                VOLUME_NAME_NT,
-            )
-        } as usize;
-        if len == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if len >= name.len() {
-            name.resize(len, 0);
-            continue;
-        }
-
-        // Make the normalized NT path usable by ordinary Win32 file APIs.
-        let mut absolute = std::ffi::OsString::from(r"\\?\GLOBALROOT");
-        absolute.push(std::ffi::OsString::from_wide(&name[..len]));
-        return Ok(PathBuf::from(absolute));
     }
 }
 
@@ -226,35 +162,11 @@ mod tests {
         ensure_outside_repo(&tmp.path().join("does").join("not").join("exist")).unwrap();
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn native_paths_still_check_repository_markers() {
-        let temp = tempfile::tempdir().unwrap();
-        let target = temp.path().join("missing").join("cache");
-        ensure_outside_repo_with(&target, canonicalize_native).unwrap();
-        std::fs::write(temp.path().join(ROOT_MARKER), "").unwrap();
-        assert!(matches!(
-            ensure_outside_repo_with(&target, canonicalize_native),
-            Err(PolicyError::InsideRepo { .. })
-        ));
-        assert!(matches!(
-            ensure_outside_repo_with(
-                &compiled_workspace_root().join("missing").join("cache"),
-                canonicalize_native,
-            ),
-            Err(PolicyError::InsideRepo { .. })
-        ));
-    }
-
     #[test]
     fn resolves_dot_dot_in_a_path_that_does_not_exist_yet() {
         let base = std::env::temp_dir().join("victory-policy-no-such");
         let path = base.join("a").join("..").join("b");
-        let resolved = resolve(&path, |p| std::fs::canonicalize(p))
-            .expect("a `..` in the missing tail must resolve lexically");
-        assert_eq!(
-            resolved,
-            resolve(&base.join("b"), |p| std::fs::canonicalize(p)).unwrap()
-        );
+        let resolved = resolve(&path).expect("a `..` in the missing tail must resolve lexically");
+        assert_eq!(resolved, resolve(&base.join("b")).unwrap());
     }
 }

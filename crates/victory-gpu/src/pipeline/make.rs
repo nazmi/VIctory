@@ -172,51 +172,8 @@ fn log(what: &str, key: &str, rest: impl FnOnce() -> String) {
 /// Signalled whenever a worker has made a pipeline.
 static DONE: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
 
-/// Waiting allowed per title frame, over all recording threads.
-fn wait_budget() -> Duration {
-    static BUDGET: OnceLock<Duration> = OnceLock::new();
-    *BUDGET.get_or_init(|| {
-        let budget = parse_wait_budget(std::env::var("VICTORY_PIPELINE_WAIT_MS").ok().as_deref());
-        tracing::info!(
-            millis = budget.as_millis() as u64,
-            "host pipeline wait budget per frame"
-        );
-        budget
-    })
-}
-
-fn parse_wait_budget(value: Option<&str>) -> Duration {
-    Duration::from_millis(value.and_then(|v| v.trim().parse().ok()).unwrap_or(500))
-}
-
-/// Reserved time counts immediately, so concurrent recording threads cannot
-/// each spend the entire frame allowance. Frame numbers increase during a run.
-#[derive(Default)]
-struct FrameBudget {
-    frame: Option<u64>,
-    spent: Duration,
-}
-
-impl FrameBudget {
-    fn reserve(&mut self, frame: u64, budget: Duration) -> Duration {
-        if self.frame.is_some_and(|current| frame < current) {
-            return Duration::ZERO; // a recording thread resumed after a newer frame
-        }
-        if self.frame != Some(frame) {
-            self.frame = Some(frame);
-            self.spent = Duration::ZERO;
-        }
-        let left = budget.saturating_sub(self.spent);
-        self.spent += left;
-        left
-    }
-
-    fn refund(&mut self, frame: u64, reserved: Duration, waited: Duration) {
-        if self.frame == Some(frame) {
-            self.spent = self.spent.saturating_sub(reserved.saturating_sub(waited));
-        }
-    }
-}
+/// Waiting allowed per title frame, over all threads.
+const BUDGET: Duration = Duration::from_millis(500);
 
 /// Pipelines queued and not made yet.
 static WAITING: AtomicU64 = AtomicU64::new(0);
@@ -276,21 +233,12 @@ pub(crate) fn early(p: &Arc<Pending>) {
 
 /// Waits for `p` while frame `frame` has budget left.
 fn wait(p: &Pending, frame: u64) {
-    let budget = wait_budget();
-    if budget.is_zero() {
-        return;
+    static FRAME: AtomicU64 = AtomicU64::new(u64::MAX);
+    static WAITED_US: AtomicU64 = AtomicU64::new(0);
+    if FRAME.swap(frame, Ordering::Relaxed) != frame {
+        WAITED_US.store(0, Ordering::Relaxed);
     }
-    static SPENT: Mutex<FrameBudget> = Mutex::new(FrameBudget {
-        frame: None,
-        spent: Duration::ZERO,
-    });
-    let left = SPENT
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .reserve(frame, budget);
-    if left.is_zero() {
-        return;
-    }
+    let left = BUDGET.saturating_sub(Duration::from_micros(WAITED_US.load(Ordering::Relaxed)));
     let started = Instant::now();
     let (lock, done) = &DONE;
     let mut held = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -304,11 +252,7 @@ fn wait(p: &Pending, frame: u64) {
             .unwrap_or_else(|e| e.into_inner())
             .0;
     }
-    drop(held);
-    SPENT
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .refund(frame, left, started.elapsed());
+    WAITED_US.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
 }
 
 /// Pipelines for the workers: those draws wait for, then those started
@@ -318,39 +262,16 @@ static QUEUES: (Mutex<[VecDeque<Arc<Pending>>; 2]>, Condvar) = (
     Condvar::new(),
 );
 
-/// Pipeline workers: half the logical processors, 2 to 8, unless
-/// `VICTORY_PIPELINE_WORKERS` names a count (1 to 64). The driver's compile
-/// of the world's largest programs bounds a first run with an empty
-/// pipeline library; on a 20-thread CPU, 16 workers emptied the queue about
-/// four times as fast as the default 8.
-fn worker_count(asked: Option<&str>, processors: usize) -> usize {
-    asked
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .map_or((processors / 2).clamp(2, 8), |n| n.clamp(1, 64))
-}
-
-/// Stack of each pipeline worker: room for the driver's shader compiler,
-/// which runs on it (reserved address space; committed only as used).
-const PIPELINE_STACK: usize = 64 << 20;
-
-/// Hands `p` to the workers ([`worker_count`]), started on first use.
+/// Hands `p` to the workers (half the logical processors, 2 to 8), started
+/// on first use.
 fn queue(p: Arc<Pending>, now: bool) {
     static WORKERS: OnceLock<usize> = OnceLock::new();
     let workers = *WORKERS.get_or_init(|| {
-        let n = worker_count(
-            std::env::var("VICTORY_PIPELINE_WORKERS").ok().as_deref(),
-            std::thread::available_parallelism().map_or(4, |n| n.get()),
-        );
-        tracing::info!(workers = n, "host pipeline workers");
+        let n = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(2, 8));
         (0..n)
             .filter(|i| {
                 let spawned = std::thread::Builder::new()
                     .name(format!("victory-pipelines-{i}"))
-                    // The driver compiles pipelines on this thread,
-                    // recursively: NVIDIA's compiler (nvgpucomp64) overflowed
-                    // the default 2 MB on a world compute program and refused
-                    // it as out of memory.
-                    .stack_size(PIPELINE_STACK)
                     .spawn(work);
                 if let Err(e) = &spawned {
                     tracing::warn!(error = %e, "no pipeline worker");
@@ -375,10 +296,12 @@ fn queue(p: Arc<Pending>, now: bool) {
 /// A worker: makes queued pipelines, those draws wait for first, and saves
 /// the cache when idle (first uses of pipelines made before).
 fn work() {
-    // At the title's own priority: below it, the world's busy threads
-    // starved the workers (236 pipelines a minute at the start screen, 7 a
-    // minute in the world on a 16-thread laptop), and draws stay dropped
-    // until their pipelines exist.
+    // Below the title's own threads (loading, recording).
+    // SAFETY: a plain call on our own thread.
+    unsafe {
+        use windows::Win32::System::Threading::*;
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
     let (lock, work) = &QUEUES;
     loop {
         let p = {
@@ -464,94 +387,5 @@ mod tests {
             std::thread::yield_now();
         }
         assert!(matches!(p.made.get(), Some(None)));
-    }
-    #[test]
-    fn worker_count_takes_the_switch_within_bounds() {
-        use super::worker_count;
-        assert_eq!(worker_count(None, 20), 8);
-        assert_eq!(worker_count(None, 2), 2);
-        assert_eq!(worker_count(Some("16"), 20), 16);
-        assert_eq!(worker_count(Some(" 3 "), 20), 3);
-        // Zero workers would leave the queue with no producer; 64 is the cap.
-        assert_eq!(worker_count(Some("0"), 20), 1);
-        assert_eq!(worker_count(Some("999"), 20), 64);
-        assert_eq!(worker_count(Some("many"), 20), 8);
-    }
-    #[test]
-    fn pipeline_wait_switch_accepts_zero_and_rejects_invalid_values() {
-        assert_eq!(parse_wait_budget(None), Duration::from_millis(500));
-        assert_eq!(parse_wait_budget(Some("24")), Duration::from_millis(24));
-        assert_eq!(parse_wait_budget(Some(" 0 ")), Duration::ZERO);
-        for invalid in ["", "-1", "1.5", "many", "18446744073709551616"] {
-            assert_eq!(parse_wait_budget(Some(invalid)), Duration::from_millis(500));
-        }
-    }
-
-    #[test]
-    fn concurrent_waiters_share_one_frame_allowance() {
-        let budget = Arc::new(Mutex::new(FrameBudget::default()));
-        let barrier = Arc::new(std::sync::Barrier::new(8));
-        let handles: Vec<_> = (0..8)
-            .map(|_| {
-                let budget = budget.clone();
-                let barrier = barrier.clone();
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    budget.lock().unwrap().reserve(7, Duration::from_millis(24))
-                })
-            })
-            .collect();
-        let reservations: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-        assert_eq!(
-            reservations.iter().copied().sum::<Duration>(),
-            Duration::from_millis(24)
-        );
-        assert_eq!(reservations.iter().filter(|d| !d.is_zero()).count(), 1);
-    }
-
-    #[test]
-    fn unused_wait_time_returns_to_the_same_frame_only() {
-        let mut budget = FrameBudget::default();
-        let total = Duration::from_millis(24);
-        let reserved = budget.reserve(3, total);
-        budget.refund(3, reserved, Duration::from_millis(4));
-        assert_eq!(budget.reserve(3, total), Duration::from_millis(20));
-        assert_eq!(budget.reserve(3, total), Duration::ZERO);
-        assert_eq!(budget.reserve(4, total), total);
-        budget.refund(3, reserved, Duration::ZERO);
-        assert_eq!(budget.reserve(4, total), Duration::ZERO);
-        assert_eq!(budget.reserve(5, total), total);
-        budget.refund(5, total, Duration::from_secs(1));
-        assert_eq!(budget.reserve(5, total), Duration::ZERO);
-    }
-
-    #[test]
-    fn an_old_recording_thread_cannot_reset_a_new_frames_budget() {
-        let mut budget = FrameBudget::default();
-        let total = Duration::from_millis(24);
-        assert_eq!(budget.reserve(10, total), total);
-        assert_eq!(budget.reserve(9, total), Duration::ZERO);
-        assert_eq!(budget.reserve(10, total), Duration::ZERO);
-        assert_eq!(budget.reserve(11, total), total);
-    }
-
-    #[test]
-    fn a_zero_wait_switch_reaches_the_submission_wait_path() {
-        if !crate::host::tests::isolated(
-            "pipeline::make::tests::a_zero_wait_switch_reaches_the_submission_wait_path",
-        ) {
-            return;
-        }
-        // SAFETY: isolated single-test child; no other test reads this setting.
-        unsafe { std::env::set_var("VICTORY_PIPELINE_WAIT_MS", "0") };
-        assert_eq!(wait_budget(), Duration::ZERO);
-        let pending = Pending::new(Vec::new(), None);
-        let start = Instant::now();
-        wait(&pending, 0);
-        assert!(
-            start.elapsed() < Duration::from_millis(250),
-            "zero should not spend the default 500 ms"
-        );
-        assert!(pending.made.get().is_none());
     }
 }

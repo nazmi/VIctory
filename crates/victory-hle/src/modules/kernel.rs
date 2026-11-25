@@ -164,18 +164,14 @@ pub extern "system" fn GetProcAddress(module: *mut c_void, name: *const u8) -> *
     let Some(m) = registry().iter().find(|m| handle(m) == module) else {
         return host_override(module, name).unwrap_or_else(|| host::get_proc_address(module, name));
     };
-    // Values below 0x10000 are ordinals. Our export table names ordinal
-    // exports `#n`, the same form the import binder looks up.
+    // Values below 0x10000 are ordinals; we export by name only.
     if (name as usize) < 0x1_0000 {
-        let ordinal = format!("#{}", name as usize);
-        return match m.exports.iter().find(|e| e.name == ordinal) {
-            Some(e) => e.address as *mut c_void,
-            None => {
-                tracing::warn!(module = m.name, %ordinal, "GetProcAddress: not implemented");
-                host::set_last_error(ERROR_PROC_NOT_FOUND);
-                std::ptr::null_mut()
-            }
-        };
+        tracing::warn!(
+            module = m.name,
+            ordinal = name as usize,
+            "GetProcAddress by ordinal"
+        );
+        return std::ptr::null_mut();
     }
     // SAFETY: not an ordinal, so the title passes a NUL-terminated name.
     let name = unsafe { CStr::from_ptr(name.cast()) }.to_string_lossy();
@@ -183,7 +179,6 @@ pub extern "system" fn GetProcAddress(module: *mut c_void, name: *const u8) -> *
         Some(e) => e.address as *mut c_void,
         None => {
             tracing::warn!(module = m.name, %name, "GetProcAddress: not implemented");
-            host::set_last_error(ERROR_PROC_NOT_FOUND);
             std::ptr::null_mut()
         }
     }
@@ -356,14 +351,15 @@ fn refuse(file: &str) {
     static REFUSED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
     let file = file.to_ascii_lowercase();
     let mut refused = REFUSED.lock().unwrap_or_else(|e| e.into_inner());
-    if !refused.contains(&file) {
-        tracing::warn!(dll = file, "a host DLL outside the host policy: refused");
-        refused.push(file);
+    if refused.contains(&file) {
+        return;
     }
+    refused.push(file.clone());
+    drop(refused);
+    tracing::warn!(dll = file, from = %host::callers(), "a host DLL outside the host policy: refused");
 }
 
 const ERROR_MOD_NOT_FOUND: u32 = 126;
-const ERROR_PROC_NOT_FOUND: u32 = 127;
 
 pub(crate) fn module() -> HleModule {
     HleModule {
@@ -714,29 +710,9 @@ mod tests {
     }
 
     #[test]
-    fn pseudo_module_ordinals_resolve() {
-        let module = LoadLibraryA(c"gameinput.dll".as_ptr().cast());
-        assert!(!module.is_null(), "gameinput is one of our pseudo modules");
-        assert_eq!(
-            GetProcAddress(module, std::ptr::without_provenance(1)) as usize,
-            crate::registry::lookup("gameinput.dll", "#1").unwrap(),
-            "GameInputCreate is imported by ordinal"
-        );
-        assert!(
-            GetProcAddress(module, std::ptr::without_provenance(2)).is_null(),
-            "an ordinal we do not export stays null"
-        );
-    }
-
-    #[test]
     fn title_dlls_and_pseudo_modules_are_found_by_name() {
         let base = 0x7100_0000_0000usize;
-        let path = if cfg!(windows) {
-            r"C:\title\Mapped.dll"
-        } else {
-            "/title/Mapped.dll"
-        };
-        runtime::set_image_path(base, std::path::Path::new(path));
+        runtime::set_image_path(base, std::path::Path::new(r"C:\title\Mapped.dll"));
         runtime::set_title_dll_loader(Box::new(|file| match file {
             "late.dll" => Ok(Some(0x7200_0000_0000)),
             "broken.dll" => Err("bad image".into()),
@@ -777,40 +753,6 @@ mod tests {
             // SAFETY: reads this thread's last error.
             let last = unsafe { windows_sys::Win32::Foundation::GetLastError() };
             assert_eq!(last, ERROR_INSUFFICIENT_BUFFER);
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn missing_pseudo_module_exports_set_proc_not_found() {
-        use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
-
-        let kernel32 = GetModuleHandleW(w("kernel32.dll").as_ptr());
-        assert!(!kernel32.is_null());
-        // SAFETY: clears and reads this thread's Win32 last-error slot.
-        let host_err = unsafe {
-            SetLastError(0);
-            assert!(GetProcAddress(kernel32, c"NoSuchHostExport".as_ptr().cast()).is_null());
-            GetLastError()
-        };
-        assert_eq!(host_err, ERROR_PROC_NOT_FOUND);
-
-        let runtime = LoadLibraryA(c"xgameruntime.dll".as_ptr().cast());
-        assert!(!runtime.is_null());
-        assert!(!GetProcAddress(runtime, c"XGameRuntimeInitialize".as_ptr().cast()).is_null());
-
-        for missing in [
-            c"NoSuchPseudoExport".as_ptr().cast::<u8>(),
-            9999usize as *const u8,
-            std::ptr::null(),
-        ] {
-            // SAFETY: clears and reads this thread's Win32 last-error slot.
-            let err = unsafe {
-                SetLastError(0);
-                assert!(GetProcAddress(runtime, missing).is_null());
-                GetLastError()
-            };
-            assert_eq!(err, ERROR_PROC_NOT_FOUND);
         }
     }
 }

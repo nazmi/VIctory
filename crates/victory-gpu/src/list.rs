@@ -165,11 +165,11 @@ pub(crate) extern "system" fn create_list(
     _nodes: u32,
     kind: u32,
     allocator: This,
-    _pipeline: This,
+    pipeline: This,
     iid: *const Iid,
     out: *mut This,
 ) -> HRESULT {
-    new_list(kind, allocator, iid, out)
+    new_list(kind, allocator, pipeline, iid, out)
 }
 
 /// The console's list creation: type, flags, node mask and barrier batch
@@ -187,7 +187,7 @@ pub(crate) extern "system" fn create_list_x(
     _: This,
     desc: *const ListDesc,
     allocator: This,
-    _pipeline: This,
+    pipeline: This,
     iid: *const Iid,
     out: *mut This,
 ) -> HRESULT {
@@ -196,10 +196,16 @@ pub(crate) extern "system" fn create_list_x(
         return E_INVALIDARG;
     };
     tracing::debug!(?desc, "console command list");
-    new_list(desc.kind, allocator, iid, out)
+    new_list(desc.kind, allocator, pipeline, iid, out)
 }
 
-fn new_list(kind: u32, allocator: This, iid: *const Iid, out: *mut This) -> HRESULT {
+fn new_list(
+    kind: u32,
+    allocator: This,
+    pipeline: This,
+    iid: *const Iid,
+    out: *mut This,
+) -> HRESULT {
     if allocator.is_null() {
         return E_INVALIDARG;
     }
@@ -227,9 +233,17 @@ fn new_list(kind: u32, allocator: This, iid: *const Iid, out: *mut This) -> HRES
             }
         }),
         #[cfg(windows)]
-        state: Default::default(),
+        state: {
+            let mut state = crate::draw::State::default();
+            state.set_pipeline(pipeline);
+            std::sync::Mutex::new(state)
+        },
     });
-    object::hand_out(LIST, list, iid, &LIST_IIDS, out)
+    let hr = object::hand_out(LIST, list, iid, &LIST_IIDS, out);
+    if hr == S_OK {
+        crate::pipeline::bound(pipeline);
+    }
+    hr
 }
 
 extern "system" fn allocator_query(this: This, iid: *const Iid, out: *mut This) -> HRESULT {
@@ -274,8 +288,9 @@ extern "system" fn reset(this: This, allocator: This, pipeline: This) -> HRESULT
         host.reset();
         state.reset(pipeline);
     });
+    crate::pipeline::bound(pipeline);
     #[cfg(not(windows))]
-    let _ = (this, pipeline);
+    let _ = this;
     S_OK
 }
 
@@ -809,51 +824,22 @@ extern "system" fn dispatch_x(this: This, x: u32, y: u32, z: u32, _flags: u32) {
     }
 }
 
-/// `BeginQuery`/`EndQuery(heap, type, index)`: an occlusion query marks the
-/// host list between the two, so the draws in between are what it counts.
-pub(crate) extern "system" fn query_begin(this: This, heap: This, kind: u32, index: u32) {
-    mark(this, heap, kind, index, true);
-}
-
-pub(crate) extern "system" fn query_end(this: This, heap: This, kind: u32, index: u32) {
-    mark(this, heap, kind, index, false);
-}
-
-fn mark(this: This, heap: This, kind: u32, index: u32, begin: bool) {
-    const OCCLUSION: u32 = 0;
-    const BINARY: u32 = 1;
-    #[cfg(windows)]
-    if matches!(kind, OCCLUSION | BINARY)
-        && let Some(list) = host_list(this)
-        && let Some((host, query)) = crate::query::host(heap, kind, index, 1)
-    {
-        list.keep(&host);
-        // SAFETY: an open list and a checked query index and compatible heap.
-        unsafe {
-            if begin {
-                list.list.BeginQuery(&host, query, index);
-            } else {
-                list.list.EndQuery(&host, query, index);
-            }
-        }
-        return;
-    }
-    let _ = (this, heap, kind, index, begin);
-}
+/// `BeginQuery`/`EndQuery(heap, type, index)`: queries are answered when
+/// resolved.
+extern "system" fn query_mark(_: This, _heap: This, _kind: u32, _index: u32) {}
 
 /// `ResolveQueryData(heap, type, first, count, buffer, offset)`: writes
-/// each query's result into the buffer once the list has run. Occlusion
-/// counts and binary occlusion are resolved on the host into a read-back
-/// buffer, so the title reads what its draws actually passed; timestamps
-/// (type 2) are the GPU clock then, and pipeline statistics are zero.
-/// shortcut: no query of the other kinds runs on the host GPU; results
-/// are plausible values, not measured ones (time spans come out as the
-/// submission's length).
-pub(crate) extern "system" fn resolve_queries(
+/// each query's result into the buffer once the list has run. Timestamps
+/// (type 2) are the GPU clock then; occlusion counts (0) say a million
+/// samples passed and binary occlusion (1) visible, so nothing is culled
+/// by a query.
+/// shortcut: no query runs on the host GPU; results are plausible values,
+/// not measured ones (time spans come out as the submission's length).
+extern "system" fn resolve_queries(
     this: This,
-    heap: This,
+    _heap: This,
     kind: u32,
-    first: u32,
+    _first: u32,
     count: u32,
     buffer: This,
     offset: u64,
@@ -865,31 +851,6 @@ pub(crate) extern "system" fn resolve_queries(
     let Some((data, size)) = crate::resource::buffer_bytes(buffer) else {
         return;
     };
-    // Occlusion results are one 64-bit count each.
-    let measured = matches!(kind, OCCLUSION | BINARY)
-        && offset
-            .checked_add(u64::from(count) * 8)
-            .is_some_and(|end| end <= size);
-    #[cfg(windows)]
-    if measured
-        && let Some(list) = host_list(this)
-        && let Some((host, query)) = crate::query::host(heap, kind, first, count)
-        && let Some(readback) = crate::query::readback(u64::from(count) * 8)
-    {
-        // SAFETY: an open list, our heap and a buffer made for exactly
-        // these results, in the state a resolve needs.
-        unsafe {
-            list.list
-                .ResolveQueryData(&host, query, first, count, &readback, 0);
-        }
-        list.keep(&host);
-        let destination = data as usize + offset as usize;
-        list.defer_after(move || {
-            crate::query::copy_results(&readback, destination, count as usize * 8)
-        });
-        return;
-    }
-    let _ = (this, heap, measured);
     let (what, bytes) = match kind {
         OCCLUSION => (Written::Value(1 << 20), 8),
         BINARY => (Written::Value(1), 8),
@@ -897,15 +858,18 @@ pub(crate) extern "system" fn resolve_queries(
         PIPELINE_STATISTICS => (Written::Value(0), 88),
         _ => (Written::Value(0), 16),
     };
-    if offset + u64::from(count) * bytes > size {
+    let Some(end) = offset.checked_add(u64::from(count) * bytes) else {
+        return;
+    };
+    if end > size {
         return;
     }
     for i in 0..u64::from(count) {
         // Wider results are written as 8-byte pieces.
         for piece in 0..bytes / 8 {
-            let what = if piece == 0 { what } else { Written::Value(0) };
             // SAFETY: inside the buffer, checked above.
             let at = unsafe { data.add((offset + i * bytes + piece * 8) as usize) };
+            let what = if piece == 0 { what } else { Written::Value(0) };
             defer_write(this, at as u64, what, 8);
         }
     }
@@ -1059,13 +1023,6 @@ unsafe impl Send for Upload {}
 /// the pipeline; depth bounds, depth order and shading rate hints): any
 /// arguments, nothing returned.
 extern "system" fn ignored_state(_: This) {}
-
-extern "system" fn depth_bounds(this: This, min: f32, max: f32) {
-    #[cfg(windows)]
-    with_state(this, |list, s| s.set_depth_bounds(list, min, max));
-    #[cfg(not(windows))]
-    let _ = (this, min, max);
-}
 
 /// The title's draw state (decision 0007, step 3), kept for its draws or
 /// set on the host list at once. Without a host GPU these do nothing.
@@ -1324,8 +1281,6 @@ mod state {
 
 fn count_draw() {
     DRAWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    #[cfg(all(windows, feature = "diagnostics"))]
-    FRAME_DRAWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Draws of the kinds the host does not run yet (indirect, mesh), and
@@ -1528,7 +1483,7 @@ const METHODS: [(usize, *const ()); 52] = [
     (52, clear_rtv as *const ()),                 // 0x1a0
     (59, execute_indirect as *const ()),          // 0x1d8 indirect
     (60, copy_memory as *const ()),               // 0x1e0
-    (68, depth_bounds as *const ()),              // 0x220 depth bounds
+    (68, ignored_state as *const ()),             // 0x220 depth bounds
     (69, write32 as *const ()),                   // 0x228
     (70, write64 as *const ()),                   // 0x230
     (71, wait_value as *const ()),                // 0x238, 32 bits
@@ -1544,8 +1499,8 @@ const MORE_METHODS: [(usize, *const ()); 12] = [
     (53, state::clear_unordered_uint as *const ()), // 0x1a8
     (54, state::clear_unordered_float as *const ()), // 0x1b0
     (55, ignored_state as *const ()),               // 0x1b8 DiscardResource
-    (28, query_begin as *const ()),                 // 0xe0 BeginQuery
-    (29, query_end as *const ()),                   // 0xe8 EndQuery
+    (28, query_mark as *const ()),                  // 0xe0 BeginQuery
+    (29, query_mark as *const ()),                  // 0xe8 EndQuery
     (30, resolve_queries as *const ()),             // 0xf0
     (78, dispatch_x as *const ()),                  // 0x270
     (98, state::dispatch_mesh_x as *const ()),      // 0x310
@@ -1604,26 +1559,106 @@ const fn list_table(newer: bool) -> [*const (); 160] {
 static LIST_FUNCTIONS: Table<160> = Table(list_table(false));
 static NEWER_LIST_FUNCTIONS: Table<160> = Table(list_table(true));
 
-#[cfg(all(test, windows))]
-pub(crate) fn has_newer_table(list: This) -> bool {
-    // SAFETY: one of our lists, beginning with its vtable pointer.
-    let table = unsafe { *list.cast::<*const *const ()>() };
-    table == NEWER_LIST_FUNCTIONS.0.as_ptr()
-}
-
-#[cfg(all(windows, feature = "diagnostics"))]
-static FRAME_DRAWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Draws recorded since the last present, for diagnostics capture triggers.
-#[cfg(all(windows, feature = "diagnostics"))]
-pub(crate) fn take_frame_draws() -> u64 {
-    FRAME_DRAWS.swap(0, std::sync::atomic::Ordering::Relaxed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::object::slot;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tracing::{Event, Metadata, Subscriber, span};
+
+    struct PipelineBinds(Arc<AtomicUsize>);
+
+    impl Subscriber for PipelineBinds {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            metadata.is_event()
+                && metadata.target() == "victory_gpu::pipeline"
+                && metadata.fields().field("pipeline").is_some()
+                && metadata.fields().field("frame").is_some()
+        }
+
+        fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+            unreachable!()
+        }
+
+        fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+        fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+        fn enter(&self, _: &span::Id) {}
+        fn exit(&self, _: &span::Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            if self.enabled(event.metadata()) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[test]
+    fn lists_bind_the_initial_pipeline_on_creation() {
+        use crate::pipeline::{ComputeHead, create_compute};
+
+        // A synthetic compute description matching the public ABI.
+        #[repr(C)]
+        struct ComputeDesc {
+            root: This,
+            code: *const u8,
+            size: usize,
+        }
+
+        let null = std::ptr::null();
+        let mut allocator = null;
+        assert_eq!(
+            create_allocator(null, 0, &ALLOCATOR_IIDS[0], &mut allocator),
+            S_OK
+        );
+        let desc = ListDesc {
+            kind: 0,
+            flags: 0,
+            nodes: 0,
+            barrier_batch: 0,
+        };
+        let bytes = [0xa5, 0xb6, 0xc7];
+        let compute = ComputeDesc {
+            root: null,
+            code: bytes.as_ptr(),
+            size: bytes.len(),
+        };
+        let compute = std::ptr::from_ref(&compute).cast::<ComputeHead>();
+        let release = |o: This| slot::<extern "system" fn(This) -> u32>(o, 0x10)(o);
+        let binds = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing::Dispatch::new(PipelineBinds(binds.clone()));
+
+        tracing::dispatcher::with_default(&subscriber, || {
+            for console in [false, true] {
+                let create = |pipeline, out| {
+                    if console {
+                        create_list_x(null, &desc, allocator, pipeline, &LIST_IIDS[1], out)
+                    } else {
+                        create_list(null, 0, 0, allocator, pipeline, &LIST_IIDS[1], out)
+                    }
+                };
+                let mut pipeline = null;
+                let mut list = null;
+                assert_eq!(
+                    create_compute(null, compute, &PAGEABLE_IIDS[0], &mut pipeline),
+                    S_OK
+                );
+                let before = binds.load(Ordering::Relaxed);
+
+                assert_eq!(create(null, &mut list), S_OK);
+                assert_eq!(binds.load(Ordering::Relaxed), before);
+                assert_eq!(release(list), 0);
+
+                assert_eq!(create(pipeline, &mut list), S_OK);
+                assert_eq!(binds.load(Ordering::Relaxed), before + 1);
+                assert_eq!(release(list), 0);
+                assert_eq!(release(pipeline), 0);
+            }
+        });
+        assert_eq!(release(allocator), 0);
+    }
 
     /// ClearUnorderedAccessViewUint/Float and DiscardResource come before
     /// the methods newer lists insert: the AMD upscaler calls them there.
@@ -1690,5 +1725,29 @@ mod tests {
         let release = |o: This| slot::<extern "system" fn(This) -> u32>(o, 0x10)(o);
         assert_eq!(release(list), 0);
         assert_eq!(release(allocator), 0);
+    }
+
+    /// An offset near `u64::MAX` must not overflow and write outside the
+    /// query destination buffer.
+    #[test]
+    fn resolve_queries_rejects_overflowing_offset() {
+        let null = std::ptr::null();
+        let mut allocator = null;
+        assert_eq!(
+            create_allocator(null, 0, &ALLOCATOR_IIDS[0], &mut allocator),
+            S_OK
+        );
+        let mut list = null;
+        assert_eq!(
+            create_list(null, 0, 0, allocator, null, &LIST_IIDS[1], &mut list),
+            S_OK
+        );
+        let buffer = crate::resource::test_buffer(64);
+        // Used to overflow `offset + count * 8` (panic in debug, wrap in release).
+        resolve_queries(list, null, 0, 0, 2, buffer, u64::MAX - 8);
+        let release = |o: This| slot::<extern "system" fn(This) -> u32>(o, 0x10)(o);
+        for object in [buffer, list, allocator] {
+            assert_eq!(release(object), 0);
+        }
     }
 }

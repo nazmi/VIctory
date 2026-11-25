@@ -33,7 +33,7 @@
 
 use crate::ShaderError;
 use crate::gfx10::{Fields, Operand};
-use crate::ir::{Exit, Inst, Program, Reg, Value, operand_reads};
+use crate::ir::{Inst, Program, Reg, Value};
 use crate::native::{HwStage, NativeProgram, PsInput, StageIo, Usage};
 use crate::resource::Site;
 
@@ -257,52 +257,13 @@ pub fn raise(p: &Program, native: &NativeProgram) -> Result<Io, ShaderError> {
             (loaded, &[][..], &[][..])
         }
         (StageIo::Ms(ms), HwStage::Ms) => {
-            // The group input, and the phis that may carry it past a join.
-            let mut group: Vec<Value> = p
-                .inputs
-                .iter()
-                .filter(|i| i.0 == Reg::V(5))
-                .map(|i| i.1)
-                .collect();
-            // No lane is active over the EXEC-zero edge of s_cbranch_execz or
-            // _execnz, the same case as a partial-EXEC write below.
-            let no_lanes = |q: usize, b: usize| match (
-                p.blocks[q].insts.last().map(Inst::name),
-                p.blocks[q].exit,
-            ) {
-                (Some("s_cbranch_execz"), Exit::Branch { taken, not_taken }) => {
-                    taken == b && not_taken != b
-                }
-                (Some("s_cbranch_execnz"), Exit::Branch { taken, not_taken }) => {
-                    not_taken == b && taken != b
-                }
-                _ => false,
-            };
-            while let Some(v) = p
-                .blocks
-                .iter()
-                .enumerate()
-                .flat_map(|(b, k)| k.phis.iter().map(move |f| (b, f)))
-                .find_map(|(b, f)| {
-                    let mut args = f.args.iter().zip(&p.blocks[b].preds);
-                    let carried = args.any(|(a, &q)| group.contains(a) && !no_lanes(q, b));
-                    (carried && !group.contains(&f.value)).then_some(f.value)
-                })
-            {
-                group.push(v);
-            }
+            let group = p.inputs.iter().find(|i| i.0 == Reg::V(5)).map(|i| i.1);
             // The group input holds the same value in every lane only as the
-            // first lane reads it. A write to v5 reads its old value too, which
-            // only lanes outside EXEC keep.
-            // shortcut: writes that may keep the old v5 in active lanes
-            // (v_fmac_f32's accumulator, a 16-bit half or d16 load,
-            // v_writelane_b32, v_movreld_b32, DPP that skips lanes) and
-            // partial-EXEC writes pass; check those too if a mesh program
-            // writes v5 that way.
+            // first lane reads it; a VGPR write reads its old value too.
             let per_lane = p.blocks.iter().flat_map(|b| &b.insts).find(|i| {
-                i.read(Reg::V(5)).is_some_and(|v| group.contains(&v))
+                group.is_some_and(|g| i.reads.contains(&(Reg::V(5), g)))
                     && i.name() != "v_readfirstlane_b32"
-                    && (i.write(Reg::V(5)).is_none() || operand_reads(p, i).contains(&Reg::V(5)))
+                    && i.write(Reg::V(5)).is_none()
             });
             if let Some(i) = per_lane {
                 return Err(unsupported(
@@ -424,11 +385,7 @@ pub fn raise(p: &Program, native: &NativeProgram) -> Result<Io, ShaderError> {
                     }
                 }
                 Fields::Valu(v) if name.starts_with("v_interp_") => match name {
-                    // First halves: `v_interp_p2_f16` pairs with them
-                    // below. `v_interp_p1lv_f16`'s P0 comes from a lane
-                    // VGPR (`v.src[2]`) instead of the local data share, but
-                    // the pair only needs its site, attribute and I.
-                    "v_interp_p1ll_f16" | "v_interp_p1lv_f16" => {}
+                    "v_interp_p1ll_f16" => {}
                     "v_interp_p2_f16" => {
                         let attribute = attribute(inst, &v.src[0])?;
                         let read = |k: usize| match v.src.get(k) {
@@ -563,14 +520,10 @@ impl Halves<'_> {
                     attr,
                     ..
                 } if inst.name() == "v_interp_p1_f32" => (*attr, inst.read(Reg::V(*reg))),
-                Fields::Valu(v)
-                    if inst.name() == "v_interp_p1ll_f16" || inst.name() == "v_interp_p1lv_f16" =>
-                {
-                    match v.src.get(1) {
-                        Some(&Operand::Vector { reg, .. }) => (v.src[0], inst.read(Reg::V(reg))),
-                        _ => return Err("an interpolation without its first half"),
-                    }
-                }
+                Fields::Valu(v) if inst.name() == "v_interp_p1ll_f16" => match v.src.get(1) {
+                    Some(&Operand::Vector { reg, .. }) => (v.src[0], inst.read(Reg::V(reg))),
+                    _ => return Err("an interpolation without its first half"),
+                },
                 _ => return Err("an interpolation without its first half"),
             };
             if a != *attr {
@@ -765,39 +718,6 @@ mod tests {
             (Target::Color(0), true, false)
         );
         assert_eq!(e.values[0], p.blocks[0].insts[1].write(Reg::V(2)));
-    }
-
-    #[test]
-    fn lane_value_first_half_pairs_with_f16_second() {
-        // v_interp_p1lv_f16 v4, v0, attr0.x, v3 — the I coordinate in v0
-        // (the perspective-center i), the lane's P0 in v3 — then
-        // v_interp_p2_f16 v5, v1, attr0.x, v4 — the j in v1, the first
-        // half's result in v4.
-        let p = program(&[
-            0xD743_0004,
-            0x040E_0000, // v_interp_p1lv_f16 v4, v0, attr0.x, v3
-            0xD75A_0005,
-            0x0412_0200, // v_interp_p2_f16 v5, v1, attr0.x, v4
-            S_ENDPGM,
-        ]);
-        let io = raise(&p, &pixel(vec![TEXCOORD], 2)).unwrap();
-        assert_eq!(
-            io.interps,
-            [(
-                (0, 1),
-                Interp::Interpolated {
-                    attribute: Attribute {
-                        usage: Usage::Generic,
-                        row: 1,
-                        channel: 0,
-                        high: false
-                    },
-                    barycentric: Barycentric::PerspectiveCenter,
-                    first: vec![(0, 0)],
-                    unless: vec![],
-                }
-            )]
-        );
     }
 
     #[test]

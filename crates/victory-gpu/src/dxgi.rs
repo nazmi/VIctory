@@ -90,6 +90,14 @@ fn query(kind: usize, iid: *const Iid, known: &[Iid], found: This, out: *mut Thi
     object::answer(kind, iid, object::is(iid, known).then_some(found), out)
 }
 
+fn enumeration_not_found(out: *mut This) -> HRESULT {
+    if !out.is_null() {
+        // SAFETY: the caller supplies a writable output slot when non-null.
+        unsafe { out.write(std::ptr::null()) };
+    }
+    NOT_FOUND
+}
+
 /// The DXGI device also answers for the D3D12 device.
 extern "system" fn device_query(this: This, iid: *const Iid, out: *mut This) -> HRESULT {
     if crate::device::is_device(iid) {
@@ -112,7 +120,7 @@ extern "system" fn adapter_parent(_: This, iid: *const Iid, out: *mut This) -> H
 }
 extern "system" fn adapter_outputs(_: This, index: u32, out: *mut This) -> HRESULT {
     if index != 0 {
-        return NOT_FOUND;
+        return enumeration_not_found(out);
     }
     object::answer(ADAPTER, &OUTPUT_IIDS[0], Some(&OUTPUT_OBJECT), out)
 }
@@ -165,7 +173,7 @@ extern "system" fn factory_query(this: This, iid: *const Iid, out: *mut This) ->
 }
 extern "system" fn factory_adapters(_: This, index: u32, out: *mut This) -> HRESULT {
     if index != 0 {
-        return NOT_FOUND;
+        return enumeration_not_found(out);
     }
     object::answer(FACTORY, &ADAPTER_IIDS[0], Some(&ADAPTER_OBJECT), out)
 }
@@ -223,26 +231,6 @@ const _: () = assert!(size_of::<Mode>() == 32);
 /// for a 120 Hz one to allow 120 Hz frame intervals).
 /// shortcut: fixed mode, not the host display's; report the host's rates if
 /// a title paces by them.
-/// The console's 4K output mode. `VICTORY_MODE=<width>x<height>` reports a
-/// smaller one instead, for hosts whose render targets at 4K do not fit.
-fn mode_size() -> (u32, u32) {
-    const DEFAULT: (u32, u32) = (3840, 2160);
-    let Some(spec) = std::env::var_os("VICTORY_MODE") else {
-        return DEFAULT;
-    };
-    parse_mode(&spec.to_string_lossy()).unwrap_or(DEFAULT)
-}
-
-/// `WIDTHxHEIGHT` with both dimensions inside D3D12's 16384 limit.
-fn parse_mode(spec: &str) -> Option<(u32, u32)> {
-    let (width, height) = spec
-        .trim()
-        .split_once('x')
-        .or_else(|| spec.trim().split_once('X'))?;
-    let (width, height): (u32, u32) = (width.trim().parse().ok()?, height.trim().parse().ok()?);
-    ((1..=16384).contains(&width) && (1..=16384).contains(&height)).then_some((width, height))
-}
-
 extern "system" fn modes(
     _: This,
     _format: u32,
@@ -262,12 +250,9 @@ extern "system" fn modes(
         return MORE_DATA;
     }
     *count = 1;
-    // `VICTORY_MODE=<width>x<height>` reports a smaller mode, for hosts whose
-    // render targets at 4K do not fit; an unparseable value keeps the console's.
-    let (width, height) = mode_size();
     let mode = Mode {
-        width,
-        height,
+        width: 3840,
+        height: 2160,
         refresh: [60, 1],
         format: 0,
         scanlines: 1, // progressive
@@ -339,16 +324,18 @@ mod tests {
         assert!(!output.is_null());
         assert_eq!(outputs(adapter, 1, &mut output), NOT_FOUND);
     }
+
     #[test]
-    fn output_mode_override_parses_or_falls_back() {
-        assert_eq!(super::parse_mode("1920x1080"), Some((1920, 1080)));
-        assert_eq!(super::parse_mode(" 1280 X 720 "), Some((1280, 720)));
-        assert_eq!(super::parse_mode("3840x2160"), Some((3840, 2160)));
-        // Zero, past D3D12's limit, or not a size: the 4K default stays.
-        assert_eq!(super::parse_mode("0x1080"), None);
-        assert_eq!(super::parse_mode("3840x0"), None);
-        assert_eq!(super::parse_mode("16385x1080"), None);
-        assert_eq!(super::parse_mode("1080p"), None);
-        assert_eq!(super::parse_mode("1920"), None);
+    fn out_of_range_enumeration_clears_output() {
+        for (object, offset, method) in [
+            (&FACTORY_OBJECT, 0x38, "EnumAdapters"),
+            (&FACTORY_OBJECT, 0x60, "EnumAdapters1"),
+            (&ADAPTER_OBJECT, 0x38, "EnumOutputs"),
+        ] {
+            let enumerate = slot::<Indexed>(object, offset);
+            let mut out = object as This;
+            assert_eq!(enumerate(object, 1, &mut out), NOT_FOUND, "{method}");
+            assert!(out.is_null(), "{method} left a stale output pointer");
+        }
     }
 }

@@ -150,67 +150,6 @@ pub fn read_frame(data: &[u8], start: usize) -> Option<Frame> {
     })
 }
 
-/// Reads a frame that begins near the end of one rolling input buffer and
-/// finishes at the start of the next. The continuation lives in the first
-/// `first_frame_bit` bits after the next packet's header; `next_in_tail` is
-/// where the frame after it begins in `tail`.
-pub fn read_frame_spanning(
-    head: &[u8],
-    head_bits: usize,
-    tail: &[u8],
-    start: usize,
-) -> Option<(Frame, usize)> {
-    let mut cursor = Cursor {
-        data: head,
-        pos: start,
-    };
-    let bits = cursor.bits(LENGTH_BITS)? as usize;
-    if bits <= LENGTH_BITS as usize || bits == 0x7fff {
-        return None;
-    }
-    let continuation = packet(tail, 0)?.first_frame_bit as usize;
-    if continuation == 0 || continuation >= bits || start >= head_bits {
-        return None;
-    }
-    let mut out = vec![0u8; bits.div_ceil(8)];
-    // Gather the head with the packet-aware cursor: it skips each packet's
-    // header and the packets of other streams, which raw bit copying would
-    // mistake for frame payload (review note on #443).
-    let mut cursor = Cursor {
-        data: head,
-        pos: start,
-    };
-    let mut got = 0;
-    while got < bits && cursor.pos < head_bits {
-        let bit = cursor.bit()?;
-        out[got / 8] |= (bit as u8) << (7 - got % 8);
-        got += 1;
-    }
-    if got >= bits {
-        return None;
-    }
-    let needed = bits - got;
-    if continuation != needed {
-        return None; // the tail belongs to a different frame
-    }
-    // The continuation is at the start of the next packet's payload.
-    for i in 0..needed {
-        let at = HEADER_BITS + i;
-        let byte = *tail.get(at / 8)?;
-        out[(got + i) / 8] |= ((byte >> (7 - at % 8)) & 1) << (7 - (got + i) % 8);
-    }
-    let next_in_tail = 32 + continuation;
-    Some((
-        Frame {
-            data: out,
-            bits,
-            start,
-            next: Some(next_in_tail),
-        },
-        next_in_tail,
-    ))
-}
-
 /// Where the frame after the one at `start`..`end` begins: right after it,
 /// unless it was the last frame to begin in its packet and the rest of that
 /// packet is padding.
@@ -275,15 +214,9 @@ impl Bits<'_> {
         (v << (24 + self.pos % 8) >> 32) as u32
     }
 
-    /// The next `n` bits as an unsigned number. Past 32 bits only the low 32
-    /// are kept, and all `n` are consumed.
     fn read(&mut self, n: u32) -> u32 {
         if n == 0 {
             return 0;
-        }
-        if n > 32 {
-            self.pos += (n - 32) as usize;
-            return self.read(32);
         }
         let v = self.peek32() >> (32 - n);
         self.pos += n as usize;
@@ -294,17 +227,8 @@ impl Bits<'_> {
         self.read(1) != 0
     }
 
-    /// The next `n` bits as a two's complement number. Zero bits read as 0;
-    /// from 32 bits on, the low 32 are the value, as with `read`.
     fn signed(&mut self, n: u32) -> i32 {
-        match n {
-            0 => 0,
-            1..32 => {
-                let shift = 32 - n;
-                ((self.read(n) << shift) as i32) >> shift
-            }
-            _ => self.read(n) as i32,
-        }
+        ((self.read(n) << (32 - n)) as i32) >> (32 - n)
     }
 
     fn consumed(&self) -> usize {
@@ -321,8 +245,6 @@ impl Bits<'_> {
 struct Vlc {
     /// Left-aligned code, length, symbol; sorted by code.
     codes: Vec<(u32, u8, i32)>,
-    /// Candidate range for each leading eight-bit prefix.
-    prefixes: [(usize, usize); 256],
 }
 
 impl Vlc {
@@ -333,24 +255,12 @@ impl Vlc {
             codes.push((code as u32, len, symbol));
             code += 1 << (32 - len);
         }
-        let prefixes = std::array::from_fn(|prefix| {
-            let low = (prefix as u32) << 24;
-            let high = low | 0x00ff_ffff;
-            let first = codes.partition_point(|c| c.0 <= low) - 1;
-            let end = codes.partition_point(|c| c.0 <= high);
-            (first, end)
-        });
-        Vlc { codes, prefixes }
+        Vlc { codes }
     }
 
     fn read(&self, bits: &mut Bits) -> i32 {
         let v = bits.peek32();
-        let (first, end) = self.prefixes[(v >> 24) as usize];
-        let i = if end == first + 1 {
-            first
-        } else {
-            first + self.codes[first..end].partition_point(|c| c.0 <= v) - 1
-        };
+        let i = self.codes.partition_point(|c| c.0 <= v) - 1;
         let (_, len, symbol) = self.codes[i];
         bits.pos += len as usize;
         symbol
@@ -1304,183 +1214,6 @@ fn to_i16(v: f32) -> i16 {
 mod tests {
     use super::*;
 
-    fn vlc_books() -> [&'static Vlc; 7] {
-        let c = codes();
-        [
-            &c.scale,
-            &c.scale_rl,
-            &c.coef[0],
-            &c.coef[1],
-            &c.vec4,
-            &c.vec2,
-            &c.vec1,
-        ]
-    }
-
-    fn vlc_reference(vlc: &Vlc, bits: &mut Bits<'_>) -> i32 {
-        let v = bits.peek32();
-        let i = vlc.codes.partition_point(|c| c.0 <= v) - 1;
-        let (_, len, symbol) = vlc.codes[i];
-        bits.pos += len as usize;
-        symbol
-    }
-
-    #[test]
-    fn vlc_prefix_matches_binary_search() {
-        for book in vlc_books() {
-            let mut probes = vec![0, u32::MAX];
-
-            for &(code, _, _) in &book.codes {
-                probes.push(code);
-                probes.push(code.saturating_sub(1));
-                probes.push(code.saturating_add(1));
-            }
-
-            for prefix in 0..256u32 {
-                probes.push(prefix << 24);
-                probes.push((prefix << 24) | 0x00ff_ffff);
-            }
-
-            let mut seed = 123456789u32;
-            for _ in 0..4096 {
-                seed ^= seed << 13;
-                seed ^= seed >> 17;
-                seed ^= seed << 5;
-                probes.push(seed);
-            }
-
-            for value in probes {
-                for shift in 0..8usize {
-                    let data = (u64::from(value) << (32 - shift)).to_be_bytes();
-
-                    let mut expected = Bits {
-                        data: &data,
-                        pos: shift,
-                        end: 64,
-                    };
-
-                    let mut actual = Bits {
-                        data: &data,
-                        pos: shift,
-                        end: 64,
-                    };
-
-                    assert_eq!(
-                        book.read(&mut actual),
-                        vlc_reference(book, &mut expected),
-                        "value={value:#x}, shift={shift}"
-                    );
-
-                    assert_eq!(actual.pos, expected.pos);
-                }
-            }
-        }
-    }
-
-    #[test]
-    #[ignore = "synthetic release microbenchmark"]
-    fn vlc_prefix_benchmark() {
-        use std::hint::black_box;
-        use std::time::Instant;
-
-        fn measure<const OPT: bool>(samples: &[(usize, [u8; 4])], books: &[&Vlc; 7]) -> (f64, i64) {
-            let start = Instant::now();
-            let mut sum = 0i64;
-
-            for _ in 0..64 {
-                for &(index, ref data) in samples {
-                    let book = black_box(books[index]);
-
-                    let mut bits = Bits {
-                        data: black_box(data),
-                        pos: 0,
-                        end: 32,
-                    };
-
-                    let symbol = if OPT {
-                        book.read(&mut bits)
-                    } else {
-                        vlc_reference(book, &mut bits)
-                    };
-
-                    sum = sum
-                        .wrapping_add(i64::from(symbol))
-                        .wrapping_add(bits.pos as i64);
-                }
-            }
-
-            (start.elapsed().as_secs_f64() * 1000.0, black_box(sum))
-        }
-
-        let books = vlc_books();
-
-        for (label, short_only) in [("all_codes", false), ("short_codes", true)] {
-            let mut corpus = Vec::new();
-
-            for (index, book) in books.iter().enumerate() {
-                for &(code, len, _) in &book.codes {
-                    if !short_only || len <= 8 {
-                        corpus.push((index, code.to_be_bytes()));
-                    }
-                }
-            }
-
-            assert!(!corpus.is_empty());
-
-            let mut seed = 123456789u32;
-
-            let samples: Vec<_> = (0..16384)
-                .map(|_| {
-                    seed ^= seed << 13;
-                    seed ^= seed >> 17;
-                    seed ^= seed << 5;
-                    corpus[seed as usize % corpus.len()]
-                })
-                .collect();
-
-            let warmup_a = measure::<false>(&samples, &books);
-            let warmup_b = measure::<true>(&samples, &books);
-            assert_eq!(warmup_a.1, warmup_b.1);
-
-            let mut reference = Vec::new();
-            let mut candidate = Vec::new();
-
-            for round in 0..5 {
-                let (a, b) = if round % 2 == 0 {
-                    let a = measure::<false>(&samples, &books);
-                    let b = measure::<true>(&samples, &books);
-                    (a, b)
-                } else {
-                    let b = measure::<true>(&samples, &books);
-                    let a = measure::<false>(&samples, &books);
-                    (a, b)
-                };
-
-                assert_eq!(a.1, b.1);
-                reference.push(a.0);
-                candidate.push(b.0);
-
-                println!(
-                    "{label} round={round}: \
-                     reference={:.3}ms candidate={:.3}ms",
-                    a.0, b.0
-                );
-            }
-
-            reference.sort_by(f64::total_cmp);
-            candidate.sort_by(f64::total_cmp);
-
-            println!(
-                "MEDIAN {label}: \
-                 reference={:.3}ms candidate={:.3}ms \
-                 speedup={:.3}x checksum=OK",
-                reference[2],
-                candidate[2],
-                reference[2] / candidate[2]
-            );
-        }
-    }
-
     /// Writes `value` as `n` bits, MSB first, at bit `pos`.
     fn put_bits(data: &mut [u8], pos: usize, n: u32, value: u32) {
         for i in 0..n as usize {
@@ -1488,36 +1221,6 @@ mod tests {
                 data[(pos + i) / 8] |= 1 << (7 - (pos + i) % 8);
             }
         }
-    }
-
-    /// Bit widths at the edges of what `Bits` can return: none, a full
-    /// 32-bit word, and more than one word. None of them may overflow a shift.
-    #[test]
-    fn bits_read_zero_full_and_oversized_widths() {
-        let mut data = [0u8; 16];
-        put_bits(&mut data, 0, 6, 0b11_1110); // -2 in 6 bits
-        put_bits(&mut data, 6, 32, 0x1234_5678);
-        put_bits(&mut data, 38, 32, 0xffff_fffe); // -2 in 32 bits
-        put_bits(&mut data, 70, 8, 0xab); // dropped high bits of a 40-bit read
-        put_bits(&mut data, 78, 32, 0x8000_0001);
-        let mut b = Bits {
-            data: &data,
-            pos: 0,
-            end: data.len() * 8,
-        };
-
-        assert_eq!(b.signed(0), 0);
-        assert_eq!(b.read(0), 0);
-        assert_eq!(b.consumed(), 0, "zero-width reads consume nothing");
-        assert_eq!(b.signed(6), -2);
-        assert_eq!(b.read(32), 0x1234_5678);
-        assert_eq!(b.signed(32), -2);
-        assert_eq!(b.read(40), 0x8000_0001, "the low 32 bits of a 40-bit field");
-        assert_eq!(b.consumed(), 110);
-
-        b.pos = 70;
-        assert_eq!(b.signed(40), 0x8000_0001_u32 as i32);
-        assert_eq!(b.consumed(), 110);
     }
 
     /// A damaged packet whose first frame says it is 0 bits long: finding
@@ -1567,93 +1270,6 @@ mod tests {
                 .next,
             None
         );
-    }
-
-    /// A frame whose last eleven bits sit in the next rolling input buffer
-    /// comes back byte-for-byte the same as an unsplit frame.
-    #[test]
-    fn a_frame_can_finish_in_the_next_rolling_buffer() {
-        const BITS: usize = 31;
-        let whole = {
-            let mut d = vec![0u8; PACKET_BYTES];
-            put_bits(&mut d, 0, 32, 1 << 26);
-            put_bits(&mut d, 32, LENGTH_BITS, BITS as u32);
-            put_bits(&mut d, 47, 2, 0b10);
-            put_bits(&mut d, 49, 16, 0xABCD);
-            d
-        };
-        let unsplit = read_frame(&whole, 32).expect("whole frame");
-        assert_eq!(unsplit.bits, BITS);
-
-        let split_at = 52; // 20 bits in the head, 11 in the tail.
-        let mut head = vec![0u8; PACKET_BYTES];
-        for bit in 0..split_at {
-            if whole[bit / 8] >> (7 - bit % 8) & 1 == 1 {
-                head[bit / 8] |= 1 << (7 - bit % 8);
-            }
-        }
-        put_bits(&mut head, 0, 32, 1 << 26);
-        let mut tail = vec![0u8; PACKET_BYTES];
-        put_bits(&mut tail, 0, 32, (1 << 26) | (11 << 11));
-        for bit in split_at..32 + BITS {
-            let value = whole[bit / 8] >> (7 - bit % 8) & 1;
-            let at = 32 + bit - split_at;
-            if value == 1 {
-                tail[at / 8] |= 1 << (7 - at % 8);
-            }
-        }
-
-        let (spanning, next) =
-            read_frame_spanning(&head, split_at, &tail, 32).expect("spanning frame");
-        assert_eq!(spanning.bits, BITS);
-        assert_eq!(spanning.data, unsplit.data);
-        assert_eq!(next, 43);
-    }
-
-    /// A frame that crosses a packet header keeps that header out of its
-    /// payload (review note on #443).
-    #[test]
-    fn a_spanning_frame_skips_the_packet_header_it_crosses() {
-        const PACKET: usize = PACKET_BYTES * 8;
-        const BITS: usize = 500;
-        const START: usize = PACKET + PACKET - 352; // late in packet 1
-        const SECOND: usize = 2 * PACKET + HEADER_BITS; // payload of packet 2
-        const HEAD_BITS: usize = SECOND + 100;
-        const NEEDED: usize = BITS - 352 - 100;
-
-        let mut whole = vec![0u8; 3 * PACKET_BYTES];
-        for p in 0..3 {
-            put_bits(&mut whole, p * PACKET, 32, 1 << 26);
-        }
-        put_bits(&mut whole, START, LENGTH_BITS, BITS as u32);
-        // Distinct payload bytes make a stray header obvious.
-        for i in LENGTH_BITS as usize..BITS {
-            let at = START + i;
-            if (PACKET..PACKET + HEADER_BITS).contains(&at) {
-                continue; // the cursor skips packet 2's header
-            }
-            let value = ((i * 7) % 251) as u32 & 1;
-            put_bits(&mut whole, at, 1, value);
-        }
-
-        let mut head = vec![0u8; 3 * PACKET_BYTES];
-        head.copy_from_slice(&whole);
-        let mut tail = vec![0u8; PACKET_BYTES];
-        put_bits(&mut tail, 0, 32, (1 << 26) | ((NEEDED as u32) << 11));
-        for i in 0..NEEDED {
-            let at = HEAD_BITS + i;
-            let value = (whole[at / 8] >> (7 - at % 8)) & 1;
-            put_bits(&mut tail, HEADER_BITS + i, 1, value as u32);
-        }
-
-        let (spanning, next) =
-            read_frame_spanning(&head, HEAD_BITS, &tail, START).expect("spanning frame");
-        let expected = read_frame(&whole, START).expect("whole frame");
-        assert_eq!(
-            spanning.data, expected.data,
-            "no header bits in the payload"
-        );
-        assert_eq!(next, 32 + NEEDED);
     }
 
     /// The direct sum `imdct_half` stands for (FFmpeg's naive inverse MDCT:
@@ -2057,31 +1673,6 @@ mod tests {
         }
     }
 
-    /// Frames declared by the stream starting in the first packet.
-    fn stream_frame_count(data: &[u8]) -> u32 {
-        let mut frames = 0;
-        let mut index = 0;
-        while index < data.len() / PACKET_BYTES {
-            let header = packet(data, index).unwrap();
-            frames += header.frames;
-            index += 1 + header.skip as usize;
-        }
-        frames
-    }
-
-    #[test]
-    fn counts_only_packets_in_the_selected_stream() {
-        // One stream occupies packets 0, 2 and 3. The other occupies 1 and 4.
-        let mut data = vec![0; 5 * PACKET_BYTES];
-        let headers = [(1, 1), (2, 2), (2, 0), (1, 1), (3, 0)];
-        for (i, (frames, skip)) in headers.into_iter().enumerate() {
-            put_bits(&mut data, i * PACKET_BITS, 6, frames);
-            put_bits(&mut data, i * PACKET_BITS + 24, 8, skip);
-        }
-        assert_eq!(stream_frame_count(&data), 4);
-        assert_eq!(stream_frame_count(&data[PACKET_BYTES..]), 5);
-    }
-
     /// Frames of noise, mono and stereo at each sample rate, with bit
     /// counts up to the end of the data: every decode gives one frame of
     /// samples, whether the frame decodes or not.
@@ -2191,7 +1782,7 @@ mod tests {
     /// Walks and decodes saved input buffers (`VICTORY_XMA_STREAMS=<dir>` of
     /// `*.xma` files with their `*.ctx` context words, made outside the
     /// repository): the frames walked from the first packet must be the
-    /// frames that stream's packet headers count, and every frame must decode.
+    /// frames the packet headers count, and every frame must decode.
     #[test]
     #[ignore = "needs streams outside the repository"]
     fn walks_saved_streams() {
@@ -2205,7 +1796,9 @@ mod tests {
             }
             streams += 1;
             let data = std::fs::read(&path).unwrap();
-            let counted = stream_frame_count(&data);
+            let counted: u32 = (0..data.len() / PACKET_BYTES)
+                .map(|i| packet(&data, i).unwrap().frames)
+                .sum();
             // Context word 1: sample rate in bits 27-28, stereo in bit 29.
             let ctx = std::fs::read(path.with_extension("ctx")).unwrap();
             let word = u32::from_le_bytes(ctx[4..8].try_into().unwrap());

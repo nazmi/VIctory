@@ -46,63 +46,6 @@ fn is_ours(id: *const c_char) -> bool {
     text(id).is_some_and(|id| id == identifier())
 }
 
-/// Values of the public `XPackageChunkSelectorType` enum.
-pub const SELECTOR_LANGUAGE: u32 = 0;
-pub const SELECTOR_TAG: u32 = 1;
-pub const SELECTOR_CHUNK: u32 = 2;
-pub const SELECTOR_FEATURE: u32 = 3;
-
-/// The public `XPackageChunkSelector` ABI: a `u32` type tag and a union of a
-/// NUL-terminated attribute or a chunk id. Read the tag as an integer: an
-/// unknown value must be rejected, not turned into an invalid Rust enum.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct ChunkSelector {
-    pub kind: u32,
-    pub value: SelectorValue,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union SelectorValue {
-    pub language: *const c_char,
-    pub tag: *const c_char,
-    pub feature: *const c_char,
-    pub chunk_id: u32,
-}
-
-/// Accepts zero selectors (meaning "the whole package") and rejects the
-/// combinations the console rejects: a missing array, an unknown type, or a
-/// string attribute that is null or empty.
-fn validate_selectors(count: u32, selectors: *const ChunkSelector) -> Result<(), HRESULT> {
-    if count == 0 {
-        return Ok(());
-    }
-    if selectors.is_null()
-        || count as usize > isize::MAX as usize / std::mem::size_of::<ChunkSelector>()
-    {
-        return Err(xasync::E_INVALIDARG);
-    }
-    // SAFETY: the title passes `count` contiguous selectors (checked above).
-    for selector in unsafe { std::slice::from_raw_parts(selectors, count as usize) } {
-        let attribute = match selector.kind {
-            // SAFETY: language, tag and feature all store a NUL-terminated
-            // pointer in the union, as the public XPackage header defines.
-            SELECTOR_LANGUAGE => unsafe { selector.value.language },
-            // SAFETY: same union member type as `language`.
-            SELECTOR_TAG => unsafe { selector.value.tag },
-            // SAFETY: same union member type as `language`.
-            SELECTOR_FEATURE => unsafe { selector.value.feature },
-            SELECTOR_CHUNK => continue,
-            _ => return Err(xasync::E_INVALIDARG),
-        };
-        if text(attribute).is_none_or(|s| s.is_empty()) {
-            return Err(xasync::E_INVALIDARG);
-        }
-    }
-    Ok(())
-}
-
 /// Bytes in the package folder, counted once.
 fn package_bytes() -> u64 {
     fn size(dir: &Path) -> u64 {
@@ -145,20 +88,14 @@ fn monitor() -> *const c_void {
 extern "system" fn create_monitor(
     _: This,
     id: *const c_char,
-    selector_count: u32,
-    selectors: *const c_void,
+    _selector_count: u32,
+    _selectors: *const c_void,
     _interval_ms: u32,
     _queue: *const c_void,
     out: *mut *const c_void,
 ) -> HRESULT {
-    if id.is_null() || out.is_null() {
-        return xasync::E_INVALIDARG;
-    }
     if !is_ours(id) {
         return NO_PACKAGE;
-    }
-    if let Err(hr) = validate_selectors(selector_count, selectors.cast()) {
-        return hr;
     }
     put(out, monitor())
 }
@@ -199,25 +136,30 @@ extern "system" fn register_progress(
     put(out, token())
 }
 
+/// The completed installation has no pending progress callbacks to wait for.
+extern "system" fn unregister_progress(
+    _: This,
+    _monitor: *const c_void,
+    _token: u64,
+    _wait: bool,
+) -> bool {
+    true
+}
+
 /// 0: ready.
-// shortcut: every well-formed selector counts as installed, including ones
-// the package's layout does not have; Grand Theft Auto VI asks only about
-// its own chunks, which a full install has.
+// shortcut: every selector counts as installed, including ones the
+// package's layout does not have (the console answers those with an
+// invalid-selector error); Grand Theft Auto VI asks only about its own
+// chunks, which a full install has.
 extern "system" fn find_availability(
     _: This,
     id: *const c_char,
-    selector_count: u32,
-    selectors: *const c_void,
+    _selector_count: u32,
+    _selectors: *const c_void,
     out: *mut u32,
 ) -> HRESULT {
-    if id.is_null() || out.is_null() {
-        return xasync::E_INVALIDARG;
-    }
     if !is_ours(id) {
         return NO_PACKAGE;
-    }
-    if let Err(hr) = validate_selectors(selector_count, selectors.cast()) {
-        return hr;
     }
     put(out, 0)
 }
@@ -225,18 +167,10 @@ extern "system" fn find_availability(
 extern "system" fn change_order(
     _: This,
     id: *const c_char,
-    count: u32,
-    selectors: *const c_void,
+    _count: u32,
+    _selectors: *const c_void,
 ) -> HRESULT {
-    if id.is_null() {
-        return xasync::E_INVALIDARG;
-    }
-    if !is_ours(id) {
-        return NO_PACKAGE;
-    }
-    validate_selectors(count, selectors.cast())
-        .err()
-        .unwrap_or(S_OK)
+    if is_ours(id) { S_OK } else { NO_PACKAGE }
 }
 
 static INSTALL: u8 = 0;
@@ -245,23 +179,18 @@ static INSTALL: u8 = 0;
 extern "system" fn install_chunks_async(
     _: This,
     id: *const c_char,
-    count: u32,
-    selectors: *const c_void,
+    _count: u32,
+    _selectors: *const c_void,
     _interval_ms: u32,
     _suppress_confirmation: bool,
     block: *mut AsyncBlock,
 ) -> HRESULT {
-    if !is_ours(id) {
-        return NO_PACKAGE;
-    }
-    if let Err(hr) = validate_selectors(count, selectors.cast()) {
-        return hr;
-    }
-    xasync::finished_with(
-        block,
-        (&raw const INSTALL).cast(),
-        Ok(xasync::bytes(monitor())),
-    )
+    let result = if is_ours(id) {
+        Ok(xasync::bytes(monitor()))
+    } else {
+        Err(NO_PACKAGE)
+    };
+    xasync::finished_with(block, (&raw const INSTALL).cast(), result)
 }
 extern "system" fn install_chunks_result(
     _: This,
@@ -275,19 +204,13 @@ extern "system" fn install_chunks_result(
 extern "system" fn estimate_download(
     _: This,
     id: *const c_char,
-    count: u32,
-    selectors: *const c_void,
+    _count: u32,
+    _selectors: *const c_void,
     bytes: *mut u64,
     confirm: *mut bool,
 ) -> HRESULT {
-    if id.is_null() || bytes.is_null() {
-        return xasync::E_INVALIDARG;
-    }
     if !is_ours(id) {
         return NO_PACKAGE;
-    }
-    if let Err(hr) = validate_selectors(count, selectors.cast()) {
-        return hr;
     }
     if !confirm.is_null() {
         // SAFETY: checked non-null.
@@ -302,18 +225,10 @@ extern "system" fn estimate_download(
 extern "system" fn uninstall_chunks(
     _: This,
     id: *const c_char,
-    count: u32,
-    selectors: *const c_void,
+    _count: u32,
+    _selectors: *const c_void,
 ) -> HRESULT {
-    if id.is_null() {
-        return xasync::E_INVALIDARG;
-    }
-    if !is_ours(id) {
-        return NO_PACKAGE;
-    }
-    validate_selectors(count, selectors.cast())
-        .err()
-        .unwrap_or(S_OK)
+    if is_ours(id) { S_OK } else { NO_PACKAGE }
 }
 
 /// Mount handles only come from mounting another package, and there is
@@ -374,7 +289,7 @@ static VTABLE: Methods<40> = Methods([
     progress as *const (),              // 0x38
     missing::<8> as *const (),          // 0x40 update a monitor
     register_progress as *const (),     // 0x48
-    missing::<10> as *const (),         // 0x50 unregister it
+    unregister_progress as *const (),   // 0x50
     missing::<11> as *const (),         // 0x58 user locale
     find_availability as *const (),     // 0x60
     missing::<13> as *const (),         // 0x68 enumerate chunk availability
@@ -412,156 +327,36 @@ mod tests {
     use crate::modules::xgameruntime::method;
 
     #[test]
-    fn selectors_are_validated() {
-        let none = std::ptr::null();
-        assert_eq!(validate_selectors(0, none), Ok(()));
-        assert_eq!(validate_selectors(1, none), Err(xasync::E_INVALIDARG));
-
-        let unknown = [ChunkSelector {
-            kind: 4,
-            value: SelectorValue { chunk_id: 0 },
-        }];
-        assert_eq!(
-            validate_selectors(1, unknown.as_ptr()),
-            Err(xasync::E_INVALIDARG)
-        );
-
-        let empty = [ChunkSelector {
-            kind: SELECTOR_LANGUAGE,
-            value: SelectorValue {
-                language: c"".as_ptr(),
-            },
-        }];
-        assert_eq!(
-            validate_selectors(1, empty.as_ptr()),
-            Err(xasync::E_INVALIDARG)
-        );
-
-        let null = [ChunkSelector {
-            kind: SELECTOR_TAG,
-            value: SelectorValue {
-                tag: std::ptr::null(),
-            },
-        }];
-        assert_eq!(
-            validate_selectors(1, null.as_ptr()),
-            Err(xasync::E_INVALIDARG)
-        );
-
-        let good = [
-            ChunkSelector {
-                kind: SELECTOR_LANGUAGE,
-                value: SelectorValue {
-                    language: c"en-US".as_ptr(),
-                },
-            },
-            ChunkSelector {
-                kind: SELECTOR_TAG,
-                value: SelectorValue {
-                    tag: c"BigMap".as_ptr(),
-                },
-            },
-            ChunkSelector {
-                kind: SELECTOR_FEATURE,
-                value: SelectorValue {
-                    feature: c"BigMaps".as_ptr(),
-                },
-            },
-            ChunkSelector {
-                kind: SELECTOR_CHUNK,
-                value: SelectorValue { chunk_id: 7 },
-            },
-        ];
-        assert_eq!(validate_selectors(good.len() as u32, good.as_ptr()), Ok(()));
-    }
-
-    #[test]
-    fn bad_selectors_are_refused_by_the_api() {
-        let this: This = &OBJECT;
-        let ours = format!("{}\0", identifier());
-        let id = ours.as_ptr().cast();
-        let none = std::ptr::null();
-
-        type Create = extern "system" fn(
+    fn completed_installation_unregisters_progress_immediately() {
+        type Register = extern "system" fn(
             This,
-            *const c_char,
-            u32,
             *const c_void,
-            u32,
-            *const c_void,
-            *mut *const c_void,
-        ) -> HRESULT;
-        let mut handle = std::ptr::null();
-        assert_eq!(
-            method::<Create>(&OBJECT, 0x28)(this, id, 1, none, 0, none, &mut handle),
-            xasync::E_INVALIDARG
-        );
-        assert!(handle.is_null());
-
-        type Find =
-            extern "system" fn(This, *const c_char, u32, *const c_void, *mut u32) -> HRESULT;
-        let mut availability = 9;
-        let find = method::<Find>(&OBJECT, 0x60);
-        assert_eq!(
-            find(this, id, 1, none, &mut availability),
-            xasync::E_INVALIDARG
-        );
-        assert_eq!(availability, 9, "no output on error");
-        assert_eq!(
-            find(this, c"dlc".as_ptr(), 1, none, &mut availability),
-            NO_PACKAGE
-        );
-        assert_eq!(find(this, id, 0, none, &mut availability), S_OK);
-        assert_eq!(availability, 0, "ready");
-
-        type Change = extern "system" fn(This, *const c_char, u32, *const c_void) -> HRESULT;
-        assert_eq!(
-            method::<Change>(&OBJECT, 0x70)(this, id, 1, none),
-            xasync::E_INVALIDARG
-        );
-
-        type Install = extern "system" fn(
-            This,
-            *const c_char,
-            u32,
-            *const c_void,
-            u32,
-            bool,
-            *mut AsyncBlock,
-        ) -> HRESULT;
-        let mut block = AsyncBlock {
-            queue: std::ptr::null(),
-            context: std::ptr::null_mut(),
-            callback: None,
-            internal: [0; 4],
-        };
-        assert_eq!(
-            method::<Install>(&OBJECT, 0x80)(this, id, 1, none, 0, false, &mut block),
-            xasync::E_INVALIDARG
-        );
-
-        type Estimate = extern "system" fn(
-            This,
-            *const c_char,
-            u32,
+            *mut c_void,
             *const c_void,
             *mut u64,
-            *mut bool,
         ) -> HRESULT;
-        let mut bytes = 7;
-        let mut confirm = true;
-        assert_eq!(
-            method::<Estimate>(&OBJECT, 0x90)(this, id, 1, none, &mut bytes, &mut confirm),
-            xasync::E_INVALIDARG
-        );
-        assert_eq!(bytes, 7, "no output on error");
-        assert!(confirm, "no output on error");
+        type Unregister = extern "system" fn(This, *const c_void, u64, bool) -> bool;
+        extern "system" fn callback(_: *mut c_void, _: *const c_void) {}
 
-        type Uninstall = extern "system" fn(This, *const c_char, u32, *const c_void) -> HRESULT;
-        assert_eq!(
-            method::<Uninstall>(&OBJECT, 0x98)(this, id, 1, none),
-            xasync::E_INVALIDARG
-        );
+        let this: This = &OBJECT;
+        let register = method::<Register>(&OBJECT, 0x48);
+        assert_eq!(VTABLE.0[0x50 / 8], unregister_progress as *const ());
+        let unregister = method::<Unregister>(&OBJECT, 0x50);
+        for wait in [false, true] {
+            let mut token = 0;
+            assert_eq!(
+                register(
+                    this,
+                    monitor(),
+                    std::ptr::null_mut(),
+                    callback as *const c_void,
+                    &mut token
+                ),
+                S_OK
+            );
+            assert_ne!(token, 0);
+            assert!(unregister(this, monitor(), token, wait));
+        }
     }
 
     #[test]
@@ -590,14 +385,6 @@ mod tests {
         assert_eq!(
             find(this, c"dlc".as_ptr(), 0, none, &mut availability),
             NO_PACKAGE
-        );
-        assert_eq!(
-            find(this, std::ptr::null(), 0, none, &mut availability),
-            xasync::E_INVALIDARG
-        );
-        assert_eq!(
-            find(this, ours.as_ptr().cast(), 0, none, std::ptr::null_mut()),
-            xasync::E_INVALIDARG
         );
 
         type Progress_ = extern "system" fn(This, *const c_void, *mut Progress);
