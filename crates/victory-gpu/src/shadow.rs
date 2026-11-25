@@ -610,15 +610,37 @@ pub(crate) fn find(address: u64, len: u64) -> Option<Arc<Shadow>> {
 /// allocations if memory use grows.
 const WINDOW: u64 = 4 << 20;
 
-/// Copies of title memory outside buffers, by (start, length).
-static LOOSE: Mutex<BTreeMap<(u64, u64), Arc<Shadow>>> = Mutex::new(BTreeMap::new());
+/// Copies of title memory outside buffers, by (start, length), and the size
+/// the map is next pruned of dead entries at.
+///
+/// The copies are held weakly, as [`EXACT`] holds its own: a window is found
+/// again for as long as anything shows it (a heap slot, a bindless hull, a
+/// list with a write to copy back all hold the `Arc`), and once nothing does,
+/// the 4 MiB it occupies is released instead of kept for the rest of the run.
+/// That is the pattern the views map already uses, and it is the one thing
+/// that shrinks this map without ever handing a draw a copy of the wrong
+/// bytes: the entry only dies when no consumer can be looking at it.
+///
+/// Dropping a copy loses nothing: a `Shadow` starts empty, its bytes come
+/// from a `refresh` before the read that needs them, and a pending GPU write
+/// keeps the `Arc` alive through the list that owns it.
+#[allow(clippy::type_complexity)]
+static LOOSE: Mutex<(usize, BTreeMap<(u64, u64), std::sync::Weak<Shadow>>)> =
+    Mutex::new((0, BTreeMap::new()));
 
 fn loose(address: u64, end: u64) -> Option<Arc<Shadow>> {
     let start = address & !(WINDOW - 1);
     let len = end.next_multiple_of(WINDOW) - start;
-    let mut map = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(shadow) = map.get(&(start, len)) {
-        return Some(shadow.clone());
+    let mut guard = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
+    let (prune_at, map) = &mut *guard;
+    if let Some(shadow) = map.get(&(start, len)).and_then(std::sync::Weak::upgrade) {
+        return Some(shadow);
+    }
+    // Streaming makes and drops windows constantly; dead entries would
+    // otherwise accumulate one per window the title ever touched.
+    if map.len() >= *prune_at {
+        map.retain(|_, w| w.strong_count() > 0);
+        *prune_at = (2 * map.len()).max(256);
     }
     let (buffer, data) = host()?.shared_buffer(len)?;
     crate::host::name(&buffer, || format!("title memory {start:#x}+{len:#x}"));
@@ -630,7 +652,7 @@ fn loose(address: u64, end: u64) -> Option<Arc<Shadow>> {
         "loose memory copied to the host"
     );
     let shadow = Arc::new(Shadow::new(buffer, data, gpu, start, len));
-    map.insert((start, len), shadow.clone());
+    map.insert((start, len), Arc::downgrade(&shadow));
     changed();
     Some(shadow)
 }
@@ -730,8 +752,9 @@ pub(crate) fn all() -> Vec<Arc<Shadow>> {
         LOOSE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .1
             .values()
-            .cloned(),
+            .filter_map(std::sync::Weak::upgrade),
     );
     all
 }
@@ -758,7 +781,9 @@ pub(crate) fn near(va: u64) -> String {
         LOOSE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .1
             .values()
+            .filter_map(std::sync::Weak::upgrade)
             .map(|s| (s.gpu, s.start, s.len)),
     );
     let below = all.iter().filter(|c| c.0 <= va).max();
@@ -782,6 +807,43 @@ pub(crate) fn near(va: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A window outside any buffer is released once nothing shows it, instead
+    /// of being kept for the rest of the run — the growth the handoff left
+    /// open. The copy is found again while a consumer holds it.
+    #[test]
+    fn a_loose_window_is_released_when_nothing_shows_it() {
+        // An address no buffer covers, so `loose` is the path taken.
+        const AT: u64 = 0x7000_0000;
+        let Some(first) = loose(AT, AT + 0x40) else {
+            return; // no host GPU here
+        };
+        let listed = |start: u64| {
+            super::all()
+                .iter()
+                .any(|s| s.start == start && s.len == WINDOW)
+        };
+        assert!(
+            listed(AT & !(WINDOW - 1)),
+            "the window is listed while in use"
+        );
+
+        // A second ask for the same window is the same copy, not a new one.
+        let again = loose(AT, AT + 0x40).expect("the live window is found again");
+        assert!(Arc::ptr_eq(&first, &again), "a live window was duplicated");
+
+        drop(again);
+        drop(first);
+        assert!(
+            !listed(AT & !(WINDOW - 1)),
+            "the window is still held after its last user dropped it"
+        );
+
+        // And it is made afresh if something asks again.
+        let remade = loose(AT, AT + 0x40).expect("a dropped window is made again");
+        assert!(listed(AT & !(WINDOW - 1)));
+        drop(remade);
+    }
 
     /// The title writes a constant under a range an earlier list of the
     /// submission declared as written by shaders: the refresh before the
