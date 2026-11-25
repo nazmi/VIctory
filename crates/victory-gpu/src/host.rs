@@ -129,6 +129,17 @@ pub(crate) fn fail(what: std::fmt::Arguments) -> ! {
 /// How long one submission may take before the device is presumed lost.
 const WAIT_MS: u32 = 30_000;
 
+/// A removed device reports UINT64_MAX, not a successfully completed fence.
+fn submission_complete(
+    wait: windows::Win32::Foundation::WAIT_EVENT,
+    completed: u64,
+    submitted: u64,
+) -> bool {
+    wait == windows::Win32::Foundation::WAIT_OBJECT_0
+        && completed != u64::MAX
+        && completed >= submitted
+}
+
 /// The host GPU, created on first use; `None` without one (a run then
 /// behaves as before: nothing executes).
 pub(crate) fn host() -> Option<&'static Host> {
@@ -141,17 +152,6 @@ pub(crate) fn host() -> Option<&'static Host> {
         }
     })
     .as_ref()
-}
-
-/// Whether the shared device has been removed: a test that probes the GPU
-/// cannot observe anything on it afterwards, so it reports instead of failing
-/// with an error unrelated to what it checks. A real run stops at the first
-/// removal anyway (see [`Host::run`]).
-#[cfg(test)]
-pub(crate) fn device_gone() -> bool {
-    let Some(host) = host() else { return true };
-    // SAFETY: a plain query.
-    unsafe { host.device.GetDeviceRemovedReason() }.is_err()
 }
 
 fn create() -> windows::core::Result<Host> {
@@ -199,7 +199,9 @@ fn create() -> windows::core::Result<Host> {
         // Diagnostics: the software adapter, on which a shader's wild access
         // is an access violation in this process (a crash report with the
         // address and instruction) instead of a GPU fault and driver reset.
-        if cfg!(feature = "diagnostics") && std::env::var_os("VICTORY_D3D12_WARP").is_some() {
+        if cfg!(test)
+            || (cfg!(feature = "diagnostics") && std::env::var_os("VICTORY_D3D12_WARP").is_some())
+        {
             let adapter = warp_adapter()?;
             D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device)?;
             tracing::info!("host device on the software adapter (WARP)");
@@ -297,12 +299,101 @@ fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Execute one exact test in a fresh process. A D3D call can block before
+    /// the fence wait, so only the parent process can enforce this deadline.
+    /// Unit-test devices always use verified software WARP, even without the
+    /// diagnostics feature and regardless of inherited adapter switches.
+    pub(crate) fn isolated(name: &str) -> bool {
+        if std::env::var("VICTORY_GPU_TEST_CHILD").as_deref() == Ok(name) {
+            return true;
+        }
+        static SERIAL: Mutex<()> = Mutex::new(());
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let mut child = test_child(name);
+        let status = wait_child(&mut child, std::time::Duration::from_secs(60))
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(status.success(), "{name}: WARP subprocess failed: {status}");
+        false
+    }
+
+    fn test_child(name: &str) -> std::process::Child {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env("VICTORY_GPU_TEST_CHILD", name)
+            .spawn()
+            .expect("start isolated GPU test")
+    }
+
+    fn wait_child(
+        child: &mut std::process::Child,
+        timeout: std::time::Duration,
+    ) -> Result<std::process::ExitStatus, String> {
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Ok(status),
+                Ok(None) if start.elapsed() < timeout => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                result => {
+                    // Reap on timeout or polling error; never leave a wedged
+                    // WARP worker running after the parent reports failure.
+                    child.kill().expect("terminate GPU test subprocess");
+                    child.wait().expect("reap GPU test subprocess");
+                    return Err(format!(
+                        "subprocess did not finish within {timeout:?}: {result:?}"
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_successful_wait_and_completed_fence_allow_copyback() {
+        use windows::Win32::Foundation::{WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+        assert!(submission_complete(WAIT_OBJECT_0, 9, 9));
+        assert!(submission_complete(WAIT_OBJECT_0, 10, 9));
+        assert!(!submission_complete(WAIT_TIMEOUT, 9, 9));
+        assert!(!submission_complete(WAIT_FAILED, 9, 9));
+        assert!(!submission_complete(WAIT_OBJECT_0, 8, 9));
+        assert!(!submission_complete(WAIT_OBJECT_0, u64::MAX, 9));
+    }
+
+    #[test]
+    fn isolated_test_deadline_terminates_and_reaps_child() {
+        const NAME: &str = "host::tests::isolated_test_deadline_terminates_and_reaps_child";
+        if std::env::var("VICTORY_GPU_TEST_CHILD").as_deref() == Ok(NAME) {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            return;
+        }
+        let mut child = test_child(NAME);
+        assert!(wait_child(&mut child, std::time::Duration::from_millis(100)).is_err());
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn isolated_test_failure_is_not_success() {
+        const NAME: &str = "host::tests::isolated_test_failure_is_not_success";
+        if std::env::var("VICTORY_GPU_TEST_CHILD").as_deref() == Ok(NAME) {
+            panic!("synthetic child failure");
+        }
+        let mut child = test_child(NAME);
+        assert!(
+            !wait_child(&mut child, std::time::Duration::from_secs(10))
+                .unwrap()
+                .success()
+        );
+    }
 
     #[test]
     fn an_empty_submission_leaves_the_host_fence_untouched() {
-        let Ok(host) = create() else { return };
+        if !isolated("host::tests::an_empty_submission_leaves_the_host_fence_untouched") {
+            return;
+        }
+        let host = create().expect("WARP D3D12 device required");
         host.execute(&[]);
         let submitted = *host.submitted.lock().unwrap();
         // SAFETY: this test owns the fence and its event. execute waits for
@@ -725,25 +816,19 @@ impl Host {
                     .queue
                     .Signal(&self.fence, *submitted)
                     .and_then(|()| self.fence.SetEventOnCompletion(*submitted, self.event));
-                match waited {
-                    Ok(()) => {
-                        // Bounded: a device removed mid-submission never
-                        // signals its fence, and an unbounded wait then hangs
-                        // the process instead of reporting the loss. A world
-                        // frame is the slowest submission this project makes;
-                        // 30 s is far past it.
-                        let ms = WaitForSingleObject(self.event, WAIT_MS);
-                        if ms == windows::Win32::Foundation::WAIT_TIMEOUT {
-                            let reason = self.device.GetDeviceRemovedReason();
-                            tracing::error!(
-                                error = %reason.map_or_else(|e| e.to_string(), |()| "not removed".into()),
-                                ms = WAIT_MS,
-                                "host submission did not finish; the device may be lost"
-                            );
-                            break;
-                        }
-                    }
-                    Err(e) => tracing::warn!(error = %e, "host submission not waited for"),
+                if let Err(e) = waited {
+                    fail(format_args!("host submission fence setup failed: {e}"));
+                }
+                let result = WaitForSingleObject(self.event, WAIT_MS);
+                let completed = self.fence.GetCompletedValue();
+                // An event wake alone is insufficient: device removal sets
+                // the completed fence to UINT64_MAX. Never copy back or run
+                // bottom-of-pipe writes after a timeout or failed wait.
+                if !submission_complete(result, completed, *submitted) {
+                    fail(format_args!(
+                        "host submission did not complete: wait={result:?}, completed={completed}, expected={}, deadline={WAIT_MS} ms",
+                        *submitted
+                    ));
                 }
             }
             #[cfg(feature = "diagnostics")]

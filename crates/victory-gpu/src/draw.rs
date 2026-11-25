@@ -1972,37 +1972,10 @@ mod tests {
     use windows::Win32::Graphics::Direct3D::ID3DBlob;
     use windows::core::s;
 
-    /// One GPU test at a time. A test that wedges the adapter suspends the
-    /// device for the whole process, and a test running beside it then fails
-    /// on an error that has nothing to do with what it checks. Serialising
-    /// makes the first failure the only one.
-    fn serial() -> std::sync::MutexGuard<'static, ()> {
-        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// The host device, when these tests may drive it.
-    ///
-    /// They submit real command lists, and on some adapters that wedges the
-    /// driver *inside* a D3D12 call — the process stops answering rather than
-    /// failing, so no timeout and no assertion can report it (a Radeon 780M
-    /// does this on the placed-view format casts). Off by default, and turned
-    /// on with `VICTORY_GPU_TESTS=1` on a machine that can take it.
-    ///
-    /// A device removed earlier in the same process is also reported here:
-    /// nothing is observable on it, so failing would name an error that has
-    /// nothing to do with the behaviour under test.
-    fn device() -> Option<&'static crate::host::Host> {
-        if std::env::var_os("VICTORY_GPU_TESTS").is_none() {
-            eprintln!("SKIP: set VICTORY_GPU_TESTS=1 to drive the host GPU from these tests");
-            return None;
-        }
-        let host = crate::host::host()?;
-        if crate::host::device_gone() {
-            eprintln!("SKIP: the adapter suspended the device earlier in this process");
-            return None;
-        }
-        Some(host)
+    // Each GPU test runs on WARP in its own bounded process. Helpers must
+    // not acquire a second test lock: compile_cs is called inside the test.
+    fn device() -> &'static crate::host::Host {
+        crate::host::host().expect("WARP D3D12 device required for GPU regression tests")
     }
 
     /// Reads 16 dwords 64 bytes apart from `offset` past the root view
@@ -2026,8 +1999,7 @@ void main(uint3 id : SV_DispatchThreadID) {
 
     /// A compute shader with its root signature inside (`RS`).
     fn compile_cs(source: &str) -> (ID3D12RootSignature, ID3D12PipelineState) {
-        let _serial = serial();
-        let host = device().unwrap();
+        let host = device();
         let (mut code, mut errors): (Option<ID3DBlob>, Option<ID3DBlob>) = (None, None);
         // SAFETY: the source and names outlive the call.
         unsafe {
@@ -2116,10 +2088,12 @@ void main(uint3 id : SV_DispatchThreadID) {
     /// share its view.
     #[test]
     fn root_views_reach_their_copy_and_read_zeros_past_it() {
-        let _serial = serial();
-        let Some(host) = device() else {
-            return; // no host GPU here
-        };
+        if !crate::host::tests::isolated(
+            "draw::tests::root_views_reach_their_copy_and_read_zeros_past_it",
+        ) {
+            return;
+        }
+        let host = device();
         const MIB: u64 = 1 << 20;
         let (src, dst) = (buffer(4 * MIB), buffer(256));
         let (src_bytes, _) = crate::resource::buffer_bytes(src).unwrap();
@@ -2285,7 +2259,7 @@ void main(uint3 id : SV_DispatchThreadID) {
 
     impl Slots {
         fn new(n: u32) -> Self {
-            let host = device().unwrap();
+            let host = device();
             let desc = D3D12_DESCRIPTOR_HEAP_DESC {
                 Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
                 NumDescriptors: n,
@@ -2362,10 +2336,12 @@ void main(uint3 id : SV_DispatchThreadID) {
     /// bridged by a copy at the read.
     #[test]
     fn a_texture_written_in_one_format_reads_in_another_through_a_placed_view() {
-        let _serial = serial();
-        let Some(host) = device() else {
-            return; // no host GPU here
-        };
+        if !crate::host::tests::isolated(
+            "draw::tests::a_texture_written_in_one_format_reads_in_another_through_a_placed_view",
+        ) {
+            return;
+        }
+        let host = device();
         let slots = Slots::new(4);
         let read = compile_cs(READ);
         let (out, data) = host.shared_buffer(64 * 64 * 16).unwrap();
@@ -2409,10 +2385,13 @@ void main(uint3 id : SV_DispatchThreadID) {
             };
             let a = crate::resource::host_copy(object).unwrap();
             let b = crate::resource::host_copy(placed as This).unwrap();
+            // WARP/older runtimes can reject enhanced castable formats;
+            // the production path then uses alias_copy for this pair too.
+            let shared = shared && a.castable.contains(&format);
             assert_eq!(
                 std::sync::Arc::ptr_eq(&a, &b),
                 shared,
-                "round {round}: one host texture"
+                "round {round}: one host texture only when the host accepted the cast"
             );
             let unordered = View::Unordered(
                 object as usize,
@@ -2439,15 +2418,6 @@ void main(uint3 id : SV_DispatchThreadID) {
             );
             list.close();
             host.execute(&[&list]);
-            if crate::host::device_gone() {
-                // This adapter cannot survive this cast; nothing after it can
-                // be observed, so report which case did it rather than fail on
-                // an error that is not about the texels.
-                eprintln!(
-                    "SKIP round {round}: the adapter suspended the device on the {written}->{format} cast"
-                );
-                return;
-            }
             let copied = crate::texture::ALIAS_COPIES.load(Ordering::Relaxed) > copies;
             assert_eq!(
                 copied, !shared,
@@ -2471,10 +2441,12 @@ void main(uint3 id : SV_DispatchThreadID) {
     /// 16 bits.
     #[test]
     fn a_depth_texture_written_through_unordered_views_reads_as_depth() {
-        let _serial = serial();
-        let Some(host) = device() else {
-            return; // no host GPU here
-        };
+        if !crate::host::tests::isolated(
+            "draw::tests::a_depth_texture_written_through_unordered_views_reads_as_depth",
+        ) {
+            return;
+        }
+        let host = device();
         let slots = Slots::new(4);
         let address = title_memory(1 << 22);
         let depth = texture_at_address(address, &texture_words(64, 64, 118, 0, 2));
@@ -2677,10 +2649,12 @@ void main(uint3 id : SV_DispatchThreadID) {
     /// every depth slice, -1), and a shader view reads it.
     #[test]
     fn unordered_1d_and_3d_textures_keep_their_writes() {
-        let _serial = serial();
-        let Some(host) = device() else {
-            return; // no host GPU here
-        };
+        if !crate::host::tests::isolated(
+            "draw::tests::unordered_1d_and_3d_textures_keep_their_writes",
+        ) {
+            return;
+        }
+        let host = device();
         let slots = Slots::new(2);
         let (out, data) = host.shared_buffer(64 * 64 * 16).unwrap();
         // Description words (dimension, width, height, depth | mips << 16,
@@ -2747,10 +2721,12 @@ void main(uint3 id : SV_DispatchThreadID) {
     /// bytes; one on an element views the buffer's copy.
     #[test]
     fn structured_views_off_their_buffers_elements_get_their_own_copy() {
-        let _serial = serial();
-        let Some(host) = device() else {
-            return; // no host GPU here
-        };
+        if !crate::host::tests::isolated(
+            "draw::tests::structured_views_off_their_buffers_elements_get_their_own_copy",
+        ) {
+            return;
+        }
+        let host = device();
         let src = buffer(1 << 16);
         let (bytes, _) = crate::resource::buffer_bytes(src).unwrap();
         let start = bytes as u64;
