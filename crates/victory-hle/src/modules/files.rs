@@ -169,6 +169,16 @@ pub(crate) fn translate(path: &[u16]) -> Option<Vec<u16>> {
     let drives = drives();
     let (_, root) = drives.iter().find(|(l, _)| *l == letter)?;
     let tail = &rest[2..];
+    if !prefix.is_empty() {
+        // Extended paths disable host cleanup. Resolve dot parts against
+        // the virtual root, as for long paths, and keep root separators.
+        let mut out = verbatim(root, tail);
+        if parts(tail).is_empty() || tail.last().is_some_and(|c| SEPARATORS.contains(c)) {
+            out.push(b'\\'.into());
+        }
+        out.push(0);
+        return Some(out);
+    }
     if prefix.is_empty() && root.len() + tail.len() >= LONG {
         let mut out = verbatim(root, tail);
         out.push(0);
@@ -1050,5 +1060,40 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, ["present.txt"]);
+    }
+
+    /// A title that already uses `\\?\` must get the same clean-up as a
+    /// long non-extended path: that form turns off the host's own resolution.
+    #[test]
+    fn extended_paths_clean_dot_parts() {
+        let dir = tempfile::tempdir().unwrap();
+        mount_at('J', dir.path());
+        let tr = |s: &str| translate(&w(s)[..s.encode_utf16().count()]).map(|v| text(&v));
+        let root = dir.path().display();
+        assert_eq!(
+            tr(r"\\?\J:/a/./b/../f.txt"),
+            Some(format!(r"\\?\{root}\a\f.txt"))
+        );
+        assert_eq!(tr(r"\\?\J:"), Some(format!(r"\\?\{root}\")));
+        assert_eq!(tr(r"\\?\J:name"), Some(format!(r"\\?\{root}\name")));
+        assert_eq!(tr(r"\\?\J:/a/b"), Some(format!(r"\\?\{root}\a\b")));
+    }
+
+    #[test]
+    fn extended_paths_keep_host_root_forms() {
+        let tr = |s: &str| translate(&s.encode_utf16().collect::<Vec<_>>()).map(|v| text(&v));
+        for (root, expected) in [
+            (r"C:\", r"\\?\C:"),
+            (r"\\?\C:\", r"\\?\C:"),
+            (r"\\server\share", r"\\?\UNC\server\share"),
+            (r"\\?\UNC\server\share", r"\\?\UNC\server\share"),
+        ] {
+            mount_at('J', Path::new(root));
+            for tail in ["", "/", "/.", "/..", "/a/.."] {
+                assert_eq!(tr(&format!(r"\\?\J:{tail}")), Some(format!(r"{expected}\")));
+            }
+            assert_eq!(tr(r"\\?\J:/a/"), Some(format!(r"{expected}\a\")));
+            assert_eq!(tr(r"\\?\J:/a/./b/../f"), Some(format!(r"{expected}\a\f")));
+        }
     }
 }
