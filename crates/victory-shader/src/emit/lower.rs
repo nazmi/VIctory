@@ -2801,8 +2801,8 @@ impl<'a> Lower<'a> {
     // counts if that shows in frame time.
     fn mesh_prologue(&mut self, mesh: super::shader::Mesh) -> Result<(), Why> {
         let threads = self.s.threads.expect("mesh")[0];
-        if mesh.topology != 2 {
-            return Err("a mesh shader not drawing triangles");
+        if corners(mesh.topology).is_none() {
+            return Err("a mesh shader drawing neither lines nor triangles");
         }
         if threads > 128 || mesh.max_vertices > 256 || mesh.max_primitives > 256 {
             return Err("a mesh shader beyond the host's limits");
@@ -2819,14 +2819,7 @@ impl<'a> Lower<'a> {
         let guard = (threads > mesh.max_primitives).then(|| self.s.m.cmp(e, pred::IULT, flat, p));
         let at = self.begin_guarded(guard);
         let z = self.s.m.i32(0);
-        self.s.op(
-            self.cur,
-            "emitIndices",
-            Attr::NoUnwind,
-            void,
-            169,
-            &[flat, z, z, z],
-        );
+        self.emit_primitive(flat, &[z; 3]);
         self.end_guarded(at, &[]);
         Ok(())
     }
@@ -9111,7 +9104,7 @@ impl<'a> Lower<'a> {
     }
 
     /// Mesh: `exp prim` as the lane's primitive. Bit 31 culls it (all
-    /// indices 0: no area).
+    /// indices 0: no area). Edge flags at bits 9, 19 and 29 are discarded.
     fn emit_indices(&mut self, e: &Export, guard: Option<V>) -> Result<(), Why> {
         let v = e.values[0].ok_or("a primitive export without its indices")?;
         let x = self.i32_of(v)?;
@@ -9119,18 +9112,33 @@ impl<'a> Lower<'a> {
         let c = self.cur;
         let z = self.s.m.i32(0);
         let culled = self.s.m.cmp(c, pred::SLT, x, z);
-        let mut args = vec![self.mesh_thread()];
-        for k in 0..3 {
-            let (shift, mask) = (self.s.m.i32(10 * k), self.s.m.i32(0x3FF));
+        // A vertex index every 10 bits, as many as the topology's corners.
+        let n = self.s.mesh.and_then(|m| corners(m.topology)).unwrap_or(3);
+        let mut indices = Vec::new();
+        for k in 0..n {
+            let (shift, mask) = (self.s.m.i32(10 * k), self.s.m.i32(0x1FF));
             let i = self.s.m.bin(c, Bin::LShr, x, shift);
             let i = self.s.m.bin(c, Bin::And, i, mask);
-            args.push(self.s.m.select(c, culled, z, i));
+            indices.push(self.s.m.select(c, culled, z, i));
         }
-        let void = self.s.t.void;
-        self.s
-            .op(c, "emitIndices", Attr::NoUnwind, void, 169, &args);
+        let prim = self.mesh_thread();
+        self.emit_primitive(prim, &indices);
         self.end_guarded(at, &[]);
         Ok(())
+    }
+
+    /// `dx.op.emitIndices` for primitive `prim` from its vertex `indices`
+    /// (the first two of a line, the first three of a triangle). DXIL takes
+    /// three either way: a line leaves the third undefined (the validator
+    /// takes that for a line topology).
+    fn emit_primitive(&mut self, prim: V, indices: &[V]) {
+        let n = self.s.mesh.and_then(|m| corners(m.topology)).unwrap_or(3) as usize;
+        let undef = self.s.m.undef(self.s.t.i32);
+        let mut args = vec![prim];
+        args.extend((0..3).map(|k| if k < n { indices[k] } else { undef }));
+        let void = self.s.t.void;
+        self.s
+            .op(self.cur, "emitIndices", Attr::NoUnwind, void, 169, &args);
     }
 
     /// The per-vertex arbitrary row no mesh output entry names but one
@@ -9681,6 +9689,16 @@ impl<'a> Lower<'a> {
             self.s.m.set_phi(v, incoming);
         }
         Ok(())
+    }
+}
+
+/// Vertices per primitive of a mesh output topology (the console's and
+/// DXIL's numbering agree: 1 lines, 2 triangles); none for the others.
+fn corners(topology: u8) -> Option<u32> {
+    match topology {
+        1 => Some(2),
+        2 => Some(3),
+        _ => None,
     }
 }
 

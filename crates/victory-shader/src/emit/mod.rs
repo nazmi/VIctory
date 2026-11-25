@@ -160,7 +160,7 @@
 //!   the pipeline is a mesh pipeline (pipeline-state stream, no input
 //!   layout) with the title's pixel shader. The thread group is the
 //!   console's in lanes (`[numthreads]` in the DXIL), the vertex and
-//!   primitive maxima its own, triangles only, no wave size required. The
+//!   primitive maxima its own, lines or triangles, no wave size required. The
 //!   console numbers groups in x only: the draw path passes the title's
 //!   count as `DispatchMesh(x, 1, 1)`. Per-primitive outputs (`PSG1`) are
 //!   the console's, without `SV_PrimitiveID` and `SV_CullPrimitive` (the
@@ -1221,6 +1221,118 @@ mod tests {
             "clamp saturates the result"
         );
         assert!(!low.contains("dx.op.unary.f32(i32 7"));
+    }
+
+    /// A one-wave (32-lane) mesh program of `topology` whose lanes all
+    /// export primitive `prim` (vertex indices every 10 bits, bit 31
+    /// culls) and, as vertex `lane`, the position (x, -0.0625, 0.5, 1) with
+    /// x = -0.9 for even lanes and 0.9 for odd ones: primitive 0x400 is the
+    /// segment from vertex 0 to vertex 1 through the texel centres of row 8
+    /// of a 16x16 target.
+    fn line_mesh(topology: u8, prim: u32) -> Result<HostShader, ShaderError> {
+        let words = [
+            0xD765_0001u32, // v_mbcnt_lo_u32_b32 v1, -1, 0
+            0x0001_00C1,
+            0x3604_0281, // v_and_b32 v2, 1, v1
+            0x7E04_0D02, // v_cvt_f32_u32 v2, v2
+            0x1006_04FF, // v_mul_f32 v3, 1.8, v2
+            0x3FE6_6666,
+            0x0606_06FF, // v_add_f32 v3, -0.9, v3
+            0xBF66_6666,
+            0x7E08_02FF, // v_mov_b32 v4, -0.0625
+            0xBD80_0000,
+            0x7E0E_02F0, // v_mov_b32 v7, 0.5
+            0x7E10_02F2, // v_mov_b32 v8, 1.0
+            0x7E12_02FF, // v_mov_b32 v9, prim
+            prim,
+            0xF800_0941, // exp prim v9, off, off, off done
+            0x0000_0009,
+            0xF800_08CF, // exp pos0 v3, v4, v7, v8 done
+            0x0807_0403,
+            0xBF81_0000, // s_endpgm
+        ];
+        let native = NativeProgram {
+            stage: HwStage::Ms,
+            wave64: false,
+            vgprs: 10,
+            layout: vec![],
+            used: vec![],
+            io: crate::native::StageIo::Ms(crate::native::MeshIo {
+                outputs: vec![],
+                clip_cntl: 0,
+                threads: 32,
+                max_vertices: 32,
+                max_primitives: 32,
+                topology,
+                lds_bytes: 0,
+            }),
+            code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        };
+        let position = SigElement {
+            name: "SV_Position".into(),
+            index: 0,
+            kind: 3,
+            comp: 9,
+            interp: 0,
+            row: Some(0),
+            col: 0,
+            cols: 4,
+            usage: 0xF,
+            half: false,
+        };
+        let osg1 = container::signature(&[position], false);
+        let bytes = crate::dxbc::build(&[(FourCC::OSG1, &osg1)]);
+        let c = Container::parse(&bytes)?;
+        let p = ir::build(&native.patched_code(), native.wave64, native.vgprs)?;
+        let st = structure::structure(&p)?;
+        let res = resource::track(&p, &native.layout, native.stage, Some(&st))?;
+        let io = io::raise(&p, &native)?;
+        emit(&c, &native, &p, &st, &io, &res)
+    }
+
+    /// Mesh programs drawing lines (topology 1) translate as well as
+    /// triangle ones: a line's export carries two vertex indices, DXIL's
+    /// `emitIndices` takes them with the third undefined, and the mesh
+    /// state and PSV0 say "line". dxil.dll, where there is one, checks the
+    /// module. Topologies other than lines and triangles stay refused.
+    #[test]
+    fn mesh_programs_draw_lines_or_triangles() {
+        #[cfg(windows)]
+        let mut validator = super::validator::Validator::load(
+            super::validator::Validator::default_path().as_deref(),
+        )
+        .ok();
+        for topology in [1, 2] {
+            for prim in [0x400, 0x0008_0600, 0x8008_0600] {
+                let ms = line_mesh(topology, prim)
+                    .unwrap_or_else(|e| panic!("topology {topology}, {prim:#x}: {e}"));
+                #[cfg(windows)]
+                if let Some(v) = validator.as_mut() {
+                    v.validate(&mut ms.dxil.clone())
+                        .unwrap_or_else(|e| panic!("topology {topology}, {prim:#x}: {e}"));
+                }
+                #[cfg(windows)]
+                if let Some(text) = dump_dxil(&ms.dxil) {
+                    let calls: Vec<_> = text.lines().filter(|l| l.contains("call void @dx.op.emitIndices")).collect();
+                    assert!(!calls.is_empty());
+                    if topology == 1 {
+                        assert!(calls.iter().all(|l| l.contains("i32 undef")), "{text}");
+                    }
+                    let masks = text.lines().filter(|l| l.contains(" = and i32") && l.ends_with(", 511")).count();
+                    assert_eq!(masks, if topology == 1 { 2 } else { 3 }, "{text}");
+                    assert!(!text.contains(", 1023"), "edge bits are not vertex indices");
+                }
+                // PSV0's mesh info (after the 4-byte size): byte 27 is the
+                // output topology.
+                let c = Container::parse(&ms.dxil).unwrap();
+                let psv = c.part(FourCC::PSV0).unwrap().data;
+                assert_eq!(psv[4 + 27], topology);
+            }
+        }
+        for topology in [0, 3] {
+            let e = line_mesh(topology, 0x400).unwrap_err();
+            assert!(e.to_string().contains("neither lines nor triangles"), "{e}");
+        }
     }
 
     /// A pixel shader reading channel z of an input whose element starts at
