@@ -1462,3 +1462,23 @@ tests need a machine that can take them.
 **Process lesson.** The skip list was the wrong tool. "Fails on upstream too"
 is a fact about where a defect lives, not a reason to stop looking; two runs
 with `--nocapture` and one test at a time found both causes in under an hour.
+
+## Handoff: 2026-11-25 00:32 UTC
+
+Session ends here, off-peak (next peak 01:00 UTC). `docs/HANDOFF.md` is
+self-contained for whoever picks this up: current commit, gate, the open
+decision, the traps, and the queue. Written to be verified rather than
+trusted — it opens with the commands to check it.
+
+Published state: `integration/maintenance` at `04683631`, identical on
+`origin`, `upstream/main` (`70564ae0`) an ancestor, 414 commits ahead,
+234 of 1,057 open PRs integrated, 765 stated as never reviewed, workspace
+**703 passed / 0 failed**, fmt and both Clippy gates clean, policy 220 files.
+
+The two corrections this final pass needed: two recovery SHAs in the handoff's
+table were written from memory and were wrong (`b7180c2e`, `e99ef9a8`,
+`f0c8f9b2`); the real ones are `7180c20e` and `e2f67a49`/`09f17be6`. Caught by
+checking each against `git log` before committing the file, which is the whole
+reason the handoff opens with verification commands instead of assertions.
+
+Nothing was pushed upstream. No PR, issue, or comment was opened anywhere.
