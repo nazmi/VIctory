@@ -1,5 +1,8 @@
 # Handoff: continue the VIctory maintenance sweep
 
+**Ztrx selective ports now landed:** see [the integration review](ztrx-integration-review.md) for accepted no-ff commits,739-test gate and held source features.
+
+
 **Resumed 2026-11-25:** the hanging-test repair and beneficial merge recoveries
 have landed locally on `integration/maintenance`. The decision table below is
 historical; see the repair update in `docs/discarded-features-check.md` and the
@@ -146,8 +149,10 @@ failure mode this session spent its time rejecting.
 
 ## Operating constraints
 
-- **Off-peak only.** Peak is 01:00–04:00 and 06:00–10:00 UTC, Monday–Friday,
-  excluding Chinese public holidays. Record the check with each pass.
+- **DeepSeek off-peak only.** The user clarified that this restriction applies
+  only to DeepSeek. Codex may continue at any time. For DeepSeek, peak windows
+  are 01:00-04:00 and 06:00-10:00 UTC on weekdays, excluding Chinese holidays.
+
 - **Do not run the title on this machine.** The display driver has been removed
   as hung three times. Use `VICTORY_D3D12_WARP=1` or the offline
   `victory translate` path, which needs no GPU.

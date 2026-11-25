@@ -1679,3 +1679,43 @@ concurrent reservations total at most one frame budget, unused time returned,
 old-frame refunds cannot affect the new frame, zero disables waiting, existing
 workers/cache records remain intact. Add isolated tests, run source/candidate
 and full coordinator gate, no-ff merge if accepted.
+
+## Ztrx integration outcome
+
+Pinned source90b529f8 unchanged. Accepted code is merged locally with two
+explicit no-ff commits: pipeline budget `58e9182c` (candidate5d3b4977) and
+launcher `7eedff93` (candidate1684dda1). Full candidate-file review2/2, none
+skipped; source tests3/0 for pipeline make and2/0 for threading proof. Threading
+acceptance stayed held because both witnesses already emit on current code.
+
+Pipeline: documented wait switch now actually reads the environment, shared
+reservations prevent multiplying budget across recording threads, unused time
+returns to the same frame, stale recorders cannot reset a newer frame's budget.
+Five new tests; concurrent-reservation and stale-frame mutations each fail
+exit101. Source-shaped worker queue, old state tracking and cache metadata
+were deliberately retained from our newer local architecture. Initial
+candidatecbc3793d had inaccurate source references in its message; replaced
+message-only by5d3b4977 with exact source SHAs/authors, then revalidated the
+combined tree before merge.
+
+Launcher: normal-play entry uses VIctory cache/data, respects literal paths,
+clears inherited scripted input/captures and preserves native exit status.
+Source/candidate/integrated script tested with a synthetic Rust executable,
+not a title: source script exits0 for child7, candidate/merged script exit7.
+Argument boundaries, paths, cleared diagnostics, retained wave64 safety setting
+and missing executable were verified. Source/copied/fake outputs remain outside
+repo. PowerShell parser accepts the merged script.
+
+Full integration gate for EACH candidate: fmt0, Clippy default0, Clippy all
+features0, workspace tests0, policy0. Parent harness summaries total739 passed,
+0 failed,11 existing ignores. Candidate GPU diagnostics125 passed/0 failed,
+1 existing benchmark ignored. Final code policy225 files before review doc.
+No title or new physical GPU workload executed; WARP covers new GPU cases;
+mesh shader rendering unsupported here. Final source/decisions/dependencies
+and exact logs are in `docs/ztrx-integration-review.md`.
+
+Larger source GPU/IR changes and approximation switches remain held with
+explicit reasons. This is a selective integration, not a wholesale fork merge
+or a claim that source gameplay results transfer to this machine. Pending PR
+work (#1324 ready branch; #1436/#1432/#1032 clean unstarted branches) remains
+separate from this user-requested source integration.

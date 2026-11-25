@@ -238,3 +238,14 @@ Worker follow-up requests #1436/#1432/#1032 produced no commits (usage-limit
 errors before execution); source/candidate worktrees for those remain clean.
 Coordinator #1324 candidate `7f94c8f1` intentionally remains unmerged on its
 review branch while user-requested ztrx comparison takes priority.
+
+## Ztrx source integration accounting
+
+Coordinator performed review/testing after additional worker turns hit their
+usage limits; no worker output was invented. Pipeline candidate5d3b4977 is
+fully integrated in58e9182c; launcher candidate1684dda1 in7eedff93. Source
+attribution retained, both merges no-ff and separately gated. The superseded
+cbc3793d had a message-only attribution correction, named in the review log.
+Unmerged shader-threading scratch is intentional: source proof tests pass,
+but current code already emits the tested witnesses, so acceptance has not
+been demonstrated. It is not silently dropped or counted as integrated.
