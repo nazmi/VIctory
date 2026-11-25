@@ -7248,7 +7248,8 @@ impl<'a> Lower<'a> {
                 if f16 {
                     let lo = half(self, h + u8::from(attribute.high))?
                         .ok_or("a packed input half no element holds")?;
-                    self.low_half(inst, reg, lo)
+                    let lo = self.half_modifiers(inst, lo);
+                    return self.write_half(inst, lo, None);
                 } else if mode == 1 {
                     // The whole dword of a flat input: both halves.
                     let z = self.s.m.i32(0);
@@ -7367,6 +7368,32 @@ impl<'a> Lower<'a> {
         let old = self.s.m.bin(c, Bin::And, old, high);
         let x = self.s.m.bin(c, Bin::And, x, low);
         self.s.m.bin(c, Bin::Or, old, x)
+    }
+
+    /// VOP3 f16 output modifiers: omod, then clamp, applied in f32 so the
+    /// half conversion rounds once (the order `write_f` uses).
+    fn half_modifiers(&mut self, inst: &Inst, h: V) -> V {
+        let Fields::Valu(v) = &inst.fields else {
+            return h;
+        };
+        if v.omod == 0 && !v.clamp {
+            return h;
+        }
+        let c = self.cur;
+        let f32t = self.s.t.f32;
+        let mut f = self
+            .s
+            .op(c, "legacyF16ToF32", Attr::ReadNone, f32t, 131, &[h]);
+        if v.omod != 0 {
+            let factor = [1.0f32, 2.0, 4.0, 0.5][usize::from(v.omod)];
+            let k = self.s.m.f32(factor.to_bits());
+            f = self.s.m.bin(c, Bin::Mul, f, k);
+        }
+        if v.clamp {
+            f = self.unary(7, f);
+        }
+        self.s
+            .op(c, "legacyF32ToF16", Attr::ReadNone, self.s.t.i32, 130, &[f])
     }
 
     fn image(&mut self, inst: &Inst, b: usize, i: usize) -> Result<(), Why> {
