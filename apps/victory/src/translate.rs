@@ -3,8 +3,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
 use victory_shader::emit::host::{self, Host};
@@ -531,6 +531,28 @@ pub(crate) fn report<T>(
     eprintln!("{}{}", if terminal { "\r" } else { "" }, line());
 }
 
+/// Containers to translate, by hash prefix (`VICTORY_TRANSLATE_ONLY=a1b2,c3d4`).
+///
+/// Empty translates everything, which is the normal case. The hash is the one
+/// `--list` prints and that a run's `does not translate` line carries as
+/// `hash=`, so a refusal seen in a run can be pasted here to translate that
+/// one container alone — the reason this exists: a full sweep takes minutes
+/// and buries the shader you are working on among thousands.
+fn translate_only(value: Option<&str>) -> Vec<String> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .map(|h| h.trim().to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect()
+}
+
+/// [`translate_only`] of the environment, read once.
+fn only_containers() -> &'static [String] {
+    static ONLY: OnceLock<Vec<String>> = OnceLock::new();
+    ONLY.get_or_init(|| translate_only(std::env::var("VICTORY_TRANSLATE_ONLY").ok().as_deref()))
+}
+
 fn translate(
     source: &Source,
     path: &Path,
@@ -543,7 +565,16 @@ fn translate(
         return t.fail("corrupt record".into(), location);
     };
     let list = t.list;
-    let hash = list.then(|| blake3::hash(&bytes).to_hex().to_string());
+    let only = only_containers();
+    // The hash is also needed to filter, so it is computed when either asks.
+    let hash = (list || !only.is_empty()).then(|| blake3::hash(&bytes).to_hex().to_string());
+    if !only.is_empty()
+        && !hash
+            .as_ref()
+            .is_some_and(|h| only.iter().any(|prefix| h.starts_with(prefix.as_str())))
+    {
+        return;
+    }
     let example = || {
         let location = location();
         match &hash {
@@ -962,6 +993,23 @@ mod tests {
                 Some(victory_core::PolicyError::InsideRepo { .. })
             ),
             "{err}"
+        );
+    }
+
+    use super::translate_only;
+
+    #[test]
+    fn translate_only_reads_hash_prefixes() {
+        // Unset or empty: everything translates.
+        assert!(translate_only(None).is_empty());
+        assert!(translate_only(Some("")).is_empty());
+        assert!(translate_only(Some(" , ,")).is_empty());
+        // One or more prefixes, trimmed and lower-cased, so a hash copied from
+        // a log in either case matches.
+        assert_eq!(translate_only(Some("A1B2")), ["a1b2"]);
+        assert_eq!(
+            translate_only(Some(" a1b2 , 3c4d ")),
+            ["a1b2".to_string(), "3c4d".to_string()]
         );
     }
 

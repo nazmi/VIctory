@@ -283,6 +283,7 @@ The on/off switches below (`...=1`) are off when unset or set to `0`.
 | `VICTORY_SHADER_LOOP_LIMIT=<n>` | translated shader loops stop after `n` iterations per lane instead of 2^20 (own shader cache entries); if a lower `n` makes world frames much faster, loops hitting the limit are what makes them slow |
 | `VICTORY_AUDIO_CAPTURE=<file.wav>` | records what the title plays (our process only) |
 | `VICTORY_XMA_DUMP=<dir>` | saves the first 32 XMA voices' context and input |
+| `VICTORY_TRANSLATE_ONLY=<hash>,...` | `victory translate` translates only the containers whose hash starts with one of these prefixes (the `hash=` a run log prints, and what `--list` shows); unset translates everything |
 
 Every build appends crashes and host GPU failures to `crashes.log` in the
 title's data folder.
