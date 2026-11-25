@@ -1729,3 +1729,49 @@ that off-peak scheduling applies only to DeepSeek. The complete ztrx fork is
 not merged; larger GPU/IR work remains documented as held. No push requested
 or performed. Handoff is documentation-only; prior integration checks remain
 the applicable code validation.
+
+### Resumed: pending review items closed, ztrx features verified: 2026-11-25
+
+Off-peak (11:00 UTC Wednesday). Local branch was 41 commits ahead of `origin`;
+no push was made in this pass (see the handoff).
+
+**PR #1324 landed.** `Pipeline: distinguish staging writes from publication
+races` (source `8f28c35a`). A failed staging write now removes its temp file and
+returns its own error instead of being indistinguishable from a publication
+race; the held-reader regression additionally proves an open reader blocks
+replacement. Candidate `7f94c8f1` → merge `e63b9e61`. Crate tests 9/0, combined
+gate 752 passed, 0 failed.
+
+**PR #1432 landed.** `HLE: set ERROR_PROC_NOT_FOUND for missing pseudo-module
+exports` (source `f30681c6`). Both not-found paths now set Win32 error 127. The
+merge conflicted because this tree *resolves* ordinal exports where the PR's
+base refused them; our lookup was kept and the error added to its miss path.
+Negative control: removing both `set_last_error` calls makes the new test fail
+with `left: 0, right: 127`. Merge `fd775f03`, combined gate 753 passed.
+
+**PR #1032 landed.** `GPU: cap oversized sampler heaps` + `log requested
+descriptor heap sizes` (source `b38a3c9f`). D3D12 caps shader-visible sampler
+heaps at 2048 on every binding tier; a title asking for more lost the heap
+entirely, and with it every sampler binding. The request is now capped at 2048,
+which is exactly what `HEAP_SAMPLERS` already clamps translated shader
+indices to, so no reachable slot is lost. Extracted
+`sampler_slots()` so the decision is testable without a GPU, with a test that
+also asserts the cap equals `emit::HEAP_SAMPLERS`. Merge `a16cb124`, combined
+gate 754 passed, 0 failed.
+
+**PR #1436 is closed upstream** (obsolete; the SGD5 bounds work it proposed is
+not open for integration).
+
+**ztrx features: verified present and working, not merely present.**
+
+| Feature | Evidence it works |
+| --- | --- |
+| `VICTORY_PIPELINE_WAIT_MS` wait budgets | `pipeline::make` tests 8/8 pass, including `unused_wait_time_returns_to_the_same_frame_only`, `an_old_recording_thread_cannot_reset_a_new_frames_budget`, `concurrent_waiters_share_one_frame_allowance`, `a_zero_wait_switch_reaches_the_submission_wait_path` |
+| `scripts/play.ps1` launcher | parses clean under the PowerShell parser; it clears inherited scripted-input/capture switches and returns the title's exit status |
+
+The rest of ztrx is **not** a set of cheap ports. A declaration sweep of its 93
+changed files finds **575 functions, constants and statics that exist only
+there** — the threading, memory instrumentation, ray-tracing, in-place-memory
+and optimizer bodies the review already held as coupled work needing
+independent semantic ports. Nothing was imported from those for this pass, and
+`docs/ztrx-integration-review.md` remains the record of why.
