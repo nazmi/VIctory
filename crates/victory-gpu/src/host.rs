@@ -2501,6 +2501,20 @@ impl Meter {
             {
                 let copy_frames = std::mem::take(&mut self.copy_stats_frames) as f64;
                 crate::copystat::log(copy_frames);
+                // How the refreshes are cut up: the kernel call per run is
+                // what a frame's copies cost, so the average size is the
+                // number to watch (VICTORY_COPY_SLACK trades extra bytes
+                // for fewer calls).
+                let calls = crate::shadow::COPY_CALLS.swap(0, Ordering::Relaxed);
+                let bytes = crate::shadow::COPY_BYTES.swap(0, Ordering::Relaxed);
+                if calls > 0 {
+                    tracing::info!(
+                        "refresh copies: {:.0} per frame, {:.1} KB each, {:.1} MB per frame",
+                        calls as f64 / copy_frames,
+                        bytes as f64 / 1e3 / calls as f64,
+                        bytes as f64 / 1e6 / copy_frames
+                    );
+                }
                 crate::bindless::log(copy_frames);
                 crate::shadow::log_views(copy_frames);
                 for (why, n) in drops.iter().take(40) {

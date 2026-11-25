@@ -627,10 +627,17 @@ impl Shadow {
         let (from, to) = (from.max(start), to.min(end));
         // SAFETY: inside the mapping (`from` and `to` are within the buffer).
         let at = unsafe { self.data.add(from - start) };
+        COPY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        COPY_BYTES.fetch_add((to - from) as u64, std::sync::atomic::Ordering::Relaxed);
         crate::host::copy_mapped(at, from as *const u8, to - from, false);
         to - from
     }
 }
+
+/// Copies made, and the bytes in them (diagnostics: the average run is what
+/// the kernel calls cost).
+pub(crate) static COPY_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static COPY_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Drop for Shadow {
     fn drop(&mut self) {
